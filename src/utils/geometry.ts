@@ -6,6 +6,7 @@ import {
   DraftingSettings,
   GripHandle,
   GroupEntity,
+  HatchEntity,
   LineEntity,
   Point,
   PolylineEntity,
@@ -352,6 +353,16 @@ export function getEntitySegments(entity: CadEntity): Array<[Point, Point]> {
       }
       return segs;
     }
+    case 'hatch': {
+      if (entity.boundaryType === 'polygon' && entity.points && entity.points.length >= 2) {
+        const segs: Array<[Point, Point]> = [];
+        for (let i = 0; i < entity.points.length; i++) {
+          segs.push([entity.points[i], entity.points[(i + 1) % entity.points.length]]);
+        }
+        return segs;
+      }
+      return [];
+    }
     case 'group': {
       const segs: Array<[Point, Point]> = [];
       for (const child of entity.children) {
@@ -362,6 +373,242 @@ export function getEntitySegments(entity: CadEntity): Array<[Point, Point]> {
     default:
       return [];
   }
+}
+
+/**
+ * Compute 45° (or custom angle) parallel hatch segments clipped to a HatchEntity boundary.
+ */
+export function getHatchSegments(entity: HatchEntity): Array<[Point, Point]> {
+  const pitch = Math.max(0.2, entity.pitch || 5);
+  const angleRad = ((entity.angle ?? 45) * Math.PI) / 180;
+  const dirX = Math.cos(angleRad);
+  const dirY = Math.sin(angleRad);
+  const normX = -dirY;
+  const normY = dirX;
+
+  if (
+    entity.boundaryType === 'circle' &&
+    entity.center &&
+    entity.radius &&
+    entity.radius > 0
+  ) {
+    const cx = entity.center.x;
+    const cy = entity.center.y;
+    const r = entity.radius;
+    const segs: Array<[Point, Point]> = [];
+    const maxLines = 600;
+    const effectivePitch = Math.max(pitch, (2 * r) / maxLines);
+
+    const kStart = Math.ceil(-r / effectivePitch);
+    const kEnd = Math.floor(r / effectivePitch);
+
+    for (let k = kStart; k <= kEnd; k++) {
+      const d = k * effectivePitch;
+      if (Math.abs(d) >= r - 1e-4) continue;
+      const halfChord = Math.sqrt(Math.max(0, r * r - d * d));
+      const basePtX = cx + d * normX;
+      const basePtY = cy + d * normY;
+      segs.push([
+        { x: basePtX - halfChord * dirX, y: basePtY - halfChord * dirY },
+        { x: basePtX + halfChord * dirX, y: basePtY + halfChord * dirY },
+      ]);
+    }
+    return segs;
+  }
+
+  if (
+    entity.boundaryType === 'polygon' &&
+    entity.points &&
+    entity.points.length >= 3
+  ) {
+    const pts = entity.points;
+    let minProj = Infinity;
+    let maxProj = -Infinity;
+    for (const p of pts) {
+      const proj = p.x * normX + p.y * normY;
+      if (proj < minProj) minProj = proj;
+      if (proj > maxProj) maxProj = proj;
+    }
+    const span = maxProj - minProj;
+    if (span <= 1e-4) return [];
+
+    const maxLines = 600;
+    const effectivePitch = Math.max(pitch, span / maxLines);
+    const kStart = Math.ceil(minProj / effectivePitch);
+    const kEnd = Math.floor(maxProj / effectivePitch);
+
+    const edges: Array<[Point, Point]> = [];
+    for (let i = 0; i < pts.length; i++) {
+      edges.push([pts[i], pts[(i + 1) % pts.length]]);
+    }
+
+    const segs: Array<[Point, Point]> = [];
+    for (let k = kStart; k <= kEnd; k++) {
+      const cVal = k * effectivePitch;
+      const tHits: number[] = [];
+
+      for (const [a, b] of edges) {
+        const na = a.x * normX + a.y * normY;
+        const nb = b.x * normX + b.y * normY;
+        if ((na <= cVal && nb > cVal) || (nb <= cVal && na > cVal)) {
+          const frac = (cVal - na) / (nb - na);
+          const ix = a.x + frac * (b.x - a.x);
+          const iy = a.y + frac * (b.y - a.y);
+          const t = ix * dirX + iy * dirY;
+          tHits.push(t);
+        }
+      }
+
+      tHits.sort((a, b) => a - b);
+      for (let i = 0; i + 1 < tHits.length; i += 2) {
+        const t1 = tHits[i];
+        const t2 = tHits[i + 1];
+        if (Math.abs(t2 - t1) > 1e-3) {
+          segs.push([
+            { x: cVal * normX + t1 * dirX, y: cVal * normY + t1 * dirY },
+            { x: cVal * normX + t2 * dirX, y: cVal * normY + t2 * dirY },
+          ]);
+        }
+      }
+    }
+    return segs;
+  }
+
+  return [];
+}
+
+/**
+ * Create a HatchEntity from a target closed entity or a connected loop of lines/polylines.
+ */
+export function createHatchFromEntities(
+  targetEntities: CadEntity[],
+  pitch: number,
+  layerId: string
+): HatchEntity[] {
+  const validPitch = Math.max(0.2, pitch || 5);
+  const hatches: HatchEntity[] = [];
+  const linePool: Array<[Point, Point]> = [];
+
+  for (const ent of targetEntities) {
+    if (ent.type === 'circle') {
+      hatches.push({
+        id: `hatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        type: 'hatch',
+        layerId,
+        pitch: validPitch,
+        angle: 45,
+        boundaryType: 'circle',
+        center: { ...ent.center },
+        radius: ent.radius,
+      });
+    } else if (ent.type === 'rectangle') {
+      const minX = Math.min(ent.p1.x, ent.p2.x);
+      const maxX = Math.max(ent.p1.x, ent.p2.x);
+      const minY = Math.min(ent.p1.y, ent.p2.y);
+      const maxY = Math.max(ent.p1.y, ent.p2.y);
+      hatches.push({
+        id: `hatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        type: 'hatch',
+        layerId,
+        pitch: validPitch,
+        angle: 45,
+        boundaryType: 'polygon',
+        points: [
+          { x: minX, y: minY },
+          { x: maxX, y: minY },
+          { x: maxX, y: maxY },
+          { x: minX, y: maxY },
+        ],
+      });
+    } else if (ent.type === 'polygon') {
+      const pts = getPolygonVertices(
+        ent.center,
+        ent.radius,
+        ent.sides,
+        ent.rotation
+      );
+      hatches.push({
+        id: `hatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        type: 'hatch',
+        layerId,
+        pitch: validPitch,
+        angle: 45,
+        boundaryType: 'polygon',
+        points: pts,
+      });
+    } else if (ent.type === 'polyline') {
+      if (ent.points.length >= 3) {
+        hatches.push({
+          id: `hatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          type: 'hatch',
+          layerId,
+          pitch: validPitch,
+          angle: 45,
+          boundaryType: 'polygon',
+          points: ent.points.map((p) => ({ ...p })),
+        });
+      } else {
+        linePool.push(...getEntitySegments(ent));
+      }
+    } else if (ent.type === 'line') {
+      linePool.push([ent.p1, ent.p2]);
+    } else if (ent.type === 'group') {
+      const childHatches = createHatchFromEntities(
+        ent.children,
+        validPitch,
+        layerId
+      );
+      hatches.push(...childHatches);
+    }
+  }
+
+  // Try to chain any loose Line segments into a closed polygon loop
+  if (linePool.length >= 3) {
+    const used = new Array(linePool.length).fill(false);
+    const chain: Point[] = [{ ...linePool[0][0] }, { ...linePool[0][1] }];
+    used[0] = true;
+    const tol = 2.5;
+
+    let progress = true;
+    while (progress) {
+      progress = false;
+      const tail = chain[chain.length - 1];
+      for (let i = 0; i < linePool.length; i++) {
+        if (used[i]) continue;
+        const [a, b] = linePool[i];
+        if (dist(tail, a) <= tol) {
+          chain.push({ ...b });
+          used[i] = true;
+          progress = true;
+          break;
+        } else if (dist(tail, b) <= tol) {
+          chain.push({ ...a });
+          used[i] = true;
+          progress = true;
+          break;
+        }
+      }
+    }
+
+    if (chain.length >= 3) {
+      if (dist(chain[0], chain[chain.length - 1]) <= tol) {
+        chain.pop();
+      }
+      if (chain.length >= 3) {
+        hatches.push({
+          id: `hatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          type: 'hatch',
+          layerId,
+          pitch: validPitch,
+          angle: 45,
+          boundaryType: 'polygon',
+          points: chain,
+        });
+      }
+    }
+  }
+
+  return hatches;
 }
 
 function findSegmentIntersectionsT(
@@ -1477,6 +1724,27 @@ export function isPointNearEntity(
         p.y <= entity.position.y + approxHeight / 2 + tolerance
       );
     }
+    case 'hatch': {
+      if (
+        entity.boundaryType === 'circle' &&
+        entity.center &&
+        entity.radius
+      ) {
+        const d = dist(p, entity.center);
+        if (d <= entity.radius + tolerance) {
+          if (Math.abs(d - entity.radius) <= tolerance) return true;
+          const hatchSegs = getHatchSegments(entity);
+          return hatchSegs.some(([a, b]) => distToSegment(p, a, b) <= tolerance * 1.5);
+        }
+        return false;
+      }
+      const segs = getEntitySegments(entity);
+      if (segs.some(([a, b]) => distToSegment(p, a, b) <= tolerance)) {
+        return true;
+      }
+      const hatchSegs = getHatchSegments(entity);
+      return hatchSegs.some(([a, b]) => distToSegment(p, a, b) <= tolerance * 1.5);
+    }
     case 'group': {
       return entity.children.some((child) =>
         isPointNearEntity(p, child, tolerance)
@@ -1613,7 +1881,7 @@ export function getDimensionLinePoints(entity: {
 }
 
 export function formatToleranceNumber(val: number, forceSign = true): string {
-  if (!Number.isFinite(val)) return '+0.00';
+  if (!Number.isFinite(val)) return '0';
   const rounded = Math.round(val * 100) / 100;
   if (Math.abs(rounded) < 1e-6) return '0';
   const sign = rounded > 0 ? (forceSign ? '+' : '') : '-';
@@ -1656,8 +1924,9 @@ export function formatDimensionLabel(
 
   const tolMode = entity.toleranceMode || 'none';
   if (tolMode === 'symmetric') {
-    const tolVal = Math.max(0.01, Math.abs(entity.toleranceUpper ?? 0.05));
-    const symStr = `±${tolVal.toFixed(2)}`;
+    const rawTol = Math.abs(entity.toleranceUpper ?? 0.05);
+    const tolVal = rawTol < 1e-6 ? 0 : Math.max(0.01, rawTol);
+    const symStr = tolVal === 0 ? '±0' : `±${tolVal.toFixed(2)}`;
     return {
       mainText,
       symmetricText: symStr,
@@ -1668,8 +1937,10 @@ export function formatDimensionLabel(
   }
 
   if (tolMode === 'deviation') {
-    const upVal = entity.toleranceUpper ?? 0.05;
-    const lowVal = entity.toleranceLower ?? -0.05;
+    const upVal =
+      entity.toleranceUpper !== undefined ? entity.toleranceUpper : 0.05;
+    const lowVal =
+      entity.toleranceLower !== undefined ? entity.toleranceLower : -0.05;
     const upStr = formatToleranceNumber(upVal, true);
     const lowStr = formatToleranceNumber(lowVal, true);
     return {
@@ -1780,6 +2051,31 @@ export function getEntityBounds(entity: CadEntity): {
         maxX: entity.position.x + w,
         maxY: entity.position.y + h / 2,
       };
+    }
+    case 'hatch': {
+      if (
+        entity.boundaryType === 'circle' &&
+        entity.center &&
+        entity.radius
+      ) {
+        return {
+          minX: entity.center.x - entity.radius,
+          minY: entity.center.y - entity.radius,
+          maxX: entity.center.x + entity.radius,
+          maxY: entity.center.y + entity.radius,
+        };
+      }
+      if (entity.points && entity.points.length > 0) {
+        const xs = entity.points.map((p) => p.x);
+        const ys = entity.points.map((p) => p.y);
+        return {
+          minX: Math.min(...xs),
+          minY: Math.min(...ys),
+          maxX: Math.max(...xs),
+          maxY: Math.max(...ys),
+        };
+      }
+      return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
     }
     case 'group': {
       if (!entity.children || entity.children.length === 0) {
@@ -1893,6 +2189,12 @@ export function translateEntity(
       };
     case 'text':
       return { ...entity, position: shift(entity.position) };
+    case 'hatch':
+      return {
+        ...entity,
+        center: entity.center ? shift(entity.center) : undefined,
+        points: entity.points ? entity.points.map(shift) : undefined,
+      };
     case 'group':
       return {
         ...entity,
@@ -1959,6 +2261,12 @@ export function rotateEntity(
         position: rot(entity.position),
         rotation: (entity.rotation + angleRad * RAD_TO_DEG) % 360,
       };
+    case 'hatch':
+      return {
+        ...entity,
+        center: entity.center ? rot(entity.center) : undefined,
+        points: entity.points ? entity.points.map(rot) : undefined,
+      };
     case 'group':
       return {
         ...entity,
@@ -2014,6 +2322,12 @@ export function mirrorEntity(
       };
     case 'text':
       return { ...entity, position: mir(entity.position) };
+    case 'hatch':
+      return {
+        ...entity,
+        center: entity.center ? mir(entity.center) : undefined,
+        points: entity.points ? entity.points.map(mir) : undefined,
+      };
     case 'group':
       return {
         ...entity,
@@ -2484,6 +2798,7 @@ export function getEntityGripHandles(entity: CadEntity): GripHandle[] {
         },
       ];
     }
+    case 'hatch':
     case 'group': {
       const b = getEntityBounds(entity);
       const center = { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 };
@@ -2602,6 +2917,7 @@ export function applyGripMove(
       }
       return entity;
     }
+    case 'hatch':
     case 'group': {
       const b = getEntityBounds(entity);
       const center = { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 };
@@ -2858,6 +3174,28 @@ export function exportToDXF(entities: CadEntity[], layers: CadLayer[]): string {
         '1',
         fullText
       );
+    } else if (ent.type === 'hatch') {
+      const hatchSegs = getHatchSegments(ent);
+      for (const [p1, p2] of hatchSegs) {
+        lines.push(
+          '0',
+          'LINE',
+          '8',
+          layer,
+          '10',
+          p1.x.toFixed(4),
+          '20',
+          p1.y.toFixed(4),
+          '30',
+          '0.0',
+          '11',
+          p2.x.toFixed(4),
+          '21',
+          p2.y.toFixed(4),
+          '31',
+          '0.0'
+        );
+      }
     }
   }
 
@@ -2942,6 +3280,13 @@ export function exportToSVG(entities: CadEntity[], layers: CadLayer[]): string {
         `<line x1="${dimP1.x}" y1="${sy(dimP1.y)}" x2="${dimP2.x}" y2="${sy(dimP2.y)}" stroke="${stroke}" stroke-width="1.2" />`,
         `<text x="${mid.x}" y="${sy(mid.y) - 6}" fill="${stroke}" font-family="JetBrains Mono, monospace" font-size="${fSize}" text-anchor="middle">${fullText}</text>`
       );
+    } else if (ent.type === 'hatch') {
+      const hatchSegs = getHatchSegments(ent);
+      for (const [p1, p2] of hatchSegs) {
+        elements.push(
+          `<line x1="${p1.x}" y1="${sy(p1.y)}" x2="${p2.x}" y2="${sy(p2.y)}" stroke="${stroke}" stroke-width="1" stroke-opacity="0.85" />`
+        );
+      }
     }
   }
 

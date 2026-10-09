@@ -555,7 +555,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                   {/* 3. Plus / Minus Tolerance Configuration */}
                   <div className="space-y-2 pt-1 border-t border-slate-800">
                     <span className="block text-[11px] text-amber-300 font-medium">
-                      正負公差標註設定 (正值最小 0.01 / 負值最大 -0.01)：
+                      正負公差標註設定 (可設為 0，或正值最小 0.01 / 負值最大 -0.01)：
                     </span>
                     <div className="grid grid-cols-3 gap-1">
                       {(
@@ -575,9 +575,15 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                               updateSelectedDimensions({
                                 toleranceMode: item.mode,
                                 toleranceUpper:
-                                  selectedDimensions[0].toleranceUpper ?? 0.05,
+                                  selectedDimensions[0].toleranceUpper !==
+                                  undefined
+                                    ? selectedDimensions[0].toleranceUpper
+                                    : 0.05,
                                 toleranceLower:
-                                  selectedDimensions[0].toleranceLower ?? -0.02,
+                                  selectedDimensions[0].toleranceLower !==
+                                  undefined
+                                    ? selectedDimensions[0].toleranceLower
+                                    : -0.02,
                                 textOverride: undefined,
                               })
                             }
@@ -597,19 +603,25 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                       <div className="space-y-1.5 pt-1 font-mono">
                         <div className="flex items-center justify-between">
                           <span className="text-[11px] text-slate-300">
-                            對稱公差 ± (最小 0.01):
+                            對稱公差 ± (可設 0 或最小 0.01):
                           </span>
                           <input
                             type="number"
-                            min={0.01}
+                            min={0}
                             step="0.01"
                             value={
-                              selectedDimensions[0].toleranceUpper ?? 0.05
+                              selectedDimensions[0].toleranceUpper !== undefined
+                                ? selectedDimensions[0].toleranceUpper
+                                : 0.05
                             }
                             onChange={(e) => {
                               const raw = parseFloat(e.target.value);
                               if (!isNaN(raw)) {
-                                const clamped = Math.max(0.01, Math.abs(raw));
+                                const absVal = Math.abs(raw);
+                                const clamped =
+                                  absVal === 0
+                                    ? 0
+                                    : Math.max(0.01, absVal);
                                 updateSelectedDimensions({
                                   toleranceUpper: clamped,
                                   toleranceLower: -clamped,
@@ -620,8 +632,8 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                             className="w-20 px-2 py-1 text-right bg-slate-950 border border-amber-500/60 rounded text-amber-200"
                           />
                         </div>
-                        <div className="grid grid-cols-4 gap-1">
-                          {[0.01, 0.02, 0.05, 0.1].map((v) => (
+                        <div className="grid grid-cols-5 gap-1">
+                          {[0, 0.01, 0.02, 0.05, 0.1].map((v) => (
                             <button
                               key={v}
                               type="button"
@@ -634,7 +646,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                               }
                               className="py-0.5 rounded bg-slate-950 hover:bg-slate-800 text-amber-300 border border-slate-800 text-[10px]"
                             >
-                              ±{v.toFixed(2)}
+                              ±{v === 0 ? '0' : v.toFixed(2)}
                             </button>
                           ))}
                         </div>
@@ -645,21 +657,44 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                       <div className="space-y-2 pt-1 font-mono">
                         <div className="grid grid-cols-2 gap-2">
                           <div>
-                            <label className="block text-[10px] text-emerald-300 mb-0.5">
-                              正公差 + (最小 0.01)
-                            </label>
+                            <div className="flex items-center justify-between mb-0.5">
+                              <label className="block text-[10px] text-emerald-300">
+                                正公差 + (可為 0)
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateSelectedDimensions({
+                                    toleranceUpper: 0,
+                                    textOverride: undefined,
+                                  })
+                                }
+                                className="px-1.5 py-0 text-[9px] bg-emerald-950/80 hover:bg-emerald-800 text-emerald-200 border border-emerald-500/40 rounded"
+                              >
+                                設為 0
+                              </button>
+                            </div>
                             <input
                               type="number"
-                              min={0.01}
+                              min={0}
                               step="0.01"
                               value={
-                                selectedDimensions[0].toleranceUpper ?? 0.05
+                                selectedDimensions[0].toleranceUpper !==
+                                undefined
+                                  ? selectedDimensions[0].toleranceUpper
+                                  : 0.05
                               }
                               onChange={(e) => {
                                 const raw = parseFloat(e.target.value);
                                 if (!isNaN(raw)) {
+                                  const nextUp =
+                                    raw <= 0
+                                      ? 0
+                                      : raw < 0.01
+                                        ? 0.01
+                                        : raw;
                                   updateSelectedDimensions({
-                                    toleranceUpper: Math.max(0.01, raw),
+                                    toleranceUpper: nextUp,
                                     textOverride: undefined,
                                   });
                                 }
@@ -668,21 +703,46 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                             />
                           </div>
                           <div>
-                            <label className="block text-[10px] text-rose-300 mb-0.5">
-                              負公差 - (最大 -0.01)
-                            </label>
+                            <div className="flex items-center justify-between mb-0.5">
+                              <label className="block text-[10px] text-rose-300">
+                                負公差 - (可為 0)
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateSelectedDimensions({
+                                    toleranceLower: 0,
+                                    textOverride: undefined,
+                                  })
+                                }
+                                className="px-1.5 py-0 text-[9px] bg-rose-950/80 hover:bg-rose-800 text-rose-200 border border-rose-500/40 rounded"
+                              >
+                                設為 0
+                              </button>
+                            </div>
                             <input
                               type="number"
-                              max={-0.01}
+                              max={0}
                               step="0.01"
                               value={
-                                selectedDimensions[0].toleranceLower ?? -0.02
+                                selectedDimensions[0].toleranceLower !==
+                                undefined
+                                  ? selectedDimensions[0].toleranceLower
+                                  : -0.02
                               }
                               onChange={(e) => {
                                 const raw = parseFloat(e.target.value);
                                 if (!isNaN(raw)) {
+                                  const nextLow =
+                                    raw === 0
+                                      ? 0
+                                      : raw > 0
+                                        ? -Math.max(0.01, raw)
+                                        : raw > -0.01
+                                          ? -0.01
+                                          : raw;
                                   updateSelectedDimensions({
-                                    toleranceLower: Math.min(-0.01, raw),
+                                    toleranceLower: nextLow,
                                     textOverride: undefined,
                                   });
                                 }
@@ -691,12 +751,14 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                             />
                           </div>
                         </div>
-                        <div className="grid grid-cols-2 gap-1">
+                        <div className="grid grid-cols-3 gap-1">
                           {[
+                            { up: 0.05, low: 0 },
+                            { up: 0, low: -0.05 },
+                            { up: 0.02, low: 0 },
+                            { up: 0, low: -0.02 },
                             { up: 0.01, low: -0.01 },
-                            { up: 0.02, low: -0.01 },
                             { up: 0.05, low: -0.02 },
-                            { up: 0.1, low: -0.05 },
                           ].map((p, i) => (
                             <button
                               key={i}
@@ -710,7 +772,8 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                               }
                               className="py-0.5 px-1 rounded bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-800 text-[10px]"
                             >
-                              +{p.up.toFixed(2)} / {p.low.toFixed(2)}
+                              {p.up === 0 ? '0' : `+${p.up.toFixed(2)}`} /{' '}
+                              {p.low === 0 ? '0' : p.low.toFixed(2)}
                             </button>
                           ))}
                         </div>
@@ -1375,6 +1438,45 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                     </div>
                   )}
 
+                  {singleEntity.type === 'hatch' && (
+                    <div className="space-y-2.5 font-mono">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] text-emerald-300 font-sans">
+                          45° 斜線填充 PITCH 間距 (mm)
+                        </span>
+                        <input
+                          type="number"
+                          min={0.5}
+                          max={200}
+                          step="0.5"
+                          value={singleEntity.pitch}
+                          onChange={(e) =>
+                            updateSingleEntity({
+                              pitch: Math.max(0.5, Number(e.target.value)),
+                            })
+                          }
+                          className="w-20 px-2 py-1 text-right bg-slate-950 border border-emerald-500/60 rounded text-emerald-200"
+                        />
+                      </div>
+                      <div className="grid grid-cols-5 gap-1">
+                        {[2, 5, 8, 10, 15].map((p) => (
+                          <button
+                            key={p}
+                            type="button"
+                            onClick={() => updateSingleEntity({ pitch: p })}
+                            className={`py-1 rounded text-[10px] border transition-colors ${
+                              singleEntity.pitch === p
+                                ? 'bg-emerald-600 text-white border-emerald-400 font-bold'
+                                : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-emerald-500/50'
+                            }`}
+                          >
+                            {p}mm
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Computed Geometric Readouts */}
                   {singleMetrics && (
                     <div className="pt-2 border-t border-slate-800 space-y-1.5 font-mono">
@@ -1477,7 +1579,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0">
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
                         <input
                           type="color"
                           value={layer.color}
@@ -1487,9 +1589,20 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                           }
                           className="w-4 h-4 rounded border border-slate-600 bg-transparent cursor-pointer shrink-0"
                         />
-                        <span className="text-xs font-medium text-slate-100 truncate">
-                          {layer.name}
-                        </span>
+                        <input
+                          type="text"
+                          value={layer.name}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) =>
+                            onUpdateLayer({
+                              ...layer,
+                              name: e.target.value,
+                            })
+                          }
+                          title="點擊直接修改圖層名稱"
+                          placeholder="圖層名稱"
+                          className="w-full min-w-0 px-1.5 py-0.5 text-xs font-medium text-slate-100 bg-slate-950/70 hover:bg-slate-950 focus:bg-slate-950 border border-transparent hover:border-slate-700 focus:border-sky-500 rounded focus:outline-none transition-colors"
+                        />
                       </div>
 
                       <div

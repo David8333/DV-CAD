@@ -28,6 +28,7 @@ import {
   Eye,
   EyeOff,
   FileCode2,
+  Type,
   X,
 } from 'lucide-react';
 import {
@@ -42,12 +43,13 @@ import {
 } from './types/cad';
 import { BLUEPRINT_TEMPLATES, DEFAULT_LAYERS } from './data/templates';
 import { CadViewport } from './components/CadViewport';
-import { ToolPalette, ThreePointArcIcon } from './components/ToolPalette';
+import { ToolPalette, HatchIcon } from './components/ToolPalette';
 import { InspectorSidebar } from './components/InspectorSidebar';
 import { CommandDock } from './components/CommandDock';
 import {
   alignSelectedDimensions,
   angleDegrees,
+  createHatchFromEntities,
   DEG_TO_RAD,
   dist,
   explodeEntity,
@@ -70,6 +72,7 @@ const VALID_ENTITY_TYPES = new Set([
   'circle',
   'arc',
   'polygon',
+  'hatch',
   'dimension',
   'text',
   'group',
@@ -270,6 +273,7 @@ export default function App() {
   // Tool parameters
   const [polygonSides, setPolygonSides] = useState<number>(6);
   const [offsetDistance, setOffsetDistance] = useState<number>(20);
+  const [hatchPitch, setHatchPitch] = useState<number>(5);
 
   // Drafting settings
   const [settings, setSettings] = useState<DraftingSettings>({
@@ -465,6 +469,7 @@ export default function App() {
         circle: 'CIRCLE 圓形模式 (快捷鍵 C) — 請點選圓心與半徑',
         arc: 'ARC 三點圓弧模式 (快捷鍵 A) — 依序點選 1.起點 P1、2.弧上第二點 P2、3.終點 P3',
         polygon: 'POLYGON 正多邊形模式 (快捷鍵 G) — 請點選中心與外接圓半徑',
+        hatch: `HATCH 45° 斜線剖面填充模式 (快捷鍵 BH - 目前 PITCH = ${hatchPitch} mm) — 點選圓形、矩形、多邊形或封閉線段自動填充，或點選兩角點拉框填充`,
         dimension: 'DIMLINEAR 標註尺寸模式 (快捷鍵 D) — 靠近既有標註線時可自動相互對齊',
         text: 'TEXT 文字標註模式 (快捷鍵 T) — 請點選文字插入位置',
         measure: 'DIST 距離與角度測量工具 (快捷鍵 K)',
@@ -480,8 +485,40 @@ export default function App() {
       };
       logCommand(`指令切換: ${toolNames[tool]}`, 'command');
     },
-    [logCommand, offsetDistance, rectangleMode]
+    [hatchPitch, logCommand, offsetDistance, rectangleMode]
   );
+
+  // One-click 45° Hatch for currently selected entities
+  const handleHatchSelected = useCallback(() => {
+    if (selectedIds.length === 0) {
+      handleSelectTool('hatch');
+      return;
+    }
+    const selectedEnts = entities.filter((e) => selectedIds.includes(e.id));
+    const createdHatches = createHatchFromEntities(
+      selectedEnts,
+      hatchPitch,
+      activeLayerId
+    );
+    if (createdHatches.length > 0) {
+      pushEntities([...entities, ...createdHatches]);
+      setSelectedIds(createdHatches.map((h) => h.id));
+      logCommand(
+        `HATCH 已為已選取的圖形產生 ${createdHatches.length} 組 45° 斜線剖面填充 (PITCH = ${hatchPitch} mm)！`,
+        'success'
+      );
+    } else {
+      handleSelectTool('hatch');
+    }
+  }, [
+    activeLayerId,
+    entities,
+    handleSelectTool,
+    hatchPitch,
+    logCommand,
+    pushEntities,
+    selectedIds,
+  ]);
 
   const handleDeleteSelected = useCallback(() => {
     if (selectedIds.length === 0) {
@@ -977,9 +1014,15 @@ export default function App() {
           handleSelectTool('zoomWindow');
           return;
         }
+        if (combo === 'BH') {
+          e.preventDefault();
+          clearPrefix();
+          handleSelectTool('hatch');
+          return;
+        }
       }
 
-      // 3. Single-key shortcuts (and start prefix if it's J, T, E, C, A, Z)
+      // 3. Single-key shortcuts (and start prefix if it's J, T, E, C, A, Z, B)
       switch (k) {
         case 'j':
           e.preventDefault();
@@ -1046,7 +1089,7 @@ export default function App() {
           break;
         case 'b':
           e.preventDefault();
-          clearPrefix();
+          startPrefix('B');
           handleAutoDimensionSelected();
           break;
         case 'p':
@@ -1192,6 +1235,11 @@ export default function App() {
       POL: 'polygon',
       POLYGON: 'polygon',
       多邊形: 'polygon',
+      BH: 'hatch',
+      HATCH: 'hatch',
+      填充: 'hatch',
+      斜線填充: 'hatch',
+      剖面線: 'hatch',
       D: 'dimension',
       DIM: 'dimension',
       DIMLINEAR: 'dimension',
@@ -1200,6 +1248,7 @@ export default function App() {
       T: 'text',
       TEXT: 'text',
       文字: 'text',
+      文字註解: 'text',
       DIST: 'measure',
       MEASURE: 'measure',
       測量: 'measure',
@@ -1637,13 +1686,6 @@ export default function App() {
           </button>
           <button
             type="button"
-            onClick={() => setActiveModal('array')}
-            className="hover:text-sky-300 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
-          >
-            陣列複製 (AR)
-          </button>
-          <button
-            type="button"
             onClick={() => setActiveModal('shortcuts')}
             className="hover:text-sky-300 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
           >
@@ -1716,15 +1758,15 @@ export default function App() {
 
           <button
             type="button"
-            onClick={() => handleSelectTool('arc')}
+            onClick={() => handleSelectTool('text')}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md font-medium border transition-colors whitespace-nowrap shrink-0 ${
-              activeTool === 'arc'
+              activeTool === 'text'
                 ? 'bg-sky-500 text-white border-sky-400 shadow-sm'
                 : 'bg-slate-900 text-slate-200 border-slate-700 hover:border-sky-500/60'
             }`}
           >
-            <ThreePointArcIcon className="w-3.5 h-3.5" />
-            <span>三點圓弧 (A)</span>
+            <Type className="w-3.5 h-3.5" />
+            <span>文字註解 (T)</span>
           </button>
 
           <button
@@ -1777,6 +1819,26 @@ export default function App() {
           >
             <Combine className="w-3.5 h-3.5" />
             <span>組裝圖元 (J)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleExplodeSelected}
+            title="將選取的組裝圖元、矩形或多邊形炸開為獨立圖元 (快捷鍵 X)"
+            className="flex items-center gap-1 px-2.5 py-1 rounded-md font-medium border bg-slate-900 text-slate-200 border-slate-700 hover:border-amber-500/60 transition-colors whitespace-nowrap shrink-0"
+          >
+            <Scissors className="w-3.5 h-3.5" />
+            <span>炸開圖元 (X)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveModal('array')}
+            title="開啟矩形 / 環形陣列複製視窗 (快捷鍵 AR)"
+            className="flex items-center gap-1 px-2.5 py-1 rounded-md font-medium border bg-slate-900 text-slate-200 border-slate-700 hover:border-sky-500/60 transition-colors whitespace-nowrap shrink-0"
+          >
+            <Grid className="w-3.5 h-3.5 text-sky-400" />
+            <span>陣列複製 (AR)</span>
           </button>
 
           <button
@@ -1981,6 +2043,26 @@ export default function App() {
             </div>
           )}
 
+          {activeTool === 'hatch' && (
+            <div className="flex items-center gap-1">
+              <HatchIcon className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="text-emerald-300 font-medium">
+                45°斜線PITCH(mm):
+              </span>
+              <input
+                type="number"
+                min={0.5}
+                max={200}
+                step="0.5"
+                value={hatchPitch}
+                onChange={(e) =>
+                  setHatchPitch(Math.max(0.5, Number(e.target.value)))
+                }
+                className="w-14 px-2 py-0.5 font-mono bg-slate-900 border border-emerald-500/60 rounded text-emerald-200 focus:outline-none focus:border-emerald-400"
+              />
+            </div>
+          )}
+
           <select
             value={activeLayerId}
             onChange={(e) => setActiveLayerId(e.target.value)}
@@ -2022,6 +2104,8 @@ export default function App() {
               onChangeRectangleMode={setRectangleMode}
               offsetDistance={offsetDistance}
               onChangeOffsetDistance={setOffsetDistance}
+              hatchPitch={hatchPitch}
+              onChangeHatchPitch={setHatchPitch}
               selectedCount={selectedIds.length}
               hasClipboard={clipboard.length > 0}
               onCopyClipboard={handleCopyClipboard}
@@ -2033,6 +2117,7 @@ export default function App() {
               onJoinSelected={handleJoinSelected}
               onDeleteSelected={handleDeleteSelected}
               onAutoDimensionSelected={handleAutoDimensionSelected}
+              onHatchSelected={handleHatchSelected}
             />
             <button
               type="button"
@@ -2060,6 +2145,8 @@ export default function App() {
           polygonSides={polygonSides}
           offsetDistance={offsetDistance}
           onChangeOffsetDistance={setOffsetDistance}
+          hatchPitch={hatchPitch}
+          onChangeHatchPitch={setHatchPitch}
           pan={pan}
           zoom={zoom}
           onPanZoomChange={(nextPan, nextZoom) => {

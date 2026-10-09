@@ -42,6 +42,7 @@ export type EntityType =
   | 'circle'
   | 'arc'
   | 'polygon'
+  | 'hatch'
   | 'dimension'
   | 'text'
   | 'group';
@@ -113,8 +114,8 @@ export interface DimensionEntity extends BaseEntity {
   dimMode?: DimensionMode; // 'linear' | 'diameter' (ISO / CNS international standard circle diameter)
   precision?: DimensionPrecision; // 0 (第0位), 1 (後第1位), 2 (後第2位)
   toleranceMode?: DimensionToleranceMode; // 'none' | 'symmetric' (±) | 'deviation' (+ / -)
-  toleranceUpper?: number; // e.g. +0.01 to +99.99
-  toleranceLower?: number; // e.g. -0.01 to -99.99
+  toleranceUpper?: number; // e.g. 0 or +0.01 to +99.99
+  toleranceLower?: number; // e.g. 0 or -0.01 to -99.99
 }
 
 export interface TextEntity extends BaseEntity {
@@ -123,6 +124,19 @@ export interface TextEntity extends BaseEntity {
   content: string;
   fontSize: number;
   rotation: number; // degrees
+}
+
+/**
+ * 45° Diagonal Section Hatch Entity (45度斜線剖面填充)
+ */
+export interface HatchEntity extends BaseEntity {
+  type: 'hatch';
+  pitch: number; // Spacing between 45° hatch lines in mm (e.g. 5mm)
+  angle?: number; // Default 45 degrees
+  boundaryType: 'circle' | 'polygon';
+  center?: Point;
+  radius?: number;
+  points?: Point[]; // Closed polygon vertices for rectangle, polygon, closed polyline, or connected loop
 }
 
 export interface GroupEntity extends BaseEntity {
@@ -138,6 +152,7 @@ export type CadEntity =
   | CircleEntity
   | ArcEntity
   | PolygonEntity
+  | HatchEntity
   | DimensionEntity
   | TextEntity
   | GroupEntity;
@@ -152,6 +167,7 @@ export type ToolType =
   | 'circle'
   | 'arc'
   | 'polygon'
+  | 'hatch'
   | 'dimension'
   | 'text'
   | 'measure'

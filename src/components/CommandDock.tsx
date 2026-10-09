@@ -33,8 +33,10 @@ const TOOL_PROMPTS: Record<ToolType, string> = {
   circle: 'CIRCLE 指定圓心與半徑 R，或輸入半徑數值按空白鍵/Enter',
   arc: 'ARC [三點圓弧] 依序點選 [1.起點 P1] → [2.弧上第二點 P2] → [3.終點 P3]',
   polygon: 'POLYGON 指定正多邊形中心點與外接圓半徑方向',
+  hatch:
+    'HATCH 點選封閉圖形（圓形、矩形、多邊形）自動建立 45° 斜線填充，或點選兩角點拉框填充（可調 PITCH 間距）',
   dimension:
-    'DIM 直接點擊圓周建立 ISO 國際規範 Ø 直徑標註，或點選兩點建立線性標註（可調小數位數與正負公差）',
+    'DIM 直接點擊圓周建立 ISO 國際規範 Ø 直徑標註，或點選兩點建立線性標註（可調小數位數與正負公差 0）',
   text: 'TEXT 點選圖面要放置工程文字註解的座標位置',
   measure: 'DIST 點選兩點以量測距離、ΔX、ΔY 與夾角',
   erase: 'ERASE 刪除圖元模式 (E) — 點選畫布上的任何圖元立即刪除，或按 ESC 返回',

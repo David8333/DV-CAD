@@ -35,6 +35,8 @@ interface ToolPaletteProps {
   onChangeRectangleMode: (mode: RectangleMode) => void;
   offsetDistance: number;
   onChangeOffsetDistance: (dist: number) => void;
+  hatchPitch: number;
+  onChangeHatchPitch: (pitch: number) => void;
   selectedCount: number;
   hasClipboard: boolean;
   onCopyClipboard: () => void;
@@ -46,6 +48,7 @@ interface ToolPaletteProps {
   onJoinSelected: () => void;
   onDeleteSelected: () => void;
   onAutoDimensionSelected: () => void;
+  onHatchSelected?: () => void;
 }
 
 /**
@@ -70,6 +73,30 @@ export const ThreePointArcIcon: React.FC<{ className?: string }> = ({
     <circle cx="12" cy="7.5" r="1.15" fill="#FBBF24" stroke="none" />
     {/* Point 3 (Right End) - reduced by half */}
     <circle cx="20" cy="18" r="1.15" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+/**
+ * Custom 45° Hatch Icon showing a boundary box filled with 45° diagonal section lines
+ */
+export const HatchIcon: React.FC<{ className?: string }> = ({
+  className = 'w-4 h-4',
+}) => (
+  <svg
+    className={className}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.9"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <rect x="3" y="3" width="18" height="18" rx="2" />
+    <line x1="3" y1="10" x2="10" y2="3" />
+    <line x1="3" y1="16" x2="16" y2="3" />
+    <line x1="4" y1="21" x2="21" y2="4" />
+    <line x1="10" y1="21" x2="21" y2="10" />
+    <line x1="16" y1="21" x2="21" y2="16" />
   </svg>
 );
 
@@ -140,6 +167,13 @@ const DRAW_TOOLS: ToolItem[] = [
     label: '正多邊形',
     shortcut: 'G',
     icon: <Hexagon className="w-4 h-4" />,
+  },
+  {
+    id: 'hatch',
+    label: '剖面填充 (45°)',
+    shortcut: 'BH',
+    icon: <HatchIcon className="w-4 h-4" />,
+    highlight: true,
   },
   {
     id: 'text',
@@ -230,6 +264,8 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
   onChangeRectangleMode,
   offsetDistance,
   onChangeOffsetDistance,
+  hatchPitch,
+  onChangeHatchPitch,
   selectedCount,
   hasClipboard,
   onCopyClipboard,
@@ -241,6 +277,7 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
   onJoinSelected,
   onDeleteSelected,
   onAutoDimensionSelected,
+  onHatchSelected,
 }) => {
   return (
     <aside className="w-64 shrink-0 h-full bg-[#0F172A] border-r border-slate-800 flex flex-col justify-between p-3 overflow-y-auto select-none">
@@ -481,6 +518,67 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
               >
                 中心矩形
               </button>
+            </div>
+          </div>
+
+          {/* 45° Section Hatch Tool & Pitch Control Box */}
+          <div className="mt-2 p-2.5 bg-slate-900/90 border border-emerald-500/40 rounded-lg space-y-2">
+            <div className="flex items-center justify-between">
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedCount > 0 && onHatchSelected) {
+                    onHatchSelected();
+                  } else {
+                    onSelectTool('hatch');
+                  }
+                }}
+                className="flex items-center gap-1.5 text-[11px] font-semibold text-emerald-300 hover:text-emerald-200"
+              >
+                <HatchIcon className="w-3.5 h-3.5 text-emerald-400" />
+                <span>45° 斜線填充 PITCH 設定</span>
+              </button>
+              <span className="text-[10px] font-mono text-emerald-400/80">
+                45° 斜線
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] text-slate-300 whitespace-nowrap">
+                斜線間距 PITCH：
+              </span>
+              <div className="flex items-center gap-1">
+                <input
+                  type="number"
+                  min={0.5}
+                  max={200}
+                  step="0.5"
+                  value={hatchPitch}
+                  onChange={(e) =>
+                    onChangeHatchPitch(Math.max(0.5, Number(e.target.value)))
+                  }
+                  className="w-16 px-2 py-1 text-right text-xs font-mono bg-slate-950 border border-emerald-500/60 rounded text-emerald-200 focus:outline-none focus:border-emerald-400"
+                />
+                <span className="text-[11px] font-mono text-slate-400">mm</span>
+              </div>
+            </div>
+            <div className="grid grid-cols-5 gap-1 font-mono">
+              {[2, 5, 8, 10, 15].map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => {
+                    onChangeHatchPitch(p);
+                    if (activeTool !== 'hatch') onSelectTool('hatch');
+                  }}
+                  className={`py-0.5 rounded text-[10px] border transition-colors ${
+                    hatchPitch === p
+                      ? 'bg-emerald-600 text-white border-emerald-400 font-bold'
+                      : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-emerald-500/50'
+                  }`}
+                >
+                  {p}mm
+                </button>
+              ))}
             </div>
           </div>
 

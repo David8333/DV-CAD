@@ -28,6 +28,7 @@ import {
   computeExtendResult,
   computeMutualExtendResult,
   computeTrimResult,
+  createHatchFromEntities,
   DEG_TO_RAD,
   dist,
   findBestSnapPoint,
@@ -38,6 +39,7 @@ import {
   getEntityBounds,
   getEntityGripHandles,
   getEntitySegments,
+  getHatchSegments,
   getPolygonVertices,
   getSelectionReferencePoint,
   isEntityInSelectionBox,
@@ -66,6 +68,8 @@ interface CadViewportProps {
   polygonSides: number;
   offsetDistance: number;
   onChangeOffsetDistance: (dist: number) => void;
+  hatchPitch: number;
+  onChangeHatchPitch: (pitch: number) => void;
   pan: Point;
   zoom: number;
   onPanZoomChange: (pan: Point, zoom: number) => void;
@@ -102,6 +106,8 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   polygonSides,
   offsetDistance,
   onChangeOffsetDistance,
+  hatchPitch,
+  onChangeHatchPitch,
   pan,
   zoom,
   onPanZoomChange,
@@ -652,6 +658,44 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           break;
         }
 
+        case 'hatch': {
+          if (drawingPoints.length === 0) {
+            setDrawingPoints([pt]);
+            onLogCommand(
+              `HATCH 指定 45° 斜線填充區域第一角點: (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)}) — 請點選對角點完成填充（或直接點選圓形/矩形/多邊形自動填充）`,
+              'info'
+            );
+          } else {
+            const p0 = drawingPoints[0];
+            const minX = Math.min(p0.x, pt.x);
+            const maxX = Math.max(p0.x, pt.x);
+            const minY = Math.min(p0.y, pt.y);
+            const maxY = Math.max(p0.y, pt.y);
+            if (maxX - minX >= 0.1 && maxY - minY >= 0.1) {
+              onAddEntity({
+                id: `hatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                type: 'hatch',
+                layerId: activeLayerId,
+                pitch: Math.max(0.5, hatchPitch),
+                angle: 45,
+                boundaryType: 'polygon',
+                points: [
+                  { x: minX, y: minY },
+                  { x: maxX, y: minY },
+                  { x: maxX, y: maxY },
+                  { x: minX, y: maxY },
+                ],
+              });
+              setDrawingPoints([]);
+              onLogCommand(
+                `HATCH 已建立 45° 斜線剖面填充 (PITCH = ${hatchPitch} mm，範圍 ${(maxX - minX).toFixed(1)} × ${(maxY - minY).toFixed(1)} mm)`,
+                'success'
+              );
+            }
+          }
+          break;
+        }
+
         case 'dimension': {
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
@@ -873,6 +917,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       defaultDimFontSize,
       drawingPoints,
       entities,
+      hatchPitch,
       layers,
       onAddEntity,
       onLogCommand,
@@ -1417,7 +1462,8 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       activeTool === 'trim' ||
       activeTool === 'extend' ||
       activeTool === 'join' ||
-      activeTool === 'dimension'
+      activeTool === 'dimension' ||
+      activeTool === 'hatch'
     ) {
       const visibleLayerIds = new Set(
         layers.filter((l) => l.visible && !l.locked).map((l) => l.id)
@@ -1599,6 +1645,68 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           'info'
         );
         return;
+      }
+    }
+
+    // 1c. If in HATCH (45° 斜線填充) mode and drawingPoints is empty, clicking on a closed entity or inside a closed entity fills it with 45° hatch lines!
+    if (activeTool === 'hatch' && drawingPoints.length === 0) {
+      const hitTol = 12 / zoom;
+      let targetEnt = [...visibleEntities]
+        .reverse()
+        .find(
+          (ent) =>
+            ent.type !== 'hatch' &&
+            ent.type !== 'dimension' &&
+            ent.type !== 'text' &&
+            isPointNearEntity(rawWorld, ent, hitTol)
+        );
+
+      // Also check if user clicked INSIDE a circle or rectangle!
+      if (!targetEnt) {
+        targetEnt = [...visibleEntities].reverse().find((ent) => {
+          if (ent.type === 'circle') {
+            return dist(rawWorld, ent.center) <= ent.radius;
+          }
+          if (ent.type === 'rectangle') {
+            const minX = Math.min(ent.p1.x, ent.p2.x);
+            const maxX = Math.max(ent.p1.x, ent.p2.x);
+            const minY = Math.min(ent.p1.y, ent.p2.y);
+            const maxY = Math.max(ent.p1.y, ent.p2.y);
+            return (
+              rawWorld.x >= minX &&
+              rawWorld.x <= maxX &&
+              rawWorld.y >= minY &&
+              rawWorld.y <= maxY
+            );
+          }
+          return false;
+        });
+      }
+
+      if (targetEnt) {
+        // If clicked a Line, find connected lines to see if they form a closed loop
+        const sourceEnts =
+          targetEnt.type === 'line'
+            ? visibleEntities.filter((e) =>
+                findConnectedEntityIds([targetEnt.id], visibleEntities, 2.5).includes(
+                  e.id
+                )
+              )
+            : [targetEnt];
+        const createdHatches = createHatchFromEntities(
+          sourceEnts,
+          hatchPitch,
+          activeLayerId
+        );
+        if (createdHatches.length > 0) {
+          onUpdateEntities([...entities, ...createdHatches]);
+          onSelectChange(createdHatches.map((h) => h.id));
+          onLogCommand(
+            `HATCH 已為選取圖形建立 45° 斜線剖面填充 (PITCH = ${hatchPitch} mm)！可於下方或右側調整斜線 PITCH 間距`,
+            'success'
+          );
+          return;
+        }
       }
     }
 
@@ -2431,6 +2539,47 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           ctx.restore();
           break;
         }
+        case 'hatch': {
+          ctx.setLineDash([]);
+          ctx.lineWidth = isSelected || isHovered ? 1.6 : 1.05;
+          const hatchSegs = getHatchSegments(ent);
+          if (hatchSegs.length > 0) {
+            ctx.beginPath();
+            for (const [p1, p2] of hatchSegs) {
+              const s1 = worldToScreen(p1.x, p1.y);
+              const s2 = worldToScreen(p2.x, p2.y);
+              ctx.moveTo(s1.x, s1.y);
+              ctx.lineTo(s2.x, s2.y);
+            }
+            ctx.stroke();
+          }
+          if (isSelected || isHovered) {
+            ctx.save();
+            ctx.setLineDash([4, 3]);
+            ctx.lineWidth = 1.2;
+            if (
+              ent.boundaryType === 'circle' &&
+              ent.center &&
+              ent.radius
+            ) {
+              const sc = worldToScreen(ent.center.x, ent.center.y);
+              ctx.beginPath();
+              ctx.arc(sc.x, sc.y, Math.max(1, ent.radius * zoom), 0, Math.PI * 2);
+              ctx.stroke();
+            } else if (ent.points && ent.points.length >= 3) {
+              ctx.beginPath();
+              ent.points.forEach((pt, idx) => {
+                const sp = worldToScreen(pt.x, pt.y);
+                if (idx === 0) ctx.moveTo(sp.x, sp.y);
+                else ctx.lineTo(sp.x, sp.y);
+              });
+              ctx.closePath();
+              ctx.stroke();
+            }
+            ctx.restore();
+          }
+          break;
+        }
       }
       ctx.restore();
     };
@@ -2621,6 +2770,21 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       }
     }
 
+    // Live 45° Hatch preview when hovering over a closed shape in 'hatch' mode
+    if (activeTool === 'hatch' && drawingPoints.length === 0 && hoveredEntityId) {
+      const hoveredEnt = visibleEntities.find((e) => e.id === hoveredEntityId);
+      if (hoveredEnt && hoveredEnt.type !== 'hatch') {
+        const previewHatches = createHatchFromEntities(
+          [hoveredEnt],
+          hatchPitch,
+          activeLayerId
+        );
+        for (const ph of previewHatches) {
+          drawEntity(ph, 'rgba(16, 185, 129, 0.75)');
+        }
+      }
+    }
+
     // 5. Render Grip Handles for Selected Entities in Select Mode
     if (activeTool === 'select' && selectedIds.length > 0) {
       for (const ent of renderedEntities) {
@@ -2804,6 +2968,44 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             Math.abs(sCur.x - s0.x),
             Math.abs(sCur.y - s0.y)
           );
+        }
+      } else if (activeTool === 'hatch') {
+        const minX = Math.min(p0.x, cursorWorld.x);
+        const maxX = Math.max(p0.x, cursorWorld.x);
+        const minY = Math.min(p0.y, cursorWorld.y);
+        const maxY = Math.max(p0.y, cursorWorld.y);
+        ctx.strokeStyle = '#10B981';
+        ctx.strokeRect(
+          Math.min(s0.x, sCur.x),
+          Math.min(s0.y, sCur.y),
+          Math.abs(sCur.x - s0.x),
+          Math.abs(sCur.y - s0.y)
+        );
+        if (maxX - minX >= 0.5 && maxY - minY >= 0.5) {
+          const previewSegs = getHatchSegments({
+            id: 'preview_hatch',
+            type: 'hatch',
+            layerId: activeLayerId,
+            pitch: Math.max(0.5, hatchPitch),
+            angle: 45,
+            boundaryType: 'polygon',
+            points: [
+              { x: minX, y: minY },
+              { x: maxX, y: minY },
+              { x: maxX, y: maxY },
+              { x: minX, y: maxY },
+            ],
+          });
+          ctx.setLineDash([]);
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          for (const [hp1, hp2] of previewSegs) {
+            const hs1 = worldToScreen(hp1.x, hp1.y);
+            const hs2 = worldToScreen(hp2.x, hp2.y);
+            ctx.moveTo(hs1.x, hs1.y);
+            ctx.lineTo(hs2.x, hs2.y);
+          }
+          ctx.stroke();
         }
       } else if (activeTool === 'circle') {
         const rPx = dist(s0, sCur);
@@ -3145,6 +3347,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     entities,
     extendFirstPick,
     guideAngle,
+    hatchPitch,
     hoveredEntityId,
     isPanning,
     layers,
@@ -3234,6 +3437,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               {activeTool === 'circle' && '畫圓形 (C)'}
               {activeTool === 'arc' && '三點圓弧 (A)'}
               {activeTool === 'polygon' && `正 ${polygonSides} 邊形 (G)`}
+              {activeTool === 'hatch' && `45° 斜線填充 (BH - PITCH ${hatchPitch}mm)`}
               {activeTool === 'text' && '文字註解 (T)'}
               {activeTool === 'measure' && '測量距離 (K)'}
               {activeTool === 'erase' && '刪除圖元 (E)'}
@@ -3247,6 +3451,26 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               {activeTool === 'extend' && '延伸圖元 (EX)'}
               {activeTool === 'join' && '組裝圖元 (J)'}
             </span>
+
+            {activeTool === 'hatch' && (
+              <div className="flex items-center gap-1 bg-slate-950 px-1.5 py-0.5 rounded border border-emerald-500/50 shrink-0 font-mono">
+                <span className="text-[10px] text-emerald-300 font-sans">
+                  斜線 PITCH:
+                </span>
+                <input
+                  type="number"
+                  min={0.5}
+                  max={200}
+                  step="0.5"
+                  value={hatchPitch}
+                  onChange={(e) =>
+                    onChangeHatchPitch(Math.max(0.5, Number(e.target.value)))
+                  }
+                  className="w-12 px-1 py-0 text-[10px] bg-slate-900 border border-emerald-500/60 rounded text-emerald-200"
+                />
+                <span className="text-[10px] text-slate-400">mm</span>
+              </div>
+            )}
 
             {activeTool === 'rectangle' && (
               <div className="flex items-center gap-1 bg-slate-950 px-1.5 py-0.5 rounded border border-slate-700 shrink-0">
@@ -3402,8 +3626,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                 '支援同時偏移選取的所有圖形（最小 0.01）！輸入距離按空白鍵/Enter 後點選要偏移的一側'}
               {activeTool === 'join' &&
                 '點選 2 個以上圖元後按「空白鍵 / Enter」，保留原始位置組裝成單一物件'}
+              {activeTool === 'hatch' &&
+                '直接點選圓形、矩形、多邊形或封閉線段即可填充 45° 斜線（或點選兩角點拉框填充），可隨時調整 PITCH 間距'}
               {activeTool === 'select' &&
-                '點選或直接拖曳圖元移動；可在下方修改尺寸、設定正負公差與小數位數，或輸入 X,Y 座標跳轉'}
+                '點選或直接拖曳圖元移動；可在下方修改尺寸、設定正負公差（支援 0）與小數位數，或輸入 X,Y 座標跳轉'}
               {![
                 'zoomWindow',
                 'line',
@@ -3416,6 +3642,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                 'extend',
                 'offset',
                 'join',
+                'hatch',
                 'select',
               ].includes(activeTool) &&
                 (drawingPoints.length === 0
@@ -3454,6 +3681,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                 {singleSelected.type === 'circle' && '圓形尺寸:'}
                 {singleSelected.type === 'arc' && '三點圓弧:'}
                 {singleSelected.type === 'polygon' && '多邊形尺寸:'}
+                {singleSelected.type === 'hatch' && '45° 斜線填充:'}
                 {singleSelected.type === 'dimension' && '標註設定:'}
                 {singleSelected.type === 'text' && '文字設定:'}
                 {singleSelected.type === 'group' &&
@@ -3688,6 +3916,47 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                 </div>
               )}
 
+              {/* Hatch Direct Pitch Input */}
+              {singleSelected.type === 'hatch' && (
+                <div className="flex items-center gap-2">
+                  <label className="flex items-center gap-1">
+                    <span className="text-emerald-300 font-sans">
+                      45° 斜線 PITCH:
+                    </span>
+                    <input
+                      type="number"
+                      min={0.5}
+                      max={200}
+                      step="0.5"
+                      value={singleSelected.pitch}
+                      onChange={(e) =>
+                        updateSingleEntity({
+                          pitch: Math.max(0.5, Number(e.target.value)),
+                        })
+                      }
+                      className="w-16 px-1.5 py-0.5 bg-slate-950 border border-emerald-500/60 rounded text-emerald-200"
+                    />
+                    <span className="text-slate-500">mm</span>
+                  </label>
+                  <div className="flex items-center gap-1">
+                    {[2, 5, 8, 10, 15].map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        onClick={() => updateSingleEntity({ pitch: p })}
+                        className={`px-1.5 py-0.5 rounded text-[10px] border ${
+                          singleSelected.pitch === p
+                            ? 'bg-emerald-600 text-white border-emerald-400'
+                            : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-emerald-500/50'
+                        }`}
+                      >
+                        {p}mm
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Dimension Direct Modification Bar: Mode (Linear / ISO Diameter), Precision (0 / 1 / 2), Tolerance (+/-), Font Size */}
               {singleSelected.type === 'dimension' && (
                 <div className="flex flex-wrap items-center gap-2 font-sans">
@@ -3749,7 +4018,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                     ))}
                   </div>
 
-                  {/* +/- Tolerance Mode & Inputs */}
+                  {/* +/- Tolerance Mode & Inputs (Supports 0!) */}
                   <div className="flex items-center gap-1 bg-slate-950 border border-amber-500/40 rounded px-1.5 py-0.5">
                     <span className="text-[10px] text-amber-300">公差:</span>
                     <select
@@ -3760,9 +4029,14 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                             | 'none'
                             | 'symmetric'
                             | 'deviation',
-                          toleranceUpper: singleSelected.toleranceUpper ?? 0.05,
+                          toleranceUpper:
+                            singleSelected.toleranceUpper !== undefined
+                              ? singleSelected.toleranceUpper
+                              : 0.05,
                           toleranceLower:
-                            singleSelected.toleranceLower ?? -0.05,
+                            singleSelected.toleranceLower !== undefined
+                              ? singleSelected.toleranceLower
+                              : -0.05,
                           textOverride: undefined,
                         })
                       }
@@ -3778,17 +4052,16 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                         <span className="text-amber-300 text-[10px]">±</span>
                         <input
                           type="number"
-                          min={0.01}
+                          min={0}
                           step="0.01"
-                          value={Math.max(
-                            0.01,
-                            Math.abs(singleSelected.toleranceUpper ?? 0.05)
-                          )}
+                          value={
+                            singleSelected.toleranceUpper !== undefined
+                              ? singleSelected.toleranceUpper
+                              : 0.05
+                          }
                           onChange={(e) => {
-                            const v = Math.max(
-                              0.01,
-                              Math.abs(Number(e.target.value))
-                            );
+                            const raw = Math.abs(Number(e.target.value));
+                            const v = raw === 0 ? 0 : Math.max(0.01, raw);
                             updateSingleEntity({
                               toleranceUpper: v,
                               toleranceLower: -v,
@@ -3808,7 +4081,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                           </span>
                           <input
                             type="number"
-                            min={0.01}
+                            min={0}
                             step="0.01"
                             value={
                               singleSelected.toleranceUpper !== undefined
@@ -3818,7 +4091,11 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                             onChange={(e) => {
                               const raw = Number(e.target.value);
                               const v =
-                                raw > 0 && raw < 0.01 ? 0.01 : Math.max(0, raw);
+                                raw <= 0
+                                  ? 0
+                                  : raw < 0.01
+                                    ? 0.01
+                                    : raw;
                               updateSingleEntity({
                                 toleranceUpper: v,
                                 textOverride: undefined,
@@ -3831,7 +4108,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                           <span className="text-rose-400 text-[10px]">-</span>
                           <input
                             type="number"
-                            max={-0.01}
+                            max={0}
                             step="0.01"
                             value={
                               singleSelected.toleranceLower !== undefined
@@ -3841,11 +4118,13 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                             onChange={(e) => {
                               const raw = Number(e.target.value);
                               const v =
-                                raw < 0 && raw > -0.01
-                                  ? -0.01
+                                raw === 0
+                                  ? 0
                                   : raw > 0
                                     ? -Math.max(0.01, raw)
-                                    : raw;
+                                    : raw > -0.01
+                                      ? -0.01
+                                      : raw;
                               updateSingleEntity({
                                 toleranceLower: v,
                                 textOverride: undefined,
