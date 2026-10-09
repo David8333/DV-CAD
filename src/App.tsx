@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   Undo2,
   Redo2,
@@ -19,6 +19,10 @@ import {
   Scissors,
   ArrowUpRight,
   Combine,
+  Trash2,
+  Clipboard,
+  ClipboardCopy,
+  AlignCenterHorizontal,
   X,
 } from 'lucide-react';
 import {
@@ -33,10 +37,11 @@ import {
 } from './types/cad';
 import { BLUEPRINT_TEMPLATES, DEFAULT_LAYERS } from './data/templates';
 import { CadViewport } from './components/CadViewport';
-import { ToolPalette } from './components/ToolPalette';
+import { ToolPalette, ThreePointArcIcon } from './components/ToolPalette';
 import { InspectorSidebar } from './components/InspectorSidebar';
 import { CommandDock } from './components/CommandDock';
 import {
+  alignSelectedDimensions,
   angleDegrees,
   DEG_TO_RAD,
   dist,
@@ -51,18 +56,71 @@ import {
 
 const STORAGE_KEY = 'vektorcad_saved_state_v1';
 
+const VALID_ENTITY_TYPES = new Set([
+  'line',
+  'polyline',
+  'rectangle',
+  'circle',
+  'arc',
+  'polygon',
+  'dimension',
+  'text',
+  'group',
+]);
+
+function sanitizeLoadedEntities(rawEntities: unknown[]): CadEntity[] {
+  const result: CadEntity[] = [];
+  for (const item of rawEntities) {
+    if (!item || typeof item !== 'object') continue;
+    const ent = item as Record<string, unknown>;
+    if (typeof ent.type !== 'string' || !VALID_ENTITY_TYPES.has(ent.type)) {
+      continue;
+    }
+    if (ent.type === 'group') {
+      const children = Array.isArray(ent.children)
+        ? sanitizeLoadedEntities(ent.children)
+        : [];
+      if (children.length > 0) {
+        result.push({ ...(ent as unknown as CadEntity), children } as CadEntity);
+      }
+      continue;
+    }
+    result.push(ent as unknown as CadEntity);
+  }
+  return result;
+}
+
 function loadSavedState(): { entities: CadEntity[]; layers: CadLayer[] } | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed.entities) && Array.isArray(parsed.layers)) {
-      return parsed;
+      return {
+        entities: sanitizeLoadedEntities(parsed.entities),
+        layers: parsed.layers,
+      };
     }
   } catch {
     // Ignore storage parse errors
   }
   return null;
+}
+
+function cloneEntityWithNewIds(entity: CadEntity, dx: number, dy: number): CadEntity {
+  const shifted = translateEntity(entity, dx, dy);
+  const newId = `paste_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  if (shifted.type === 'group') {
+    return {
+      ...shifted,
+      id: newId,
+      children: shifted.children.map((c) => cloneEntityWithNewIds(c, 0, 0)),
+    };
+  }
+  return {
+    ...shifted,
+    id: newId,
+  };
 }
 
 export default function App() {
@@ -82,10 +140,20 @@ export default function App() {
   const [activeLayerId, setActiveLayerId] = useState<string>('0');
   const [activeTool, setActiveTool] = useState<ToolType>('select');
   const [rectangleMode, setRectangleMode] = useState<RectangleMode>('corner');
+  const [defaultDimFontSize, setDefaultDimFontSize] = useState<number>(11);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [drawingPoints, setDrawingPoints] = useState<Point[]>([]);
 
-  // Responsive sidebar visibility (Desktop defaults open; Mobile/Tablet defaults closed so canvas is 100% visible)
+  // Clipboard state for Copy (Ctrl+C), Cut (Ctrl+X), Paste (Ctrl+V)
+  const [clipboard, setClipboard] = useState<CadEntity[]>([]);
+  const [pasteCount, setPasteCount] = useState<number>(0);
+
+  // Sequential 2-letter shortcut state (e.g. T -> R = TR, E -> X = EX, C -> O = CO, A -> R = AR, Z -> E = ZE)
+  const [pendingKeyPrefix, setPendingKeyPrefix] = useState<string | null>(null);
+  const prefixTimeoutRef = useRef<number | null>(null);
+  const eraseDelayTimeoutRef = useRef<number | null>(null);
+
+  // Responsive sidebar visibility
   const [showLeftPanel, setShowLeftPanel] = useState<boolean>(() =>
     typeof window !== 'undefined' ? window.innerWidth >= 1024 : true
   );
@@ -158,7 +226,7 @@ export default function App() {
     {
       id: 'init-1',
       timestamp: '00:00:01',
-      text: 'VektorCAD 2D 工程製圖核心已就緒 — 空白鍵等同 Enter 確認；支援窗選放大 (Z)、轉角/中心矩形 (R)、三點圓弧 (A)、剪切 (TR)、延伸 (EX) 與組裝圖元 (J)。',
+      text: 'VektorCAD 已就緒 — 支援複製(Ctrl+C)/剪下(Ctrl+X)/貼上(Ctrl+V)、保留原位置組裝圖元(J)、圓形與三點圓弧剪切(TR)、刪除圖元(E)及雙字母快捷鍵依序按鍵執行！',
       type: 'info',
     },
   ]);
@@ -233,62 +301,113 @@ export default function App() {
     (tool: ToolType) => {
       setActiveTool(tool);
       setDrawingPoints([]);
-      // On narrow mobile screens, auto-close left drawer after picking a tool so canvas is unobstructed
       if (typeof window !== 'undefined' && window.innerWidth < 1024) {
         setShowLeftPanel(false);
       }
       const toolNames: Record<ToolType, string> = {
-        select: 'SELECT 選取與掣點編輯模式 (快捷鍵 V)',
+        select: 'SELECT 選取與尺寸修改模式 (快捷鍵 V)',
         pan: 'PAN 平移視景模式 (快捷鍵 H)',
         zoomWindow: 'ZOOM WINDOW 窗選局部放大模式 (快捷鍵 Z) — 請點選放大區域的兩個對角點',
         line: 'LINE 畫直線模式 (快捷鍵 L) — 點選起點與終點，或輸入長度按空白鍵/Enter',
         polyline: 'PLINE 聚合線模式 (快捷鍵 P) — 連續點選頂點，按 C 封閉或按空白鍵/Enter 完成',
         rectangle: `RECTANG 矩形模式 (快捷鍵 R - 目前為${rectangleMode === 'center' ? '中心矩形' : '轉角矩形'})`,
         circle: 'CIRCLE 圓形模式 (快捷鍵 C) — 請點選圓心與半徑',
-        arc: 'ARC 三點圓弧模式 (快捷鍵 A) — 請依序點選 1.起點、2.弧上第二點、3.終點',
-        ellipse: 'ELLIPSE 橢圓形模式 (快捷鍵 E) — 請點選中心與長短軸',
+        arc: 'ARC 三點圓弧模式 (快捷鍵 A) — 依序點選 1.起點 P1、2.弧上第二點 P2、3.終點 P3',
         polygon: 'POLYGON 正多邊形模式 (快捷鍵 G) — 請點選中心與外接圓半徑',
-        dimension: 'DIMLINEAR 標註尺寸模式 (快捷鍵 D) — 請依序點選兩個測量端點，再拉出標註線高度點擊完成',
+        dimension: 'DIMLINEAR 標註尺寸模式 (快捷鍵 D) — 靠近既有標註線時可自動相互對齊',
         text: 'TEXT 文字註解模式 (快捷鍵 T) — 請點選文字插入位置',
         measure: 'DIST 距離與角度量測模式 (快捷鍵 K) — 請點選兩點進行量測',
+        erase: 'ERASE 刪除圖元模式 (快捷鍵 E) — 點選畫布上的任何圖元立即刪除',
         move: 'MOVE 移動物件模式 (快捷鍵 M) — 請指定基準點與目標點',
         copy: 'COPY 連續複製模式 (快捷鍵 CO) — 請指定基準點與放置點',
         rotate: 'ROTATE 旋轉模式 (快捷鍵 Q) — 請指定旋轉中心與角度',
         mirror: 'MIRROR 對稱鏡射模式 (快捷鍵 W) — 請點選兩點定義對稱軸線',
-        offset: `OFFSET 偏移複製模式 (快捷鍵 O - 目前偏移距離 ${offsetDistance}mm) — 可直接輸入數值按空白鍵/Enter`,
-        trim: 'TRIM 剪切圖元模式 (快捷鍵 TR) — 點選相交線段要切除的區段',
+        offset: `OFFSET 偏移複製模式 (快捷鍵 O - 目前偏移距離 ${offsetDistance}mm)`,
+        trim: 'TRIM 剪切圖元模式 (快捷鍵 TR) — 支援剪切直線、矩形、圓形與三點圓弧',
         extend: 'EXTEND 延伸圖元模式 (快捷鍵 EX) — 點選線段端點附近延伸至相交邊界',
-        join: 'JOIN 組裝圖元模式 (快捷鍵 J) — 點選多個圖元後按空白鍵或 Enter 組裝為單一聚合線',
+        join: 'JOIN 組裝圖元模式 (快捷鍵 J) — 保留選取圖元位置並合併為單一組裝物件',
       };
       logCommand(`指令切換: ${toolNames[tool]}`, 'command');
     },
     [logCommand, offsetDistance, rectangleMode]
   );
 
-  // Assemble / Join (組裝圖元) selected entities into a single PolylineEntity
+  // Copy / Cut / Paste Handlers
+  const handleCopyClipboard = useCallback(() => {
+    const selected = entities.filter((e) => selectedIds.includes(e.id));
+    if (selected.length === 0) {
+      logCommand('請先選取要複製到剪貼簿的圖元 (Ctrl+C)。', 'error');
+      return;
+    }
+    setClipboard(selected);
+    setPasteCount(0);
+    logCommand(
+      `COPYCLIP 已複製 ${selected.length} 個圖元至剪貼簿 (按 Ctrl+V 貼上)`,
+      'success'
+    );
+  }, [entities, logCommand, selectedIds]);
+
+  const handleCutClipboard = useCallback(() => {
+    const selected = entities.filter((e) => selectedIds.includes(e.id));
+    if (selected.length === 0) {
+      logCommand('請先選取要剪下的圖元 (Ctrl+X)。', 'error');
+      return;
+    }
+    setClipboard(selected);
+    setPasteCount(0);
+    const remaining = entities.filter((e) => !selectedIds.includes(e.id));
+    pushEntities(remaining);
+    setSelectedIds([]);
+    logCommand(
+      `CUTCLIP 已剪下 ${selected.length} 個圖元至剪貼簿 (按 Ctrl+V 貼上)`,
+      'success'
+    );
+  }, [entities, logCommand, pushEntities, selectedIds]);
+
+  const handlePasteClipboard = useCallback(() => {
+    if (clipboard.length === 0) {
+      logCommand('剪貼簿目前為空，請先複製 (Ctrl+C) 或剪下 (Ctrl+X) 圖元。', 'error');
+      return;
+    }
+    const nextStep = pasteCount + 1;
+    setPasteCount(nextStep);
+    const offset = nextStep * 20;
+    const pasted = clipboard.map((ent) =>
+      cloneEntityWithNewIds(ent, offset, -offset)
+    );
+    pushEntities([...entities, ...pasted]);
+    setSelectedIds(pasted.map((p) => p.id));
+    setActiveTool('select');
+    logCommand(
+      `PASTECLIP 已貼上 ${pasted.length} 個圖元 (偏移 +${offset}, -${offset} mm) — 可直接拖曳或按 M 移動`,
+      'success'
+    );
+  }, [clipboard, entities, logCommand, pasteCount, pushEntities]);
+
+  // Assemble / Join (組裝圖元) selected entities into a single composite GroupEntity preserving exact positions!
   const handleJoinSelected = useCallback(() => {
     const selectedEntities = entities.filter((e) => selectedIds.includes(e.id));
     if (selectedEntities.length < 2) {
       handleSelectTool('join');
       logCommand(
-        'JOIN 組裝圖元：請先點選 2 個以上要組裝的線段或幾何圖元，再按空白鍵或 Enter 完成組裝。',
+        'JOIN 組裝圖元：請先點選 2 個以上要組裝的圖元，再按空白鍵或 Enter 保留原位置組裝為單一物件。',
         'info'
       );
       return;
     }
 
-    const joined = joinSelectedEntities(selectedEntities, activeLayerId);
-    if (!joined) {
-      logCommand('所選物件無法組裝（請選取直線、聚合線、矩形或多邊形）。', 'error');
+    const grouped = joinSelectedEntities(selectedEntities, activeLayerId);
+    if (!grouped) {
+      logCommand('請選取至少 2 個圖元進行組裝。', 'error');
       return;
     }
 
     const remaining = entities.filter((e) => !selectedIds.includes(e.id));
-    pushEntities([...remaining, joined]);
-    setSelectedIds([joined.id]);
+    pushEntities([...remaining, grouped]);
+    setSelectedIds([grouped.id]);
     setActiveTool('select');
     logCommand(
-      `JOIN 已成功將 ${selectedEntities.length} 個圖元組裝合併為單一聚合線圖元 (${joined.points.length} 個頂點${joined.closed ? '，已封閉' : ''})！`,
+      `JOIN 已保留原始位置將 ${selectedEntities.length} 個圖元組裝為單一物件（共包含 ${grouped.children.length} 個子圖元，按 X 可隨時炸開）！`,
       'success'
     );
   }, [
@@ -300,29 +419,54 @@ export default function App() {
     selectedIds,
   ]);
 
+  // Align multiple selected dimensions
+  const handleAlignDimensions = useCallback(() => {
+    const { updated, alignedCount } = alignSelectedDimensions(
+      entities,
+      selectedIds
+    );
+    if (alignedCount < 2) {
+      logCommand(
+        '請先同時選取 2 個以上的「標註尺寸」物件（按住 Shift 點選或拉框選取），即可一鍵相互對齊！或者在繪製標註時將游標靠近既有標註線也會自動吸附對齊。',
+        'info'
+      );
+      return;
+    }
+    pushEntities(updated);
+    logCommand(
+      `DIM ALIGN 已將 ${alignedCount} 個標註尺寸相互對齊至同一標註基準線！`,
+      'success'
+    );
+  }, [entities, logCommand, pushEntities, selectedIds]);
+
   const handleDeleteSelected = useCallback(() => {
     if (selectedIds.length === 0) {
-      logCommand('請先選取要刪除的圖元物件。', 'error');
+      handleSelectTool('erase');
       return;
     }
     const remaining = entities.filter((e) => !selectedIds.includes(e.id));
     pushEntities(remaining);
-    logCommand(`ERASE 已刪除 ${selectedIds.length} 個圖元物件 (DEL)`, 'success');
+    logCommand(`ERASE 已刪除 ${selectedIds.length} 個圖元物件 (E / DEL)`, 'success');
     setSelectedIds([]);
-  }, [entities, logCommand, pushEntities, selectedIds]);
+  }, [entities, handleSelectTool, logCommand, pushEntities, selectedIds]);
 
   const handleExplodeSelected = useCallback(() => {
     if (selectedIds.length === 0) {
-      logCommand('EXPLODE 請先選取要炸開的矩形、聚合線或多邊形。', 'error');
+      logCommand(
+        'EXPLODE 請先選取要炸開的「組裝圖元」、「中心矩形 / 轉角矩形」、聚合線或多邊形。',
+        'error'
+      );
       return;
     }
     let explodedCount = 0;
     const nextEntities: CadEntity[] = [];
+    const newSelectedIds: string[] = [];
     for (const ent of entities) {
       if (selectedIds.includes(ent.id)) {
-        const segs = explodeEntity(ent);
-        if (segs) {
-          nextEntities.push(...segs);
+        const parts = explodeEntity(ent);
+        if (parts && parts.length > 0) {
+          nextEntities.push(...parts);
+          newSelectedIds.push(...parts.map((p) => p.id));
           explodedCount++;
         } else {
           nextEntities.push(ent);
@@ -333,14 +477,14 @@ export default function App() {
     }
     if (explodedCount > 0) {
       pushEntities(nextEntities);
-      setSelectedIds([]);
+      setSelectedIds(newSelectedIds);
       logCommand(
-        `EXPLODE 已將 ${explodedCount} 個複合圖元炸開為獨立直線段`,
+        `EXPLODE 已成功炸開 ${explodedCount} 個物件（還原為 ${newSelectedIds.length} 個獨立圖元）！`,
         'success'
       );
     } else {
       logCommand(
-        '所選物件無法再炸開（僅矩形、聚合線、正多邊形支援炸開為直線）。',
+        '所選物件為單一直線或圓形，無法再炸開（組裝圖元、中心矩形、轉角矩形、聚合線、正多邊形皆可炸開）。',
         'error'
       );
     }
@@ -350,10 +494,7 @@ export default function App() {
     if (selectedIds.length === 0) return;
     const copies = entities
       .filter((e) => selectedIds.includes(e.id))
-      .map((e, idx) => ({
-        ...translateEntity(e, 25, -25),
-        id: `dup_${Date.now()}_${idx}`,
-      }));
+      .map((e) => cloneEntityWithNewIds(e, 25, -25));
     pushEntities([...entities, ...copies]);
     setSelectedIds(copies.map((c) => c.id));
     logCommand(
@@ -362,7 +503,7 @@ export default function App() {
     );
   }, [entities, logCommand, pushEntities, selectedIds]);
 
-  // One-click Automatic Dimensioning for selected lines/rectangles/circles
+  // One-click Automatic Dimensioning
   const handleAutoDimensionSelected = useCallback(() => {
     if (selectedIds.length === 0) {
       handleSelectTool('dimension');
@@ -396,6 +537,7 @@ export default function App() {
             p1: ent.p1,
             p2: ent.p2,
             offsetPoint: { x: mid.x + nx * 24, y: mid.y + ny * 24 },
+            fontSize: defaultDimFontSize,
           });
         }
       } else if (ent.type === 'rectangle') {
@@ -410,6 +552,7 @@ export default function App() {
           p1: { x: minX, y: maxY },
           p2: { x: maxX, y: maxY },
           offsetPoint: { x: (minX + maxX) / 2, y: maxY + 26 },
+          fontSize: defaultDimFontSize,
         });
         newDims.push({
           id: `autodim_h_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -418,6 +561,7 @@ export default function App() {
           p1: { x: maxX, y: minY },
           p2: { x: maxX, y: maxY },
           offsetPoint: { x: maxX + 26, y: (minY + maxY) / 2 },
+          fontSize: defaultDimFontSize,
         });
       } else if (ent.type === 'circle') {
         const { center, radius } = ent;
@@ -429,6 +573,7 @@ export default function App() {
           p2: { x: center.x + radius, y: center.y },
           offsetPoint: { x: center.x, y: center.y + radius + 24 },
           textOverride: `Ø${(radius * 2).toFixed(1)} mm`,
+          fontSize: defaultDimFontSize,
         });
       }
     }
@@ -447,6 +592,7 @@ export default function App() {
     }
   }, [
     activeLayerId,
+    defaultDimFontSize,
     entities,
     handleSelectTool,
     layers,
@@ -457,7 +603,7 @@ export default function App() {
 
   const handleZoomExtents = useCallback(() => {
     setFitTrigger((t) => t + 1);
-    logCommand('ZOOM EXTENTS 已自動縮放並置中顯示完整圖面', 'info');
+    logCommand('ZOOM EXTENTS 已自動縮放並置中顯示完整圖面 (ZE)', 'info');
   }, [logCommand]);
 
   const toggleSetting = useCallback(
@@ -488,8 +634,27 @@ export default function App() {
     [logCommand]
   );
 
-  // Global Direct Keyboard Shortcuts
+  // Global Direct & Sequential Multi-Letter Keyboard Shortcuts
   useEffect(() => {
+    const clearPrefix = () => {
+      if (prefixTimeoutRef.current) {
+        window.clearTimeout(prefixTimeoutRef.current);
+        prefixTimeoutRef.current = null;
+      }
+      setPendingKeyPrefix(null);
+    };
+
+    const startPrefix = (letter: string) => {
+      if (prefixTimeoutRef.current) {
+        window.clearTimeout(prefixTimeoutRef.current);
+      }
+      setPendingKeyPrefix(letter);
+      prefixTimeoutRef.current = window.setTimeout(() => {
+        setPendingKeyPrefix(null);
+        prefixTimeoutRef.current = null;
+      }, 950);
+    };
+
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
@@ -525,20 +690,40 @@ export default function App() {
         return;
       }
 
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
-        e.preventDefault();
-        if (e.shiftKey) handleRedo();
-        else handleUndo();
-        return;
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
-        e.preventDefault();
-        handleRedo();
-        return;
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
-        e.preventDefault();
-        handleDuplicateSelected();
+      // Ctrl/Cmd + Z, Y, C, X, V, D
+      if (e.ctrlKey || e.metaKey) {
+        const lower = e.key.toLowerCase();
+        if (lower === 'z') {
+          e.preventDefault();
+          if (e.shiftKey) handleRedo();
+          else handleUndo();
+          return;
+        }
+        if (lower === 'y') {
+          e.preventDefault();
+          handleRedo();
+          return;
+        }
+        if (lower === 'c') {
+          e.preventDefault();
+          handleCopyClipboard();
+          return;
+        }
+        if (lower === 'x') {
+          e.preventDefault();
+          handleCutClipboard();
+          return;
+        }
+        if (lower === 'v') {
+          e.preventDefault();
+          handlePasteClipboard();
+          return;
+        }
+        if (lower === 'd') {
+          e.preventDefault();
+          handleDuplicateSelected();
+          return;
+        }
         return;
       }
 
@@ -553,73 +738,156 @@ export default function App() {
         return;
       }
 
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.altKey) return;
 
       const k = e.key.toLowerCase();
+      if (!/^[a-z]$/.test(k)) return;
 
+      // Allow 'c' to close a polyline if currently drawing a polyline with >= 3 points
       if (k === 'c' && activeTool === 'polyline' && drawingPoints.length >= 3) {
         return;
       }
 
+      // 1. Check 2-letter sequential shortcut combinations first (when drawingPoints.length === 0)
+      if (pendingKeyPrefix && drawingPoints.length === 0) {
+        const combo = `${pendingKeyPrefix}${k.toUpperCase()}`;
+        if (combo === 'TR') {
+          e.preventDefault();
+          clearPrefix();
+          handleSelectTool('trim');
+          return;
+        }
+        if (combo === 'EX') {
+          e.preventDefault();
+          if (eraseDelayTimeoutRef.current) {
+            window.clearTimeout(eraseDelayTimeoutRef.current);
+            eraseDelayTimeoutRef.current = null;
+          }
+          clearPrefix();
+          handleSelectTool('extend');
+          return;
+        }
+        if (combo === 'CO' || combo === 'CP') {
+          e.preventDefault();
+          clearPrefix();
+          handleSelectTool('copy');
+          return;
+        }
+        if (combo === 'AR') {
+          e.preventDefault();
+          clearPrefix();
+          setActiveTool('select');
+          setActiveModal('array');
+          logCommand('指令切換: ARRAY 陣列複製工具 (快捷鍵 AR)', 'command');
+          return;
+        }
+        if (combo === 'ZE') {
+          e.preventDefault();
+          clearPrefix();
+          setActiveTool('select');
+          handleZoomExtents();
+          return;
+        }
+        if (combo === 'ZW') {
+          e.preventDefault();
+          clearPrefix();
+          handleSelectTool('zoomWindow');
+          return;
+        }
+      }
+
+      // 2. Single-key shortcuts (and start prefix if it's T, E, C, A, Z)
       switch (k) {
-        case 'l':
+        case 't':
           e.preventDefault();
-          handleSelectTool('line');
+          startPrefix('T');
+          handleSelectTool('text');
           break;
-        case 'd':
+        case 'e':
           e.preventDefault();
-          handleSelectTool('dimension');
-          break;
-        case 'b':
-          e.preventDefault();
-          handleAutoDimensionSelected();
-          break;
-        case 'p':
-          e.preventDefault();
-          handleSelectTool('polyline');
-          break;
-        case 'r':
-          e.preventDefault();
-          handleSelectTool('rectangle');
+          startPrefix('E');
+          if (selectedIds.length > 0) {
+            // Delay 300ms in case the user is typing E -> X for Extend (EX)
+            if (eraseDelayTimeoutRef.current) {
+              window.clearTimeout(eraseDelayTimeoutRef.current);
+            }
+            eraseDelayTimeoutRef.current = window.setTimeout(() => {
+              eraseDelayTimeoutRef.current = null;
+              setPendingKeyPrefix(null);
+              handleDeleteSelected();
+            }, 300);
+          } else {
+            handleSelectTool('erase');
+          }
           break;
         case 'c':
           e.preventDefault();
+          startPrefix('C');
           handleSelectTool('circle');
           break;
         case 'a':
           e.preventDefault();
+          startPrefix('A');
           handleSelectTool('arc');
           break;
-        case 'e':
+        case 'z':
           e.preventDefault();
-          handleSelectTool('ellipse');
+          startPrefix('Z');
+          handleSelectTool('zoomWindow');
+          break;
+        case 'l':
+          e.preventDefault();
+          clearPrefix();
+          handleSelectTool('line');
+          break;
+        case 'd':
+          e.preventDefault();
+          clearPrefix();
+          handleSelectTool('dimension');
+          break;
+        case 'b':
+          e.preventDefault();
+          clearPrefix();
+          handleAutoDimensionSelected();
+          break;
+        case 'p':
+          e.preventDefault();
+          clearPrefix();
+          handleSelectTool('polyline');
+          break;
+        case 'r':
+          e.preventDefault();
+          clearPrefix();
+          handleSelectTool('rectangle');
           break;
         case 'g':
           e.preventDefault();
+          clearPrefix();
           handleSelectTool('polygon');
-          break;
-        case 't':
-          e.preventDefault();
-          handleSelectTool('text');
           break;
         case 'k':
           e.preventDefault();
+          clearPrefix();
           handleSelectTool('measure');
           break;
         case 'v':
           e.preventDefault();
+          clearPrefix();
           handleSelectTool('select');
           break;
         case 'h':
           e.preventDefault();
+          clearPrefix();
           handleSelectTool('pan');
           break;
         case 'm':
           e.preventDefault();
+          clearPrefix();
           handleSelectTool('move');
           break;
         case 'j':
           e.preventDefault();
+          clearPrefix();
           if (selectedIds.length >= 2) {
             handleJoinSelected();
           } else {
@@ -628,25 +896,26 @@ export default function App() {
           break;
         case 'q':
           e.preventDefault();
+          clearPrefix();
           handleSelectTool('rotate');
           break;
         case 'w':
           e.preventDefault();
+          clearPrefix();
           handleSelectTool('mirror');
           break;
         case 'o':
           e.preventDefault();
+          clearPrefix();
           handleSelectTool('offset');
           break;
         case 'x':
           e.preventDefault();
+          clearPrefix();
           handleExplodeSelected();
           break;
-        case 'z':
-          e.preventDefault();
-          handleSelectTool('zoomWindow');
-          break;
         default:
+          clearPrefix();
           break;
       }
     };
@@ -657,13 +926,19 @@ export default function App() {
     activeTool,
     drawingPoints.length,
     handleAutoDimensionSelected,
+    handleCopyClipboard,
+    handleCutClipboard,
     handleDeleteSelected,
     handleDuplicateSelected,
     handleExplodeSelected,
     handleJoinSelected,
+    handlePasteClipboard,
     handleRedo,
     handleSelectTool,
     handleUndo,
+    handleZoomExtents,
+    logCommand,
+    pendingKeyPrefix,
     selectedIds.length,
     toggleSetting,
   ]);
@@ -673,6 +948,20 @@ export default function App() {
     const trimmed = rawInput.trim();
     const upper = trimmed.toUpperCase();
     logCommand(`> ${trimmed}`, 'command');
+
+    if (upper === 'E' || upper === 'ERASE' || upper === 'DEL' || upper === '刪除') {
+      if (selectedIds.length > 0) {
+        handleDeleteSelected();
+      } else {
+        handleSelectTool('erase');
+      }
+      return;
+    }
+
+    if (upper === 'J' || upper === 'JOIN' || upper === '組裝' || upper === '組裝圖元') {
+      handleJoinSelected();
+      return;
+    }
 
     const cmdMap: Record<string, ToolType> = {
       L: 'line',
@@ -692,9 +981,6 @@ export default function App() {
       ARC: 'arc',
       圓弧: 'arc',
       三點圓弧: 'arc',
-      EL: 'ellipse',
-      ELLIPSE: 'ellipse',
-      橢圓: 'ellipse',
       POL: 'polygon',
       POLYGON: 'polygon',
       多邊形: 'polygon',
@@ -742,11 +1028,6 @@ export default function App() {
       SELECT: 'select',
     };
 
-    if (upper === 'J' || upper === 'JOIN' || upper === '組裝' || upper === '組裝圖元') {
-      handleJoinSelected();
-      return;
-    }
-
     if (cmdMap[upper]) {
       handleSelectTool(cmdMap[upper]);
       return;
@@ -760,21 +1041,16 @@ export default function App() {
       handleRedo();
       return;
     }
-    if (
-      upper === 'E' ||
-      upper === 'ERASE' ||
-      upper === 'DEL' ||
-      upper === '刪除'
-    ) {
-      handleDeleteSelected();
-      return;
-    }
     if (upper === 'X' || upper === 'EXPLODE' || upper === '炸開') {
       handleExplodeSelected();
       return;
     }
     if (upper === 'B' || upper === 'AUTODIM' || upper === '自動標註') {
       handleAutoDimensionSelected();
+      return;
+    }
+    if (upper === 'ALIGN' || upper === '對齊標註') {
+      handleAlignDimensions();
       return;
     }
     if (upper === 'ZE' || upper === 'ZOOM' || upper === '全圖置中') {
@@ -792,7 +1068,6 @@ export default function App() {
       return;
     }
 
-    // If in offset mode and user enters a number in command dock, update offsetDistance
     if (activeTool === 'offset' && /^-?\d+(?:\.\d+)?$/.test(trimmed)) {
       const val = parseFloat(trimmed);
       if (!isNaN(val) && val > 0) {
@@ -899,7 +1174,7 @@ export default function App() {
     }
 
     logCommand(
-      `未知指令「${trimmed}」— 支援指令：L (直線)、D (標註)、R (矩形)、A (三點圓弧)、TR (剪切)、EX (延伸)、J (組裝圖元)、O (偏移)、Z (窗選放大) 或座標如 100,50`,
+      `未知指令「${trimmed}」— 支援指令：L (直線)、D (標註)、R (矩形)、A (三點圓弧)、E (刪除)、TR (剪切)、EX (延伸)、J (組裝圖元)、X (炸開)、O (偏移)、Z (窗選放大)`,
       'error'
     );
   };
@@ -922,10 +1197,7 @@ export default function App() {
           const dx = c * arraySpacingX;
           const dy = r * arraySpacingY;
           for (const ent of baseEntities) {
-            generated.push({
-              ...translateEntity(ent, dx, dy),
-              id: `arr_${r}_${c}_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
-            });
+            generated.push(cloneEntityWithNewIds(ent, dx, dy));
           }
         }
       }
@@ -934,10 +1206,8 @@ export default function App() {
       for (let i = 1; i < arrayPolarCount; i++) {
         const angleRad = (i * 2 * Math.PI) / arrayPolarCount;
         for (const ent of baseEntities) {
-          generated.push({
-            ...rotateEntity(ent, center, angleRad),
-            id: `parr_${i}_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
-          });
+          const rotated = rotateEntity(ent, center, angleRad);
+          generated.push(cloneEntityWithNewIds(rotated, 0, 0));
         }
       }
     }
@@ -962,9 +1232,8 @@ export default function App() {
 
   return (
     <div className="safe-app-container flex flex-col w-full h-full max-h-[100dvh] bg-[#0B0F17] text-slate-100 overflow-hidden select-none">
-      {/* Top Bar Contract: 3 Zones (Brand Wordmark — 4 Concise Nav Links — 1 Primary Action) */}
+      {/* Top Bar Contract: 3 Zones */}
       <header className="flex items-center justify-between gap-4 sm:gap-8 px-3 sm:px-5 py-2 bg-[#0F172A] border-b border-slate-800 shrink-0">
-        {/* Zone 1: Single text element wordmark */}
         <a
           href="#workspace"
           onClick={(e) => e.preventDefault()}
@@ -973,7 +1242,6 @@ export default function App() {
           VektorCAD 專業工程製圖
         </a>
 
-        {/* Zone 2: 4 single-line navigation links */}
         <nav className="flex items-center gap-3 sm:gap-6 text-xs font-medium text-slate-300 overflow-x-auto">
           <button
             type="button"
@@ -987,7 +1255,7 @@ export default function App() {
             onClick={() => setActiveModal('array')}
             className="hover:text-sky-300 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
           >
-            陣列複製
+            陣列複製 (AR)
           </button>
           <button
             type="button"
@@ -1009,7 +1277,6 @@ export default function App() {
           </button>
         </nav>
 
-        {/* Zone 3: 1 primary CTA button */}
         <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
@@ -1021,10 +1288,9 @@ export default function App() {
         </div>
       </header>
 
-      {/* Secondary Workspace Ribbon Toolbar (Horizontally scrollable on narrow screens so nothing ever wraps or clips) */}
+      {/* Secondary Workspace Ribbon Toolbar */}
       <div className="flex items-center justify-between gap-2 px-3 py-1.5 bg-[#0B0F17] border-b border-slate-800/90 text-xs shrink-0 overflow-x-auto">
         <div className="flex items-center gap-1.5 shrink-0">
-          {/* Toggle Left Tool Palette */}
           <button
             type="button"
             onClick={() => setShowLeftPanel((v) => !v)}
@@ -1052,6 +1318,19 @@ export default function App() {
           >
             <Minus className="w-3.5 h-3.5 -rotate-45" />
             <span>畫直線 (L)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleSelectTool('arc')}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md font-medium border transition-colors whitespace-nowrap shrink-0 ${
+              activeTool === 'arc'
+                ? 'bg-sky-500 text-white border-sky-400 shadow-sm'
+                : 'bg-slate-900 text-slate-200 border-slate-700 hover:border-sky-500/60'
+            }`}
+          >
+            <ThreePointArcIcon className="w-3.5 h-3.5" />
+            <span>三點圓弧 (A)</span>
           </button>
 
           <button
@@ -1106,7 +1385,55 @@ export default function App() {
             <span>組裝圖元 (J)</span>
           </button>
 
+          <button
+            type="button"
+            onClick={() => {
+              if (selectedIds.length > 0) handleDeleteSelected();
+              else handleSelectTool('erase');
+            }}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-md font-medium border transition-colors whitespace-nowrap shrink-0 ${
+              activeTool === 'erase'
+                ? 'bg-rose-600 text-white border-rose-400 shadow-sm'
+                : 'bg-slate-900 text-rose-300 border-rose-500/40 hover:bg-rose-950/50'
+            }`}
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            <span>刪除圖元 (E)</span>
+          </button>
+
           <div className="h-4 w-px bg-slate-800 mx-0.5" />
+
+          {/* Copy / Cut / Paste Ribbon Buttons */}
+          <button
+            type="button"
+            onClick={handleCopyClipboard}
+            disabled={selectedIds.length === 0}
+            title="複製選取圖元 (Ctrl+C)"
+            className="flex items-center gap-1 px-2 py-1 rounded bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800 disabled:opacity-40 whitespace-nowrap shrink-0"
+          >
+            <ClipboardCopy className="w-3.5 h-3.5" />
+            <span className="hidden xl:inline">複製</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleCutClipboard}
+            disabled={selectedIds.length === 0}
+            title="剪下選取圖元 (Ctrl+X)"
+            className="flex items-center gap-1 px-2 py-1 rounded bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800 disabled:opacity-40 whitespace-nowrap shrink-0"
+          >
+            <Scissors className="w-3.5 h-3.5" />
+            <span className="hidden xl:inline">剪下</span>
+          </button>
+          <button
+            type="button"
+            onClick={handlePasteClipboard}
+            disabled={clipboard.length === 0}
+            title="貼上剪貼簿圖元 (Ctrl+V)"
+            className="flex items-center gap-1 px-2 py-1 rounded bg-slate-900 text-sky-300 border border-slate-800 hover:bg-slate-800 disabled:opacity-40 whitespace-nowrap shrink-0"
+          >
+            <Clipboard className="w-3.5 h-3.5" />
+            <span className="hidden xl:inline">貼上</span>
+          </button>
 
           {/* Undo / Redo */}
           <button
@@ -1114,23 +1441,21 @@ export default function App() {
             onClick={handleUndo}
             disabled={historyIndex === 0}
             title="復原 (Ctrl+Z)"
-            className="flex items-center gap-1 px-2 py-1 rounded bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800 disabled:opacity-40 whitespace-nowrap shrink-0"
+            className="p-1.5 rounded bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800 disabled:opacity-40 shrink-0"
           >
             <Undo2 className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">復原</span>
           </button>
           <button
             type="button"
             onClick={handleRedo}
             disabled={historyIndex >= history.length - 1}
             title="重做 (Ctrl+Y)"
-            className="flex items-center gap-1 px-2 py-1 rounded bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800 disabled:opacity-40 whitespace-nowrap shrink-0"
+            className="p-1.5 rounded bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800 disabled:opacity-40 shrink-0"
           >
             <Redo2 className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">重做</span>
           </button>
 
-          {/* Zoom Controls including Window Zoom (窗選局部放大) */}
+          {/* Zoom Controls */}
           <button
             type="button"
             onClick={() => handleSelectTool('zoomWindow')}
@@ -1163,11 +1488,11 @@ export default function App() {
           <button
             type="button"
             onClick={handleZoomExtents}
-            title="自動縮放並置中顯示完整圖面 (指令 ZE)"
+            title="自動縮放並置中顯示完整圖面 (快捷鍵 ZE)"
             className="flex items-center gap-1 px-2.5 py-1 rounded bg-sky-950/60 text-sky-300 border border-sky-500/40 hover:bg-sky-900/60 whitespace-nowrap shrink-0"
           >
             <Maximize className="w-3.5 h-3.5" />
-            <span>全圖置中</span>
+            <span>全圖置中 (ZE)</span>
           </button>
         </div>
 
@@ -1196,6 +1521,33 @@ export default function App() {
                 }`}
               >
                 中心矩形
+              </button>
+            </div>
+          )}
+
+          {activeTool === 'dimension' && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-amber-300 font-medium">標註字高:</span>
+              <input
+                type="number"
+                min={6}
+                max={72}
+                value={defaultDimFontSize}
+                onChange={(e) =>
+                  setDefaultDimFontSize(
+                    Math.max(6, Math.min(72, Number(e.target.value)))
+                  )
+                }
+                className="w-12 px-1.5 py-0.5 font-mono bg-slate-900 border border-amber-500/50 rounded text-amber-200"
+              />
+              <button
+                type="button"
+                onClick={handleAlignDimensions}
+                title="相互對齊選取的標註尺寸"
+                className="flex items-center gap-1 px-2 py-0.5 bg-sky-950/80 hover:bg-sky-900 text-sky-300 border border-sky-500/40 rounded text-[11px]"
+              >
+                <AlignCenterHorizontal className="w-3 h-3" />
+                <span>對齊標註</span>
               </button>
             </div>
           )}
@@ -1248,7 +1600,6 @@ export default function App() {
             ))}
           </select>
 
-          {/* Toggle Right Inspector & Layers Panel */}
           <button
             type="button"
             onClick={() => setShowRightPanel((v) => !v)}
@@ -1260,14 +1611,14 @@ export default function App() {
             }`}
           >
             <PanelRight className="w-3.5 h-3.5" />
-            <span>性質/圖層</span>
+            <span>性質/修改尺寸</span>
           </button>
         </div>
       </div>
 
       {/* Main Responsive CAD Workspace */}
       <main className="relative flex-1 flex min-w-0 min-h-0 overflow-hidden">
-        {/* Left Tool Palette (Desktop inline or Mobile overlay drawer) */}
+        {/* Left Tool Palette */}
         {showLeftPanel && (
           <div className="absolute inset-y-0 left-0 z-30 lg:static lg:z-auto flex h-full shadow-2xl lg:shadow-none">
             <ToolPalette
@@ -1278,6 +1629,11 @@ export default function App() {
               offsetDistance={offsetDistance}
               onChangeOffsetDistance={setOffsetDistance}
               selectedCount={selectedIds.length}
+              hasClipboard={clipboard.length > 0}
+              onCopyClipboard={handleCopyClipboard}
+              onCutClipboard={handleCutClipboard}
+              onPasteClipboard={handlePasteClipboard}
+              onAlignDimensions={handleAlignDimensions}
               onOpenArrayModal={() => setActiveModal('array')}
               onExplodeSelected={handleExplodeSelected}
               onJoinSelected={handleJoinSelected}
@@ -1303,6 +1659,8 @@ export default function App() {
           activeTool={activeTool}
           rectangleMode={rectangleMode}
           onChangeRectangleMode={setRectangleMode}
+          defaultDimFontSize={defaultDimFontSize}
+          onChangeDefaultDimFontSize={setDefaultDimFontSize}
           selectedIds={selectedIds}
           settings={settings}
           polygonSides={polygonSides}
@@ -1322,6 +1680,9 @@ export default function App() {
           onAddEntity={handleAddEntity}
           onUpdateEntities={handleUpdateEntities}
           onJoinSelected={handleJoinSelected}
+          onExplodeSelected={handleExplodeSelected}
+          onDeleteSelected={handleDeleteSelected}
+          onAlignDimensions={handleAlignDimensions}
           onLogCommand={logCommand}
           onToolComplete={() => handleSelectTool('select')}
           drawingPoints={drawingPoints}
@@ -1329,7 +1690,7 @@ export default function App() {
           fitTrigger={fitTrigger}
         />
 
-        {/* Right Inspector & Layers Sidebar (Desktop inline or Mobile overlay drawer) */}
+        {/* Right Inspector & Layers Sidebar */}
         {showRightPanel && (
           <div className="absolute inset-y-0 right-0 z-30 xl:static xl:z-auto flex h-full shadow-2xl xl:shadow-none">
             <InspectorSidebar
@@ -1369,6 +1730,8 @@ export default function App() {
               onUpdateEntities={handleUpdateEntities}
               onDeleteSelected={handleDeleteSelected}
               onExplodeSelected={handleExplodeSelected}
+              onJoinSelected={handleJoinSelected}
+              onAlignDimensions={handleAlignDimensions}
               onDuplicateSelected={handleDuplicateSelected}
               settings={settings}
               onUpdateSettings={setSettings}
@@ -1385,6 +1748,7 @@ export default function App() {
         activeSnap={activeSnap}
         zoom={zoom}
         settings={settings}
+        pendingKeyPrefix={pendingKeyPrefix}
         onToggleSetting={toggleSetting}
         onExecuteCommand={handleExecuteCommand}
       />
@@ -1429,7 +1793,10 @@ export default function App() {
                       setSelectedIds([]);
                       setActiveModal(null);
                       setTimeout(() => setFitTrigger((t) => t + 1), 30);
-                      logCommand(`已載入工程圖範本：「${tpl.name}」並自動縮放至全圖視角`, 'success');
+                      logCommand(
+                        `已載入工程圖範本：「${tpl.name}」並自動縮放至全圖視角`,
+                        'success'
+                      );
                     }}
                     className="px-4 py-2 text-xs font-medium text-white bg-sky-600 hover:bg-sky-500 rounded-lg whitespace-nowrap shrink-0"
                   >
@@ -1450,7 +1817,7 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <Keyboard className="w-5 h-5 text-sky-400" />
                 <h2 className="text-base font-bold text-slate-100">
-                  鍵盤快捷鍵與精確製圖指南
+                  鍵盤快捷鍵與雙字母連續按鍵指南
                 </h2>
               </div>
               <button
@@ -1465,20 +1832,23 @@ export default function App() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
               <div className="bg-slate-950/80 border border-slate-800 rounded-lg p-4 space-y-2">
                 <h3 className="font-semibold text-sky-300 mb-2">
-                  繪圖與檢視快捷鍵
+                  繪圖、檢視與剪貼簿快捷鍵
                 </h3>
                 {[
-                  ['空白鍵 / Enter', '確認輸入數值 / 結束繪製 / 執行組裝'],
-                  ['Z', '窗選局部放大 (拉框放大指定局部區域)'],
+                  ['Ctrl+C / X / V', '複製 / 剪下 / 貼上圖元物件'],
+                  ['空白鍵 / Enter', '確認輸入數值 / 結束繪製 / 確認組裝'],
+                  ['Z / ZE', '窗選局部放大 (Z) / 全圖置中 (按 Z 再按 E)'],
                   ['L', '畫直線 (即時顯示 ΔX/ΔY 相對距離虛線)'],
-                  ['R', '畫矩形 (可切換「轉角矩形」或「中心矩形」)'],
-                  ['A', '三點圓弧 (依序點選起點、第二點、終點)'],
-                  ['D / B', '標註尺寸 (D) / 一鍵自動標註選取物件 (B)'],
-                  ['P', '聚合線 (按 C 封閉、按空白鍵/Enter 結束)'],
-                  ['C / E / G', '圓形 (C) / 橢圓 (E) / 正多邊形 (G)'],
-                  ['T / K', '文字註解 (T) / 測量兩點距離與角度 (K)'],
+                  ['R', '畫矩形 (支援「轉角矩形」與「中心矩形」)'],
+                  ['A', '三點圓弧 (依序點選 P1 起點、P2 第二點、P3 終點)'],
+                  ['D / B', '標註尺寸 (自動吸附對齊) / 自動標註 (B)'],
+                  ['C / P / G', '圓形 (C) / 聚合線 (P) / 正多邊形 (G)'],
+                  ['T / K', '文字註解 (T) / 測量距離與角度 (K)'],
                 ].map(([key, desc]) => (
-                  <div key={key} className="flex items-center justify-between gap-2">
+                  <div
+                    key={key}
+                    className="flex items-center justify-between gap-2"
+                  >
                     <span className="text-slate-300">{desc}</span>
                     <kbd className="px-2 py-0.5 font-mono font-semibold bg-slate-900 text-sky-300 border border-slate-700 rounded shrink-0">
                       {key}
@@ -1489,20 +1859,23 @@ export default function App() {
 
               <div className="bg-slate-950/80 border border-slate-800 rounded-lg p-4 space-y-2">
                 <h3 className="font-semibold text-amber-300 mb-2">
-                  修改、修剪與精確鎖點快捷鍵
+                  修改編輯與雙字母順序按鍵快捷鍵
                 </h3>
                 {[
-                  ['TR', '剪切圖元 (點選相交線段直接切除區段)'],
-                  ['EX', '延伸圖元 (點選線段端點延伸至邊界)'],
-                  ['O', '偏移複製 (支援直接輸入偏移距離數值)'],
-                  ['J', '組裝圖元 (將多個選取圖元合併為單一聚合線)'],
-                  ['M / CO / Q / W', '移動 (M) / 複製 (CO) / 旋轉 (Q) / 鏡射 (W)'],
-                  ['X / DEL', '炸開圖元為直線 (X) / 刪除選取物件 (DEL)'],
+                  ['E', '刪除圖元 (刪已選物件，或進入點選刪除模式)'],
+                  ['T → R (TR)', '依序按 T 與 R：剪切直線、圓形與三點圓弧'],
+                  ['E → X (EX)', '依序按 E 與 X：延伸圖元至相交邊界'],
+                  ['C → O (CO)', '依序按 C 與 O：連續複製物件'],
+                  ['A → R (AR)', '依序按 A 與 R：開啟矩形/環形陣列複製'],
+                  ['J', '組裝圖元 (保留選取圖形原位置合併成單一物件)'],
+                  ['X', '炸開圖元 (可炸開組裝圖元、中心矩形、多邊形)'],
+                  ['O / M / Q / W', '偏移複製 (O) / 移動 (M) / 旋轉 (Q) / 鏡射 (W)'],
                   ['F8 / F3 / F12', '正交鎖定 (F8) / 物件鎖點 (F3) / 動態輸入 (F12)'],
-                  ['V / ESC', '選取模式 / 取消目前步驟'],
-                  ['Ctrl+Z / Y', '復原上一步 / 重做'],
                 ].map(([key, desc]) => (
-                  <div key={key} className="flex items-center justify-between gap-2">
+                  <div
+                    key={key}
+                    className="flex items-center justify-between gap-2"
+                  >
                     <span className="text-slate-300">{desc}</span>
                     <kbd className="px-2 py-0.5 font-mono font-semibold bg-slate-900 text-amber-300 border border-slate-700 rounded shrink-0">
                       {key}
@@ -1523,7 +1896,7 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <Grid className="w-5 h-5 text-sky-400" />
                 <h2 className="text-base font-bold text-slate-100">
-                  陣列複製工具 (ARRAY)
+                  陣列複製工具 (ARRAY - 快捷鍵 AR)
                 </h2>
               </div>
               <button
@@ -1564,7 +1937,9 @@ export default function App() {
               {arrayMode === 'rect' ? (
                 <div className="grid grid-cols-2 gap-3 font-mono">
                   <div>
-                    <label className="block text-slate-400 mb-1">列數 (Rows)</label>
+                    <label className="block text-slate-400 mb-1">
+                      列數 (Rows)
+                    </label>
                     <input
                       type="number"
                       min={1}
@@ -1575,7 +1950,9 @@ export default function App() {
                     />
                   </div>
                   <div>
-                    <label className="block text-slate-400 mb-1">欄數 (Columns)</label>
+                    <label className="block text-slate-400 mb-1">
+                      欄數 (Columns)
+                    </label>
                     <input
                       type="number"
                       min={1}
@@ -1586,7 +1963,9 @@ export default function App() {
                     />
                   </div>
                   <div>
-                    <label className="block text-slate-400 mb-1">水平間距 ΔX (mm)</label>
+                    <label className="block text-slate-400 mb-1">
+                      水平間距 ΔX (mm)
+                    </label>
                     <input
                       type="number"
                       value={arraySpacingX}
@@ -1595,7 +1974,9 @@ export default function App() {
                     />
                   </div>
                   <div>
-                    <label className="block text-slate-400 mb-1">垂直間距 ΔY (mm)</label>
+                    <label className="block text-slate-400 mb-1">
+                      垂直間距 ΔY (mm)
+                    </label>
                     <input
                       type="number"
                       value={arraySpacingY}
@@ -1615,13 +1996,17 @@ export default function App() {
                       min={2}
                       max={36}
                       value={arrayPolarCount}
-                      onChange={(e) => setArrayPolarCount(Number(e.target.value))}
+                      onChange={(e) =>
+                        setArrayPolarCount(Number(e.target.value))
+                      }
                       className="w-full px-3 py-1.5 bg-slate-950 border border-slate-700 rounded text-slate-100"
                     />
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-slate-400 mb-1">旋轉中心 X (mm)</label>
+                      <label className="block text-slate-400 mb-1">
+                        旋轉中心 X (mm)
+                      </label>
                       <input
                         type="number"
                         value={arrayPolarCenterX}
@@ -1632,7 +2017,9 @@ export default function App() {
                       />
                     </div>
                     <div>
-                      <label className="block text-slate-400 mb-1">旋轉中心 Y (mm)</label>
+                      <label className="block text-slate-400 mb-1">
+                        旋轉中心 Y (mm)
+                      </label>
                       <input
                         type="number"
                         value={arrayPolarCenterY}

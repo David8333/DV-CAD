@@ -10,14 +10,26 @@ import {
   Sliders,
   Scissors,
   Copy,
+  Combine,
+  AlignCenterHorizontal,
 } from 'lucide-react';
 import {
   CadEntity,
   CadLayer,
+  DimensionEntity,
   DraftingSettings,
   LineType,
 } from '../types/cad';
-import { getEntityMetrics } from '../utils/geometry';
+import {
+  angleDegrees,
+  DEG_TO_RAD,
+  dist,
+  getArcThreePoints,
+  getEntityBounds,
+  getEntityMetrics,
+  midpoint,
+  RAD_TO_DEG,
+} from '../utils/geometry';
 
 interface InspectorSidebarProps {
   layers: CadLayer[];
@@ -31,6 +43,8 @@ interface InspectorSidebarProps {
   onUpdateEntities: (updated: CadEntity[]) => void;
   onDeleteSelected: () => void;
   onExplodeSelected: () => void;
+  onJoinSelected: () => void;
+  onAlignDimensions: () => void;
   onDuplicateSelected: () => void;
   settings: DraftingSettings;
   onUpdateSettings: React.Dispatch<React.SetStateAction<DraftingSettings>>;
@@ -59,17 +73,25 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
   onUpdateEntities,
   onDeleteSelected,
   onExplodeSelected,
+  onJoinSelected,
+  onAlignDimensions,
   onDuplicateSelected,
   settings,
   onUpdateSettings,
 }) => {
-  const [activeTab, setActiveTab] = useState<'properties' | 'layers'>('properties');
+  const [activeTab, setActiveTab] = useState<'properties' | 'layers'>(
+    'properties'
+  );
   const [newLayerName, setNewLayerName] = useState('');
   const [newLayerColor, setNewLayerColor] = useState('#38BDF8');
 
   const selectedEntities = entities.filter((e) => selectedIds.includes(e.id));
-  const singleEntity = selectedEntities.length === 1 ? selectedEntities[0] : null;
+  const singleEntity =
+    selectedEntities.length === 1 ? selectedEntities[0] : null;
   const singleMetrics = singleEntity ? getEntityMetrics(singleEntity) : null;
+  const selectedDimensions = selectedEntities.filter(
+    (e): e is DimensionEntity => e.type === 'dimension'
+  );
 
   const updateSingleEntity = (patch: Partial<CadEntity>) => {
     if (!singleEntity) return;
@@ -103,7 +125,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
             }`}
           >
             <Sliders className="w-3.5 h-3.5" />
-            <span>性質與精確輸入 ({selectedEntities.length})</span>
+            <span>性質與修改尺寸 ({selectedEntities.length})</span>
           </button>
           <button
             type="button"
@@ -186,7 +208,11 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                       { key: 'midpoint', label: '中點 (Midpoint)', symbol: '△' },
                       { key: 'center', label: '圓心 (Center)', symbol: '○' },
                       { key: 'quadrant', label: '四分點 (Quadrant)', symbol: '◇' },
-                      { key: 'intersection', label: '交點 (Intersection)', symbol: '×' },
+                      {
+                        key: 'intersection',
+                        label: '交點 (Intersection)',
+                        symbol: '×',
+                      },
                     ] as const
                   ).map((item) => (
                     <label
@@ -211,22 +237,22 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                             },
                           }))
                         }
-                        className="rounded border-slate-700 bg-slate-950 text-sky-500 focus:ring-0"
+                        className="accent-sky-500 rounded"
                       />
                     </label>
                   ))}
                 </div>
               </div>
 
-              {/* Grid & Polar Precision Step */}
+              {/* Grid & Polar Interval Configuration */}
               <div>
                 <h3 className="text-xs font-semibold text-slate-200 mb-2.5">
-                  網格與極座標間距參數
+                  極座標與網格參數
                 </h3>
                 <div className="bg-slate-900/70 border border-slate-800 rounded-lg p-3 space-y-3 text-xs">
                   <div className="flex items-center justify-between">
-                    <span className="text-slate-400">網格鎖點間距 (F9)</span>
-                    <div className="flex items-center gap-1.5">
+                    <span className="text-slate-400">網格吸附間距 (F9)</span>
+                    <div className="flex items-center gap-1">
                       <input
                         type="number"
                         min={1}
@@ -253,7 +279,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                           polarAngle: Number(e.target.value),
                         }))
                       }
-                      className="bg-slate-950 border border-slate-700 rounded px-2 py-1 font-mono text-xs text-slate-100"
+                      className="bg-slate-950 border border-slate-700 rounded px-2 py-1 font-mono text-slate-100"
                     >
                       <option value={15}>15°</option>
                       <option value={30}>30°</option>
@@ -263,89 +289,158 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                   </div>
                 </div>
               </div>
-
-              {/* Quick Keyboard Guide */}
-              <div>
-                <h3 className="text-xs font-semibold text-slate-200 mb-2">
-                  AutoCAD 常用快捷鍵
-                </h3>
-                <div className="bg-slate-900/50 border border-slate-800/80 rounded-lg p-3 space-y-1.5 text-[11px] text-slate-400 font-mono">
-                  <div className="flex justify-between">
-                    <span>L / PL / REC</span>
-                    <span className="text-slate-300">直線 / 聚合線 / 矩形</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>C / A / POL</span>
-                    <span className="text-slate-300">圓形 / 圓弧 / 多邊形</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>DIM / DIST</span>
-                    <span className="text-slate-300">尺寸標註 / 距離測量</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>M / CO / RO / MI</span>
-                    <span className="text-slate-300">移動 / 複製 / 旋轉 / 鏡射</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Space / 滑鼠中鍵</span>
-                    <span className="text-slate-300">平移畫布視角</span>
-                  </div>
-                </div>
-              </div>
             </div>
           ) : (
-            /* Selected Entity / Entities Properties Editor */
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xs font-semibold text-slate-100">
+            /* Selected Entities Inspector */
+            <div className="space-y-5">
+              {/* Header & Quick Actions */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-sky-400">
                     {singleEntity
-                      ? `圖元性質: ${singleEntity.type.toUpperCase()}`
-                      : `已選取 ${selectedEntities.length} 個圖元物件`}
-                  </h3>
-                  <p className="text-[11px] text-slate-400 font-mono">
-                    {singleEntity ? `ID: ${singleEntity.id.slice(0, 14)}` : '批次屬性編輯模式'}
-                  </p>
+                      ? `選取物件: ${
+                          singleEntity.type === 'group'
+                            ? '組裝圖元 (GROUP)'
+                            : singleEntity.type.toUpperCase()
+                        }`
+                      : `多重選取 (${selectedEntities.length} 個圖元)`}
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={onDuplicateSelected}
+                      title="複製選取物件"
+                      className="p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onExplodeSelected}
+                      title="炸開為獨立圖元 (X)"
+                      className="p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors"
+                    >
+                      <Scissors className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onDeleteSelected}
+                      title="刪除 (E / DEL)"
+                      className="p-1.5 rounded bg-rose-950/60 hover:bg-rose-900/70 text-rose-300 transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={onDuplicateSelected}
-                    title="快速複製選取物件"
-                    className="p-1.5 text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded transition-colors"
-                  >
-                    <Copy className="w-3.5 h-3.5" />
-                  </button>
+
+                {/* Multi-entity Join or Dimension Alignment Quick Buttons */}
+                {selectedEntities.length >= 2 && (
+                  <div className="grid grid-cols-1 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={onJoinSelected}
+                      className="w-full flex items-center justify-center gap-1.5 py-1.5 px-3 bg-emerald-600/25 hover:bg-emerald-600/35 text-emerald-200 border border-emerald-500/50 rounded-lg text-xs font-medium transition-colors"
+                    >
+                      <Combine className="w-3.5 h-3.5" />
+                      <span>
+                        組裝為單一圖元物件 ({selectedEntities.length} 個) [J]
+                      </span>
+                    </button>
+                    {selectedDimensions.length >= 2 && (
+                      <button
+                        type="button"
+                        onClick={onAlignDimensions}
+                        className="w-full flex items-center justify-center gap-1.5 py-1.5 px-3 bg-sky-600/25 hover:bg-sky-600/35 text-sky-200 border border-sky-500/50 rounded-lg text-xs font-medium transition-colors"
+                      >
+                        <AlignCenterHorizontal className="w-3.5 h-3.5" />
+                        <span>
+                          相互對齊所選標註尺寸 ({selectedDimensions.length} 個)
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {singleEntity?.type === 'group' && (
                   <button
                     type="button"
                     onClick={onExplodeSelected}
-                    title="炸開為獨立線段 (EXPLODE)"
-                    className="p-1.5 text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded transition-colors"
+                    className="w-full flex items-center justify-center gap-1.5 py-1.5 px-3 bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 rounded-lg text-xs font-medium transition-colors"
                   >
                     <Scissors className="w-3.5 h-3.5" />
+                    <span>
+                      炸開此組裝圖元 (還原 {singleEntity.children.length} 個獨立物件) [X]
+                    </span>
                   </button>
-                  <button
-                    type="button"
-                    onClick={onDeleteSelected}
-                    title="刪除選取物件 (Delete)"
-                    className="p-1.5 text-rose-400 hover:text-rose-200 bg-rose-950/50 hover:bg-rose-900/60 border border-rose-800/50 rounded transition-colors"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
+                )}
               </div>
 
-              {/* Common Layer / Linetype / Weight Controls */}
-              <div className="bg-slate-900/80 border border-slate-800 rounded-lg p-3 space-y-3 text-xs">
+              {/* Multi-selected Dimension Font Size Control */}
+              {selectedDimensions.length >= 1 && (
+                <div className="bg-slate-900/90 border border-amber-500/40 rounded-lg p-3 space-y-2 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-amber-300">
+                      標註尺寸字體大小 (mm)
+                    </span>
+                    <input
+                      type="number"
+                      min={6}
+                      max={72}
+                      value={selectedDimensions[0].fontSize || 11}
+                      onChange={(e) => {
+                        const fSize = Math.max(
+                          6,
+                          Math.min(72, Number(e.target.value))
+                        );
+                        onUpdateEntities(
+                          entities.map((ent) =>
+                            selectedIds.includes(ent.id) &&
+                            ent.type === 'dimension'
+                              ? { ...ent, fontSize: fSize }
+                              : ent
+                          )
+                        );
+                      }}
+                      className="w-16 px-2 py-1 text-right font-mono bg-slate-950 border border-amber-500/60 rounded text-amber-200"
+                    />
+                  </div>
+                  <div className="grid grid-cols-6 gap-1">
+                    {[8, 10, 12, 14, 18, 24].map((sz) => (
+                      <button
+                        key={sz}
+                        type="button"
+                        onClick={() => {
+                          onUpdateEntities(
+                            entities.map((ent) =>
+                              selectedIds.includes(ent.id) &&
+                              ent.type === 'dimension'
+                                ? { ...ent, fontSize: sz }
+                                : ent
+                            )
+                          );
+                        }}
+                        className={`py-1 rounded font-mono text-[11px] border ${
+                          (selectedDimensions[0].fontSize || 11) === sz
+                            ? 'bg-amber-500 text-slate-950 border-amber-400 font-bold'
+                            : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-600'
+                        }`}
+                      >
+                        {sz}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Common CAD Properties (Layer, Color, Linetype, Lineweight) */}
+              <div className="bg-slate-900/70 border border-slate-800 rounded-lg p-3 space-y-3 text-xs">
                 <div className="flex items-center justify-between">
-                  <span className="text-slate-400">所屬圖層 (Layer)</span>
+                  <span className="text-slate-400">所屬圖層</span>
                   <select
                     value={singleEntity ? singleEntity.layerId : ''}
-                    onChange={(e) => {
-                      if (e.target.value) {
-                        updateSelectedCommon({ layerId: e.target.value });
-                      }
-                    }}
+                    onChange={(e) =>
+                      updateSelectedCommon({ layerId: e.target.value })
+                    }
                     className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-100"
                   >
                     {!singleEntity && <option value="">-- 多重圖層 --</option>}
@@ -355,6 +450,34 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                       </option>
                     ))}
                   </select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">顏色覆寫</span>
+                    <button
+                      type="button"
+                      onClick={() => updateSelectedCommon({ color: undefined })}
+                      className="text-[11px] text-sky-400 hover:underline"
+                    >
+                      依圖層 (ByLayer)
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-1.5 pt-0.5">
+                    {PRESET_COLORS.map((c) => (
+                      <button
+                        key={c}
+                        type="button"
+                        onClick={() => updateSelectedCommon({ color: c })}
+                        style={{ backgroundColor: c }}
+                        className={`w-5 h-5 rounded-full border ${
+                          singleEntity?.color === c
+                            ? 'ring-2 ring-sky-400 border-white'
+                            : 'border-slate-700'
+                        }`}
+                      />
+                    ))}
+                  </div>
                 </div>
 
                 <div className="flex items-center justify-between">
@@ -368,9 +491,9 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                           | undefined,
                       })
                     }
-                    className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-100"
+                    className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-100 font-mono"
                   >
-                    <option value="">依圖層 (ByLayer)</option>
+                    <option value="">ByLayer (依圖層)</option>
                     <option value="continuous">Continuous 實線</option>
                     <option value="dashed">Dashed 虛線</option>
                     <option value="center">Center 中心線</option>
@@ -389,149 +512,105 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                           : undefined,
                       })
                     }
-                    className="bg-slate-950 border border-slate-700 rounded px-2 py-1 font-mono text-xs text-slate-100"
+                    className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-100 font-mono"
                   >
-                    <option value="">依圖層 (ByLayer)</option>
+                    <option value="">ByLayer (依圖層)</option>
                     <option value="0.13">0.13 mm (極細)</option>
-                    <option value="0.18">0.18 mm (標註線)</option>
-                    <option value="0.25">0.25 mm (一般線)</option>
-                    <option value="0.35">0.35 mm (輪廓線)</option>
-                    <option value="0.5">0.50 mm (結構粗線)</option>
-                    <option value="0.7">0.70 mm (重剖面線)</option>
+                    <option value="0.25">0.25 mm (標準)</option>
+                    <option value="0.35">0.35 mm (中粗)</option>
+                    <option value="0.5">0.50 mm (粗實線)</option>
+                    <option value="0.7">0.70 mm (剖面粗線)</option>
                   </select>
-                </div>
-
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-slate-400">顏色覆寫 (Color)</span>
-                    <button
-                      type="button"
-                      onClick={() => updateSelectedCommon({ color: undefined })}
-                      className="text-[11px] text-sky-400 hover:underline"
-                    >
-                      重設為 ByLayer
-                    </button>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    {PRESET_COLORS.map((c) => (
-                      <button
-                        key={c}
-                        type="button"
-                        onClick={() => updateSelectedCommon({ color: c })}
-                        style={{ backgroundColor: c }}
-                        className={`w-5 h-5 rounded border ${
-                          singleEntity?.color === c
-                            ? 'border-white scale-110'
-                            : 'border-slate-700'
-                        }`}
-                      />
-                    ))}
-                  </div>
                 </div>
               </div>
 
-              {/* Single Entity Geometric Coordinates & Parametric Editing */}
+              {/* Single Entity Direct Dimension & Coordinate Editor (圖元尺寸直接修改) */}
               {singleEntity && (
-                <div className="bg-slate-900/80 border border-slate-800 rounded-lg p-3 space-y-3 text-xs">
-                  <h4 className="font-semibold text-slate-200">
-                    幾何座標與參數微調
+                <div className="bg-slate-900/70 border border-sky-500/40 rounded-lg p-3 space-y-3 text-xs">
+                  <h4 className="font-semibold text-sky-300">
+                    修改圖元尺寸與幾何參數
                   </h4>
 
                   {singleEntity.type === 'line' && (
-                    <div className="grid grid-cols-2 gap-2 font-mono">
-                      <div>
-                        <label className="block text-[10px] text-slate-400">
-                          起點 X1 (mm)
-                        </label>
-                        <input
-                          type="number"
-                          step="1"
-                          value={Number(singleEntity.p1.x.toFixed(2))}
-                          onChange={(e) =>
-                            updateSingleEntity({
-                              p1: {
-                                ...singleEntity.p1,
-                                x: Number(e.target.value),
-                              },
-                            })
-                          }
-                          className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] text-slate-400">
-                          起點 Y1 (mm)
-                        </label>
-                        <input
-                          type="number"
-                          step="1"
-                          value={Number(singleEntity.p1.y.toFixed(2))}
-                          onChange={(e) =>
-                            updateSingleEntity({
-                              p1: {
-                                ...singleEntity.p1,
-                                y: Number(e.target.value),
-                              },
-                            })
-                          }
-                          className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] text-slate-400">
-                          終點 X2 (mm)
-                        </label>
-                        <input
-                          type="number"
-                          step="1"
-                          value={Number(singleEntity.p2.x.toFixed(2))}
-                          onChange={(e) =>
-                            updateSingleEntity({
-                              p2: {
-                                ...singleEntity.p2,
-                                x: Number(e.target.value),
-                              },
-                            })
-                          }
-                          className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] text-slate-400">
-                          終點 Y2 (mm)
-                        </label>
-                        <input
-                          type="number"
-                          step="1"
-                          value={Number(singleEntity.p2.y.toFixed(2))}
-                          onChange={(e) =>
-                            updateSingleEntity({
-                              p2: {
-                                ...singleEntity.p2,
-                                y: Number(e.target.value),
-                              },
-                            })
-                          }
-                          className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
-                        />
-                      </div>
-                    </div>
-                  )}
-
-                  {singleEntity.type === 'circle' && (
-                    <div className="space-y-2 font-mono">
-                      <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-2.5 font-mono">
+                      {/* Direct Length & Angle Editor */}
+                      <div className="grid grid-cols-2 gap-2 p-2 bg-slate-950/90 border border-sky-500/30 rounded">
                         <div>
-                          <label className="block text-[10px] text-slate-400">
-                            圓心 X (mm)
+                          <label className="block text-[10px] text-sky-300 mb-0.5">
+                            直線長度 L (mm)
                           </label>
                           <input
                             type="number"
-                            value={Number(singleEntity.center.x.toFixed(2))}
+                            min={0.5}
+                            step="1"
+                            value={Number(
+                              dist(singleEntity.p1, singleEntity.p2).toFixed(2)
+                            )}
+                            onChange={(e) => {
+                              const newLen = Math.max(0.5, Number(e.target.value));
+                              const angRad =
+                                angleDegrees(singleEntity.p1, singleEntity.p2) *
+                                DEG_TO_RAD;
+                              updateSingleEntity({
+                                p2: {
+                                  x:
+                                    singleEntity.p1.x +
+                                    newLen * Math.cos(angRad),
+                                  y:
+                                    singleEntity.p1.y +
+                                    newLen * Math.sin(angRad),
+                                },
+                              });
+                            }}
+                            className="w-full px-2 py-1 bg-slate-900 border border-sky-500/50 rounded text-sky-100"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-sky-300 mb-0.5">
+                            角度 ∠ (°)
+                          </label>
+                          <input
+                            type="number"
+                            step="1"
+                            value={Number(
+                              angleDegrees(
+                                singleEntity.p1,
+                                singleEntity.p2
+                              ).toFixed(2)
+                            )}
+                            onChange={(e) => {
+                              const newDeg = Number(e.target.value);
+                              const curLen = dist(
+                                singleEntity.p1,
+                                singleEntity.p2
+                              );
+                              const rad = newDeg * DEG_TO_RAD;
+                              updateSingleEntity({
+                                p2: {
+                                  x:
+                                    singleEntity.p1.x + curLen * Math.cos(rad),
+                                  y:
+                                    singleEntity.p1.y + curLen * Math.sin(rad),
+                                },
+                              });
+                            }}
+                            className="w-full px-2 py-1 bg-slate-900 border border-sky-500/50 rounded text-sky-100"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[10px] text-slate-400">
+                            起點 X1
+                          </label>
+                          <input
+                            type="number"
+                            value={Number(singleEntity.p1.x.toFixed(2))}
                             onChange={(e) =>
                               updateSingleEntity({
-                                center: {
-                                  ...singleEntity.center,
+                                p1: {
+                                  ...singleEntity.p1,
                                   x: Number(e.target.value),
                                 },
                               })
@@ -541,15 +620,15 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                         </div>
                         <div>
                           <label className="block text-[10px] text-slate-400">
-                            圓心 Y (mm)
+                            起點 Y1
                           </label>
                           <input
                             type="number"
-                            value={Number(singleEntity.center.y.toFixed(2))}
+                            value={Number(singleEntity.p1.y.toFixed(2))}
                             onChange={(e) =>
                               updateSingleEntity({
-                                center: {
-                                  ...singleEntity.center,
+                                p1: {
+                                  ...singleEntity.p1,
                                   y: Number(e.target.value),
                                 },
                               })
@@ -557,19 +636,19 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                             className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
                           />
                         </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2">
                         <div>
                           <label className="block text-[10px] text-slate-400">
-                            半徑 R (mm)
+                            終點 X2
                           </label>
                           <input
                             type="number"
-                            min={0.5}
-                            value={Number(singleEntity.radius.toFixed(2))}
+                            value={Number(singleEntity.p2.x.toFixed(2))}
                             onChange={(e) =>
                               updateSingleEntity({
-                                radius: Math.max(0.5, Number(e.target.value)),
+                                p2: {
+                                  ...singleEntity.p2,
+                                  x: Number(e.target.value),
+                                },
                               })
                             }
                             className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
@@ -577,15 +656,17 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                         </div>
                         <div>
                           <label className="block text-[10px] text-slate-400">
-                            直徑 Ø (mm)
+                            終點 Y2
                           </label>
                           <input
                             type="number"
-                            min={1}
-                            value={Number((singleEntity.radius * 2).toFixed(2))}
+                            value={Number(singleEntity.p2.y.toFixed(2))}
                             onChange={(e) =>
                               updateSingleEntity({
-                                radius: Math.max(0.5, Number(e.target.value) / 2),
+                                p2: {
+                                  ...singleEntity.p2,
+                                  y: Number(e.target.value),
+                                },
                               })
                             }
                             className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
@@ -595,59 +676,236 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                     </div>
                   )}
 
-                  {singleEntity.type === 'rectangle' && (
+                  {singleEntity.type === 'circle' && (
                     <div className="grid grid-cols-2 gap-2 font-mono">
                       <div>
-                        <label className="block text-[10px] text-slate-400">
-                          寬度 W (mm)
+                        <label className="block text-[10px] text-sky-300">
+                          半徑 R (mm)
+                        </label>
+                        <input
+                          type="number"
+                          min={0.5}
+                          value={Number(singleEntity.radius.toFixed(2))}
+                          onChange={(e) =>
+                            updateSingleEntity({
+                              radius: Math.max(0.5, Number(e.target.value)),
+                            })
+                          }
+                          className="w-full px-2 py-1 bg-slate-950 border border-sky-500/60 rounded text-sky-200"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-amber-300">
+                          直徑 Ø (mm)
                         </label>
                         <input
                           type="number"
                           min={1}
-                          value={Number(
-                            Math.abs(
-                              singleEntity.p2.x - singleEntity.p1.x
-                            ).toFixed(2)
-                          )}
-                          onChange={(e) => {
-                            const w = Math.max(1, Number(e.target.value));
-                            const dir =
-                              singleEntity.p2.x >= singleEntity.p1.x ? 1 : -1;
+                          value={Number((singleEntity.radius * 2).toFixed(2))}
+                          onChange={(e) =>
                             updateSingleEntity({
-                              p2: {
-                                ...singleEntity.p2,
-                                x: singleEntity.p1.x + dir * w,
+                              radius: Math.max(0.5, Number(e.target.value) / 2),
+                            })
+                          }
+                          className="w-full px-2 py-1 bg-slate-950 border border-amber-500/60 rounded text-amber-200"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-slate-400">
+                          圓心 X
+                        </label>
+                        <input
+                          type="number"
+                          value={Number(singleEntity.center.x.toFixed(2))}
+                          onChange={(e) =>
+                            updateSingleEntity({
+                              center: {
+                                ...singleEntity.center,
+                                x: Number(e.target.value),
                               },
-                            });
-                          }}
+                            })
+                          }
                           className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
                         />
                       </div>
                       <div>
                         <label className="block text-[10px] text-slate-400">
-                          高度 H (mm)
+                          圓心 Y
                         </label>
                         <input
                           type="number"
-                          min={1}
-                          value={Number(
-                            Math.abs(
-                              singleEntity.p2.y - singleEntity.p1.y
-                            ).toFixed(2)
-                          )}
-                          onChange={(e) => {
-                            const h = Math.max(1, Number(e.target.value));
-                            const dir =
-                              singleEntity.p2.y >= singleEntity.p1.y ? 1 : -1;
+                          value={Number(singleEntity.center.y.toFixed(2))}
+                          onChange={(e) =>
                             updateSingleEntity({
-                              p2: {
-                                ...singleEntity.p2,
-                                y: singleEntity.p1.y + dir * h,
+                              center: {
+                                ...singleEntity.center,
+                                y: Number(e.target.value),
                               },
-                            });
-                          }}
+                            })
+                          }
                           className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
                         />
+                      </div>
+                    </div>
+                  )}
+
+                  {singleEntity.type === 'arc' && (
+                    <div className="space-y-2 font-mono">
+                      <div className="grid grid-cols-3 gap-2">
+                        <div>
+                          <label className="block text-[10px] text-sky-300">
+                            圓弧半徑 R
+                          </label>
+                          <input
+                            type="number"
+                            min={1}
+                            value={Number(singleEntity.radius.toFixed(2))}
+                            onChange={(e) => {
+                              const nextR = Math.max(1, Number(e.target.value));
+                              const [p1, p2, p3] = getArcThreePoints({
+                                ...singleEntity,
+                                radius: nextR,
+                              });
+                              updateSingleEntity({
+                                radius: nextR,
+                                p1,
+                                p2,
+                                p3,
+                              });
+                            }}
+                            className="w-full px-2 py-1 bg-slate-950 border border-sky-500/60 rounded text-sky-200"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-slate-400">
+                            起始角 (°)
+                          </label>
+                          <input
+                            type="number"
+                            value={Number(
+                              (singleEntity.startAngle * RAD_TO_DEG).toFixed(1)
+                            )}
+                            onChange={(e) => {
+                              const nextStart =
+                                Number(e.target.value) * DEG_TO_RAD;
+                              const [p1, p2, p3] = getArcThreePoints({
+                                ...singleEntity,
+                                startAngle: nextStart,
+                              });
+                              updateSingleEntity({
+                                startAngle: nextStart,
+                                p1,
+                                p2,
+                                p3,
+                              });
+                            }}
+                            className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-slate-400">
+                            終止角 (°)
+                          </label>
+                          <input
+                            type="number"
+                            value={Number(
+                              (singleEntity.endAngle * RAD_TO_DEG).toFixed(1)
+                            )}
+                            onChange={(e) => {
+                              const nextEnd =
+                                Number(e.target.value) * DEG_TO_RAD;
+                              const [p1, p2, p3] = getArcThreePoints({
+                                ...singleEntity,
+                                endAngle: nextEnd,
+                              });
+                              updateSingleEntity({
+                                endAngle: nextEnd,
+                                p1,
+                                p2,
+                                p3,
+                              });
+                            }}
+                            className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
+                          />
+                        </div>
+                      </div>
+                      {(() => {
+                        const [p1, p2, p3] = getArcThreePoints(singleEntity);
+                        return (
+                          <div className="p-2 bg-slate-950/80 border border-slate-800 rounded text-[10px] space-y-1">
+                            <div className="text-slate-400 font-sans">
+                              三點圓弧控制點座標（可拖曳畫布上 P1/P2/P3 調整）：
+                            </div>
+                            <div className="text-emerald-300">
+                              P1 起點: ({p1.x.toFixed(1)}, {p1.y.toFixed(1)})
+                            </div>
+                            <div className="text-amber-300">
+                              P2 第二點: ({p2.x.toFixed(1)}, {p2.y.toFixed(1)})
+                            </div>
+                            <div className="text-rose-300">
+                              P3 終點: ({p3.x.toFixed(1)}, {p3.y.toFixed(1)})
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+
+                  {singleEntity.type === 'rectangle' && (
+                    <div className="space-y-2 font-mono">
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[10px] text-sky-300">
+                            寬度 W (mm)
+                          </label>
+                          <input
+                            type="number"
+                            min={1}
+                            value={Number(
+                              Math.abs(
+                                singleEntity.p2.x - singleEntity.p1.x
+                              ).toFixed(2)
+                            )}
+                            onChange={(e) => {
+                              const w = Math.max(1, Number(e.target.value));
+                              const c = midpoint(
+                                singleEntity.p1,
+                                singleEntity.p2
+                              );
+                              updateSingleEntity({
+                                p1: { ...singleEntity.p1, x: c.x - w / 2 },
+                                p2: { ...singleEntity.p2, x: c.x + w / 2 },
+                              });
+                            }}
+                            className="w-full px-2 py-1 bg-slate-950 border border-sky-500/60 rounded text-sky-100"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-sky-300">
+                            高度 H (mm)
+                          </label>
+                          <input
+                            type="number"
+                            min={1}
+                            value={Number(
+                              Math.abs(
+                                singleEntity.p2.y - singleEntity.p1.y
+                              ).toFixed(2)
+                            )}
+                            onChange={(e) => {
+                              const h = Math.max(1, Number(e.target.value));
+                              const c = midpoint(
+                                singleEntity.p1,
+                                singleEntity.p2
+                              );
+                              updateSingleEntity({
+                                p1: { ...singleEntity.p1, y: c.y - h / 2 },
+                                p2: { ...singleEntity.p2, y: c.y + h / 2 },
+                              });
+                            }}
+                            className="w-full px-2 py-1 bg-slate-950 border border-sky-500/60 rounded text-sky-100"
+                          />
+                        </div>
                       </div>
                     </div>
                   )}
@@ -675,7 +933,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                         />
                       </div>
                       <div>
-                        <label className="block text-[10px] text-slate-400">
+                        <label className="block text-[10px] text-sky-300">
                           外接半徑 R (mm)
                         </label>
                         <input
@@ -687,7 +945,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                               radius: Math.max(1, Number(e.target.value)),
                             })
                           }
-                          className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
+                          className="w-full px-2 py-1 bg-slate-950 border border-sky-500/60 rounded text-sky-100"
                         />
                       </div>
                     </div>
@@ -745,27 +1003,45 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                   )}
 
                   {singleEntity.type === 'dimension' && (
-                    <div>
-                      <label className="block text-[10px] text-slate-400 mb-1">
-                        自訂公差或標註文字覆寫 (空白則自動計算)
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="例如: Ø240.0 ±0.05"
-                        value={singleEntity.textOverride || ''}
-                        onChange={(e) =>
-                          updateSingleEntity({
-                            textOverride: e.target.value || undefined,
-                          })
-                        }
-                        className="w-full px-2 py-1 font-mono bg-slate-950 border border-slate-700 rounded text-slate-100"
-                      />
+                    <div className="space-y-2">
+                      <div>
+                        <label className="block text-[10px] text-slate-400 mb-1">
+                          自訂公差或標註文字覆寫 (空白則自動計算)
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="例如: Ø240.0 ±0.05"
+                          value={singleEntity.textOverride || ''}
+                          onChange={(e) =>
+                            updateSingleEntity({
+                              textOverride: e.target.value || undefined,
+                            })
+                          }
+                          className="w-full px-2 py-1 font-mono bg-slate-950 border border-slate-700 rounded text-slate-100"
+                        />
+                      </div>
                     </div>
                   )}
 
                   {/* Computed Geometric Readouts */}
                   {singleMetrics && (
                     <div className="pt-2 border-t border-slate-800 space-y-1.5 font-mono">
+                      {singleMetrics.width !== undefined && (
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">總寬度 W</span>
+                          <span className="text-slate-200 tabular-nums">
+                            {singleMetrics.width.toFixed(2)} mm
+                          </span>
+                        </div>
+                      )}
+                      {singleMetrics.height !== undefined && (
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">總高度 H</span>
+                          <span className="text-slate-200 tabular-nums">
+                            {singleMetrics.height.toFixed(2)} mm
+                          </span>
+                        </div>
+                      )}
                       {singleMetrics.length !== undefined && (
                         <div className="flex justify-between">
                           <span className="text-slate-400">長度 / 周長</span>
@@ -778,16 +1054,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                         <div className="flex justify-between">
                           <span className="text-slate-400">封閉面積</span>
                           <span className="text-emerald-300 tabular-nums">
-                            {singleMetrics.area.toFixed(1)} mm² (
-                            {(singleMetrics.area / 1e6).toFixed(4)} m²)
-                          </span>
-                        </div>
-                      )}
-                      {singleMetrics.angleDeg !== undefined && (
-                        <div className="flex justify-between">
-                          <span className="text-slate-400">向量傾角</span>
-                          <span className="text-slate-200 tabular-nums">
-                            {singleMetrics.angleDeg.toFixed(2)}°
+                            {singleMetrics.area.toFixed(1)} mm²
                           </span>
                         </div>
                       )}
@@ -800,7 +1067,6 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
         ) : (
           /* Layers Manager Tab */
           <div className="space-y-4">
-            {/* Add New Layer Form */}
             <div className="bg-slate-900/80 border border-slate-800 rounded-lg p-3 space-y-2.5">
               <h4 className="text-xs font-semibold text-slate-200">
                 新增工程圖層
@@ -841,11 +1107,12 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
               </div>
             </div>
 
-            {/* Layer List */}
             <div className="space-y-1.5">
               {layers.map((layer) => {
                 const isActive = layer.id === activeLayerId;
-                const count = entities.filter((e) => e.layerId === layer.id).length;
+                const count = entities.filter(
+                  (e) => e.layerId === layer.id
+                ).length;
 
                 return (
                   <div
@@ -929,7 +1196,6 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                       </div>
                     </div>
 
-                    {/* Layer Linetype & Weight Row */}
                     <div
                       className="flex items-center gap-2 mt-2 pt-2 border-t border-slate-800/60 text-[11px]"
                       onClick={(e) => e.stopPropagation()}

@@ -7,7 +7,6 @@ import {
   Waypoints,
   Square,
   Circle,
-  Spline,
   Hexagon,
   Ruler,
   Type,
@@ -23,6 +22,9 @@ import {
   Sparkles,
   ArrowUpRight,
   Combine,
+  Clipboard,
+  ClipboardCopy,
+  AlignCenterHorizontal,
 } from 'lucide-react';
 import { RectangleMode, ToolType } from '../types/cad';
 
@@ -34,12 +36,42 @@ interface ToolPaletteProps {
   offsetDistance: number;
   onChangeOffsetDistance: (dist: number) => void;
   selectedCount: number;
+  hasClipboard: boolean;
+  onCopyClipboard: () => void;
+  onCutClipboard: () => void;
+  onPasteClipboard: () => void;
+  onAlignDimensions: () => void;
   onOpenArrayModal: () => void;
   onExplodeSelected: () => void;
   onJoinSelected: () => void;
   onDeleteSelected: () => void;
   onAutoDimensionSelected: () => void;
 }
+
+/**
+ * Custom 3-Point Arc Icon clearly showing an arc curve and 3 distinct point dots (P1, P2, P3)
+ */
+export const ThreePointArcIcon: React.FC<{ className?: string }> = ({
+  className = 'w-4 h-4',
+}) => (
+  <svg
+    className={className}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+  >
+    {/* Arc curve passing through 3 points */}
+    <path d="M 4 18 A 11 11 0 0 1 20 18" />
+    {/* Point 1 (Left Start) */}
+    <circle cx="4" cy="18" r="2.3" fill="currentColor" stroke="none" />
+    {/* Point 2 (Top Middle on Arc) */}
+    <circle cx="12" cy="7.5" r="2.3" fill="#FBBF24" stroke="none" />
+    {/* Point 3 (Right End) */}
+    <circle cx="20" cy="18" r="2.3" fill="currentColor" stroke="none" />
+  </svg>
+);
 
 interface ToolItem {
   id: ToolType;
@@ -88,14 +120,8 @@ const DRAW_TOOLS: ToolItem[] = [
     id: 'arc',
     label: '三點圓弧',
     shortcut: 'A',
-    icon: <Spline className="w-4 h-4" />,
+    icon: <ThreePointArcIcon className="w-4 h-4" />,
     highlight: true,
-  },
-  {
-    id: 'polyline',
-    label: '聚合線',
-    shortcut: 'P',
-    icon: <Waypoints className="w-4 h-4" />,
   },
   {
     id: 'circle',
@@ -104,20 +130,10 @@ const DRAW_TOOLS: ToolItem[] = [
     icon: <Circle className="w-4 h-4" />,
   },
   {
-    id: 'ellipse',
-    label: '橢圓形',
-    shortcut: 'E',
-    icon: (
-      <svg
-        className="w-4 h-4"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-      >
-        <ellipse cx="12" cy="12" rx="10" ry="6" />
-      </svg>
-    ),
+    id: 'polyline',
+    label: '聚合線',
+    shortcut: 'P',
+    icon: <Waypoints className="w-4 h-4" />,
   },
   {
     id: 'polygon',
@@ -147,6 +163,13 @@ const DRAW_TOOLS: ToolItem[] = [
 
 const MODIFY_TOOLS: ToolItem[] = [
   {
+    id: 'erase',
+    label: '刪除圖元',
+    shortcut: 'E',
+    icon: <Trash2 className="w-4 h-4" />,
+    highlight: true,
+  },
+  {
     id: 'trim',
     label: '剪切圖元',
     shortcut: 'TR',
@@ -161,17 +184,17 @@ const MODIFY_TOOLS: ToolItem[] = [
     highlight: true,
   },
   {
-    id: 'offset',
-    label: '偏移複製',
-    shortcut: 'O',
-    icon: <Layers2 className="w-4 h-4" />,
-    highlight: true,
-  },
-  {
     id: 'join',
     label: '組裝圖元',
     shortcut: 'J',
     icon: <Combine className="w-4 h-4" />,
+    highlight: true,
+  },
+  {
+    id: 'offset',
+    label: '偏移複製',
+    shortcut: 'O',
+    icon: <Layers2 className="w-4 h-4" />,
     highlight: true,
   },
   {
@@ -208,6 +231,11 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
   offsetDistance,
   onChangeOffsetDistance,
   selectedCount,
+  hasClipboard,
+  onCopyClipboard,
+  onCutClipboard,
+  onPasteClipboard,
+  onAlignDimensions,
   onOpenArrayModal,
   onExplodeSelected,
   onJoinSelected,
@@ -215,8 +243,62 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
   onAutoDimensionSelected,
 }) => {
   return (
-    <aside className="w-60 shrink-0 h-full bg-[#0F172A] border-r border-slate-800 flex flex-col justify-between p-3 overflow-y-auto select-none">
+    <aside className="w-64 shrink-0 h-full bg-[#0F172A] border-r border-slate-800 flex flex-col justify-between p-3 overflow-y-auto select-none">
       <div className="space-y-4">
+        {/* Clipboard Quick Bar (Copy / Cut / Paste) */}
+        <div className="p-2 bg-slate-900/90 border border-slate-800 rounded-lg space-y-1.5">
+          <div className="flex items-center justify-between text-[11px] font-medium text-slate-400">
+            <span>剪貼簿操作</span>
+            <span className="text-[10px] font-mono text-slate-500">
+              Ctrl+C / X / V
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-1">
+            <button
+              type="button"
+              onClick={onCopyClipboard}
+              disabled={selectedCount === 0}
+              title="複製選取圖元 (Ctrl+C)"
+              className={`flex items-center justify-center gap-1 py-1.5 px-1.5 rounded border text-[11px] font-medium transition-colors ${
+                selectedCount > 0
+                  ? 'bg-slate-950 text-sky-300 border-slate-700 hover:bg-slate-800'
+                  : 'bg-slate-950/40 text-slate-600 border-slate-800/60 cursor-not-allowed'
+              }`}
+            >
+              <ClipboardCopy className="w-3 h-3 shrink-0" />
+              <span>複製</span>
+            </button>
+            <button
+              type="button"
+              onClick={onCutClipboard}
+              disabled={selectedCount === 0}
+              title="剪下選取圖元 (Ctrl+X)"
+              className={`flex items-center justify-center gap-1 py-1.5 px-1.5 rounded border text-[11px] font-medium transition-colors ${
+                selectedCount > 0
+                  ? 'bg-slate-950 text-amber-300 border-slate-700 hover:bg-slate-800'
+                  : 'bg-slate-950/40 text-slate-600 border-slate-800/60 cursor-not-allowed'
+              }`}
+            >
+              <Scissors className="w-3 h-3 shrink-0" />
+              <span>剪下</span>
+            </button>
+            <button
+              type="button"
+              onClick={onPasteClipboard}
+              disabled={!hasClipboard}
+              title="貼上剪貼簿圖元 (Ctrl+V)"
+              className={`flex items-center justify-center gap-1 py-1.5 px-1.5 rounded border text-[11px] font-medium transition-colors ${
+                hasClipboard
+                  ? 'bg-sky-600/25 text-sky-200 border-sky-500/50 hover:bg-sky-600/40'
+                  : 'bg-slate-950/40 text-slate-600 border-slate-800/60 cursor-not-allowed'
+              }`}
+            >
+              <Clipboard className="w-3 h-3 shrink-0" />
+              <span>貼上</span>
+            </button>
+          </div>
+        </div>
+
         {/* Draw Tools Group */}
         <div>
           <div className="flex items-center justify-between px-1 mb-2">
@@ -257,6 +339,114 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
             })}
           </div>
 
+          {/* 3-Point Arc Visual Schematic Diagram (三點圓弧示意圖 - 清楚顯示 P1、P2、P3 三個點) */}
+          <div
+            onClick={() => onSelectTool('arc')}
+            className={`mt-2 p-2.5 rounded-lg border cursor-pointer transition-colors ${
+              activeTool === 'arc'
+                ? 'bg-sky-950/40 border-sky-500/70'
+                : 'bg-slate-900/90 border-slate-800 hover:border-slate-700'
+            }`}
+          >
+            <div className="flex items-center justify-between text-[11px] font-medium text-slate-300 mb-1">
+              <span>三點圓弧示意圖 (快捷鍵 A)</span>
+              <span className="text-[10px] font-mono text-amber-300">
+                P1 → P2 → P3
+              </span>
+            </div>
+            <svg
+              viewBox="0 0 200 62"
+              className="w-full h-14 bg-slate-950/90 rounded border border-slate-800/90"
+            >
+              {/* Dashed chord lines P1-P2 and P2-P3 */}
+              <line
+                x1="28"
+                y1="48"
+                x2="100"
+                y2="14"
+                stroke="#475569"
+                strokeWidth="1"
+                strokeDasharray="3,3"
+              />
+              <line
+                x1="100"
+                y1="14"
+                x2="172"
+                y2="48"
+                stroke="#475569"
+                strokeWidth="1"
+                strokeDasharray="3,3"
+              />
+              {/* Smooth Circular Arc passing through P1, P2, P3 */}
+              <path
+                d="M 28 48 A 96 96 0 0 1 172 48"
+                fill="none"
+                stroke="#38BDF8"
+                strokeWidth="2.2"
+              />
+              {/* Point 1: 起點 P1 */}
+              <circle
+                cx="28"
+                cy="48"
+                r="4.5"
+                fill="#10B981"
+                stroke="#0F172A"
+                strokeWidth="1.5"
+              />
+              <text
+                x="28"
+                y="36"
+                fill="#6EE7B7"
+                fontSize="9"
+                fontFamily="JetBrains Mono, monospace"
+                textAnchor="middle"
+                fontWeight="bold"
+              >
+                1.起點
+              </text>
+              {/* Point 2: 弧上第二點 P2 */}
+              <circle
+                cx="100"
+                cy="14"
+                r="4.5"
+                fill="#FBBF24"
+                stroke="#0F172A"
+                strokeWidth="1.5"
+              />
+              <text
+                x="134"
+                y="16"
+                fill="#FDE68A"
+                fontSize="9"
+                fontFamily="JetBrains Mono, monospace"
+                textAnchor="middle"
+                fontWeight="bold"
+              >
+                2.第二點
+              </text>
+              {/* Point 3: 終點 P3 */}
+              <circle
+                cx="172"
+                cy="48"
+                r="4.5"
+                fill="#F43F5E"
+                stroke="#0F172A"
+                strokeWidth="1.5"
+              />
+              <text
+                x="172"
+                y="36"
+                fill="#FDA4AF"
+                fontSize="9"
+                fontFamily="JetBrains Mono, monospace"
+                textAnchor="middle"
+                fontWeight="bold"
+              >
+                3.終點
+              </text>
+            </svg>
+          </div>
+
           {/* Rectangle Mode Selector (Corner vs Center Rectangle) */}
           <div className="mt-2 p-2 bg-slate-900/90 border border-slate-800 rounded-lg space-y-1.5">
             <div className="text-[11px] font-medium text-slate-400">
@@ -294,15 +484,26 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
             </div>
           </div>
 
-          {/* Quick Auto-Dimension Button */}
-          <button
-            type="button"
-            onClick={onAutoDimensionSelected}
-            className="mt-2 w-full flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg border bg-amber-500/15 text-amber-200 border-amber-500/40 hover:bg-amber-500/25 text-xs font-medium transition-colors whitespace-nowrap shrink-0"
-          >
-            <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-            <span>自動標註選取物件 (B)</span>
-          </button>
+          {/* Quick Auto-Dimension & Align Dimension Buttons */}
+          <div className="mt-2 grid grid-cols-2 gap-1.5">
+            <button
+              type="button"
+              onClick={onAutoDimensionSelected}
+              className="flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg border bg-amber-500/15 text-amber-200 border-amber-500/40 hover:bg-amber-500/25 text-[11px] font-medium transition-colors whitespace-nowrap"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span>自動標註 (B)</span>
+            </button>
+            <button
+              type="button"
+              onClick={onAlignDimensions}
+              title="將選取的多個標註尺寸相互對齊至同一標註線"
+              className="flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg border bg-sky-500/15 text-sky-200 border-sky-500/40 hover:bg-sky-500/25 text-[11px] font-medium transition-colors whitespace-nowrap"
+            >
+              <AlignCenterHorizontal className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+              <span>對齊標註</span>
+            </button>
+          </div>
         </div>
 
         {/* Modify Tools Group */}
@@ -325,7 +526,9 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
                   key={tool.id}
                   type="button"
                   onClick={() => {
-                    if (tool.id === 'join' && selectedCount >= 2) {
+                    if (tool.id === 'erase' && selectedCount > 0) {
+                      onDeleteSelected();
+                    } else if (tool.id === 'join' && selectedCount >= 2) {
                       onJoinSelected();
                     } else {
                       onSelectTool(tool.id);
@@ -334,14 +537,22 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
                   className={`flex flex-col items-start justify-between p-2 rounded-lg border text-left transition-colors ${
                     isActive
                       ? 'bg-amber-500/25 text-amber-100 border-amber-400 shadow-sm'
-                      : tool.highlight
-                        ? 'bg-slate-900 text-slate-200 border-amber-500/30 hover:bg-slate-800 hover:border-amber-500/60'
-                        : 'bg-slate-900/70 text-slate-300 border-slate-800/90 hover:bg-slate-800/80 hover:text-white'
+                      : tool.id === 'erase'
+                        ? 'bg-rose-950/35 text-rose-200 border-rose-500/35 hover:bg-rose-900/50 hover:border-rose-400'
+                        : tool.highlight
+                          ? 'bg-slate-900 text-slate-200 border-amber-500/30 hover:bg-slate-800 hover:border-amber-500/60'
+                          : 'bg-slate-900/70 text-slate-300 border-slate-800/90 hover:bg-slate-800/80 hover:text-white'
                   }`}
                 >
                   <div className="flex items-center justify-between w-full mb-1">
                     <span
-                      className={isActive ? 'text-amber-300' : 'text-slate-400'}
+                      className={
+                        isActive
+                          ? 'text-amber-300'
+                          : tool.id === 'erase'
+                            ? 'text-rose-400'
+                            : 'text-slate-400'
+                      }
                     >
                       {tool.icon}
                     </span>
@@ -375,7 +586,7 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
               </span>
             </button>
 
-            {/* Explode Button */}
+            {/* Explode Button (炸開中心矩形或組裝圖元) */}
             <button
               type="button"
               onClick={onExplodeSelected}
@@ -414,20 +625,6 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
               <span className="text-[11px] font-mono text-slate-400">mm</span>
             </div>
           </div>
-
-          <button
-            type="button"
-            onClick={onDeleteSelected}
-            disabled={selectedCount === 0}
-            className={`mt-2 w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg border text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
-              selectedCount > 0
-                ? 'bg-rose-950/50 text-rose-300 border-rose-800/60 hover:bg-rose-900/60'
-                : 'bg-slate-900/40 text-slate-600 border-slate-800/50 cursor-not-allowed'
-            }`}
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-            <span>刪除選取物件 (DEL)</span>
-          </button>
         </div>
       </div>
     </aside>

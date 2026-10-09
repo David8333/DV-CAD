@@ -10,6 +10,7 @@ export type SnapType =
   | 'quadrant'
   | 'intersection'
   | 'perpendicular'
+  | 'dimAlign'
   | 'grid';
 
 export interface SnapPoint {
@@ -17,6 +18,7 @@ export interface SnapPoint {
   type: SnapType;
   label: string;
   entityId?: string;
+  alignGuideLine?: [Point, Point];
 }
 
 export type LineType = 'continuous' | 'dashed' | 'center' | 'dotted';
@@ -39,10 +41,10 @@ export type EntityType =
   | 'rectangle'
   | 'circle'
   | 'arc'
-  | 'ellipse'
   | 'polygon'
   | 'dimension'
-  | 'text';
+  | 'text'
+  | 'group';
 
 export interface BaseEntity {
   id: string;
@@ -69,6 +71,7 @@ export interface RectangleEntity extends BaseEntity {
   type: 'rectangle';
   p1: Point;
   p2: Point;
+  rectangleMode?: RectangleMode;
 }
 
 export interface CircleEntity extends BaseEntity {
@@ -88,13 +91,6 @@ export interface ArcEntity extends BaseEntity {
   p3?: Point;
 }
 
-export interface EllipseEntity extends BaseEntity {
-  type: 'ellipse';
-  center: Point;
-  rx: number;
-  ry: number;
-}
-
 export interface PolygonEntity extends BaseEntity {
   type: 'polygon';
   center: Point;
@@ -109,6 +105,7 @@ export interface DimensionEntity extends BaseEntity {
   p2: Point;
   offsetPoint: Point;
   textOverride?: string;
+  fontSize?: number; // default 11
 }
 
 export interface TextEntity extends BaseEntity {
@@ -119,16 +116,22 @@ export interface TextEntity extends BaseEntity {
   rotation: number; // degrees
 }
 
+export interface GroupEntity extends BaseEntity {
+  type: 'group';
+  children: CadEntity[];
+  name?: string;
+}
+
 export type CadEntity =
   | LineEntity
   | PolylineEntity
   | RectangleEntity
   | CircleEntity
   | ArcEntity
-  | EllipseEntity
   | PolygonEntity
   | DimensionEntity
-  | TextEntity;
+  | TextEntity
+  | GroupEntity;
 
 export type ToolType =
   | 'select'
@@ -139,11 +142,11 @@ export type ToolType =
   | 'rectangle'
   | 'circle'
   | 'arc'
-  | 'ellipse'
   | 'polygon'
   | 'dimension'
   | 'text'
   | 'measure'
+  | 'erase'
   | 'move'
   | 'copy'
   | 'rotate'
@@ -184,6 +187,7 @@ export interface GripHandle {
   gripIndex: number;
   point: Point;
   type: 'vertex' | 'midpoint' | 'center' | 'radius';
+  label?: string;
 }
 
 export interface BlueprintTemplate {

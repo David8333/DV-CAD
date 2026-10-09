@@ -1,8 +1,16 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { EyeOff, Info, Combine } from 'lucide-react';
+import {
+  EyeOff,
+  Info,
+  Combine,
+  Scissors,
+  Trash2,
+  AlignCenterHorizontal,
+} from 'lucide-react';
 import {
   CadEntity,
   CadLayer,
+  DimensionEntity,
   DraftingSettings,
   GripHandle,
   LineType,
@@ -22,6 +30,7 @@ import {
   DEG_TO_RAD,
   dist,
   findBestSnapPoint,
+  getArcThreePoints,
   getDimensionLinePoints,
   getEntityBounds,
   getEntityGripHandles,
@@ -34,6 +43,7 @@ import {
   offsetEntity,
   RAD_TO_DEG,
   rotateEntity,
+  snapDimensionOffsetToExisting,
   translateEntity,
 } from '../utils/geometry';
 
@@ -44,6 +54,8 @@ interface CadViewportProps {
   activeTool: ToolType;
   rectangleMode: RectangleMode;
   onChangeRectangleMode: (mode: RectangleMode) => void;
+  defaultDimFontSize: number;
+  onChangeDefaultDimFontSize: (size: number) => void;
   selectedIds: string[];
   settings: DraftingSettings;
   polygonSides: number;
@@ -57,6 +69,9 @@ interface CadViewportProps {
   onAddEntity: (entity: CadEntity) => void;
   onUpdateEntities: (updated: CadEntity[]) => void;
   onJoinSelected: () => void;
+  onExplodeSelected: () => void;
+  onDeleteSelected: () => void;
+  onAlignDimensions: () => void;
   onLogCommand: (
     text: string,
     type?: 'command' | 'info' | 'error' | 'success'
@@ -74,6 +89,8 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   activeTool,
   rectangleMode,
   onChangeRectangleMode,
+  defaultDimFontSize,
+  onChangeDefaultDimFontSize,
   selectedIds,
   settings,
   polygonSides,
@@ -87,6 +104,9 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   onAddEntity,
   onUpdateEntities,
   onJoinSelected,
+  onExplodeSelected,
+  onDeleteSelected,
+  onAlignDimensions,
   onLogCommand,
   onToolComplete,
   drawingPoints,
@@ -104,9 +124,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   const [cursorWorld, setCursorWorld] = useState<Point>({ x: 0, y: 0 });
   const [activeSnap, setActiveSnap] = useState<SnapPoint | null>(null);
   const [guideAngle, setGuideAngle] = useState<number | null>(null);
+  const [dimAlignGuide, setDimAlignGuide] = useState<[Point, Point] | null>(
+    null
+  );
   const [hoveredEntityId, setHoveredEntityId] = useState<string | null>(null);
 
-  // Panning state (Middle mouse button or Pan tool)
+  // Panning state
   const [isPanning, setIsPanning] = useState(false);
   const [panStartScreen, setPanStartScreen] = useState<Point>({ x: 0, y: 0 });
   const [panStartOffset, setPanStartOffset] = useState<Point>({ x: 0, y: 0 });
@@ -167,15 +190,20 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   const fitDrawingToViewport = useCallback(
     (w: number, h: number, currentEntities: CadEntity[]) => {
       if (w <= 40 || h <= 40) return;
-      if (currentEntities.length === 0) {
+      const validBounds = currentEntities
+        .map(getEntityBounds)
+        .filter(
+          (b): b is NonNullable<typeof b> =>
+            Boolean(b && Number.isFinite(b.minX) && Number.isFinite(b.maxX))
+        );
+      if (validBounds.length === 0) {
         onPanZoomChange({ x: 0, y: 0 }, 1.0);
         return;
       }
-      const bounds = currentEntities.map(getEntityBounds);
-      const minX = Math.min(...bounds.map((b) => b.minX));
-      const maxX = Math.max(...bounds.map((b) => b.maxX));
-      const minY = Math.min(...bounds.map((b) => b.minY));
-      const maxY = Math.max(...bounds.map((b) => b.maxY));
+      const minX = Math.min(...validBounds.map((b) => b.minX));
+      const maxX = Math.max(...validBounds.map((b) => b.maxX));
+      const minY = Math.min(...validBounds.map((b) => b.minY));
+      const maxY = Math.max(...validBounds.map((b) => b.maxY));
 
       const cx = (minX + maxX) / 2;
       const cy = (minY + maxY) / 2;
@@ -249,6 +277,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     setDynField('primary');
     setSelectionBoxStart(null);
     setActiveGrip(null);
+    setDimAlignGuide(null);
     if (activeTool !== 'measure') {
       setMeasureResult(null);
     }
@@ -257,7 +286,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   // Commit point logic (shared by mouse click, touch tap, and Enter/Space key with Dynamic Input)
   const commitPoint = useCallback(
     (pt: Point) => {
-      // Zoom Window does not require unlocked layer
       if (activeTool === 'zoomWindow') {
         if (drawingPoints.length === 0) {
           setDrawingPoints([pt]);
@@ -381,10 +409,11 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                 layerId: activeLayerId,
                 p1: corner1,
                 p2: corner2,
+                rectangleMode,
               });
               setDrawingPoints([]);
               onLogCommand(
-                `RECTANG 已建立${rectangleMode === 'center' ? '中心' : '轉角'}矩形: ${Math.abs(corner2.x - corner1.x).toFixed(1)} × ${Math.abs(corner2.y - corner1.y).toFixed(1)} mm`,
+                `RECTANG 已建立${rectangleMode === 'center' ? '中心' : '轉角'}矩形: ${Math.abs(corner2.x - corner1.x).toFixed(1)} × ${Math.abs(corner2.y - corner1.y).toFixed(1)} mm (支援按 X 炸開為 4 條直線)`,
                 'success'
               );
             }
@@ -425,14 +454,14 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
             onLogCommand(
-              `ARC [三點圓弧] 步驟 1/3 已指定圓弧起點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請點選圓弧通過的第二點`,
+              `ARC [三點圓弧] 步驟 1/3 已指定圓弧起點 P1: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請點選圓弧通過的第二點 P2`,
               'info'
             );
           } else if (drawingPoints.length === 1) {
             if (dist(drawingPoints[0], pt) > 0.1) {
               setDrawingPoints([drawingPoints[0], pt]);
               onLogCommand(
-                `ARC [三點圓弧] 步驟 2/3 已指定弧上第二點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請點選圓弧終點 (第三點)`,
+                `ARC [三點圓弧] 步驟 2/3 已指定弧上第二點 P2: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請點選圓弧終點 P3`,
                 'info'
               );
             }
@@ -455,40 +484,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               });
               setDrawingPoints([]);
               onLogCommand(
-                `ARC 已建立三點圓弧 (R=${arcData.radius.toFixed(2)} mm)`,
+                `ARC 已建立三點圓弧 (R=${arcData.radius.toFixed(2)} mm，通過 P1、P2、P3 三點)`,
                 'success'
               );
             } else {
               onLogCommand('三點共線無法構成圓弧，請選擇不共線的第三點。', 'error');
             }
-          }
-          break;
-        }
-
-        case 'ellipse': {
-          if (drawingPoints.length === 0) {
-            setDrawingPoints([pt]);
-            onLogCommand(
-              `ELLIPSE 指定橢圓中心點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)})`,
-              'info'
-            );
-          } else {
-            const center = drawingPoints[0];
-            const rx = Math.max(2, Math.abs(pt.x - center.x));
-            const ry = Math.max(2, Math.abs(pt.y - center.y));
-            onAddEntity({
-              id,
-              type: 'ellipse',
-              layerId: activeLayerId,
-              center,
-              rx,
-              ry,
-            });
-            setDrawingPoints([]);
-            onLogCommand(
-              `ELLIPSE 已建立橢圓 (Rx=${rx.toFixed(1)}, Ry=${ry.toFixed(1)} mm)`,
-              'success'
-            );
           }
           break;
         }
@@ -534,12 +535,14 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           } else if (drawingPoints.length === 1) {
             setDrawingPoints([drawingPoints[0], pt]);
             onLogCommand(
-              `DIMLINEAR 指定第二條延伸線原點 — 請移動決定尺寸線偏移位置`,
+              `DIMLINEAR 指定第二條延伸線原點 — 移動決定標註線偏移位置（靠近既有標註線可自動相互對齊！）`,
               'info'
             );
           } else {
             const p1 = drawingPoints[0];
             const p2 = drawingPoints[1];
+            const { offsetPoint: snappedOffset } =
+              snapDimensionOffsetToExisting(p1, p2, pt, entities, zoom);
             onAddEntity({
               id,
               type: 'dimension',
@@ -548,11 +551,13 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                 : activeLayerId,
               p1,
               p2,
-              offsetPoint: pt,
+              offsetPoint: snappedOffset,
+              fontSize: defaultDimFontSize,
             });
             setDrawingPoints([]);
+            setDimAlignGuide(null);
             onLogCommand(
-              `DIMLINEAR 已標註尺寸: ${dist(p1, p2).toFixed(2)} mm`,
+              `DIMLINEAR 已標註尺寸: ${dist(p1, p2).toFixed(2)} mm (字高 ${defaultDimFontSize})`,
               'success'
             );
           }
@@ -720,6 +725,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       activeTool,
       canvasSize.height,
       canvasSize.width,
+      defaultDimFontSize,
       drawingPoints,
       entities,
       layers,
@@ -732,6 +738,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       rectangleMode,
       selectedIds,
       setDrawingPoints,
+      zoom,
     ]
   );
 
@@ -791,7 +798,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
 
       // Spacebar acts identically to Enter!
       if (e.key === 'Enter' || e.code === 'Space') {
-        // 1. If in OFFSET mode and user typed a numeric offset distance
         if (activeTool === 'offset' && dynValue.trim() !== '') {
           e.preventDefault();
           const newDist = parseFloat(dynValue);
@@ -806,14 +812,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           return;
         }
 
-        // 2. If in JOIN mode and at least 2 entities are selected, Space/Enter executes Join!
         if (activeTool === 'join' && selectedIds.length >= 2) {
           e.preventDefault();
           onJoinSelected();
           return;
         }
 
-        // 3. If drawing and user typed dynamic input numbers
         const anchor = drawingPoints[drawingPoints.length - 1];
         if (anchor && (dynValue.trim() !== '' || dynAngleValue.trim() !== '')) {
           e.preventDefault();
@@ -851,7 +855,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           }
         }
 
-        // 4. Finish polyline on Enter or Spacebar when no numeric input
         if (activeTool === 'polyline' && drawingPoints.length >= 2) {
           e.preventDefault();
           onAddEntity({
@@ -869,7 +872,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           return;
         }
 
-        // 5. Finish continuous line or copy on Enter or Spacebar
         if (
           (activeTool === 'line' || activeTool === 'copy') &&
           drawingPoints.length > 0
@@ -883,7 +885,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           return;
         }
 
-        // 6. If in non-select tool with 0 points, Space/Enter returns to select mode
         if (activeTool !== 'select' && drawingPoints.length === 0) {
           e.preventDefault();
           onToolComplete();
@@ -973,12 +974,54 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         setGuideAngle(null);
       }
 
+      // Check dimension alignment guide when placing 3rd point of dimension
+      if (activeTool === 'dimension' && drawingPoints.length === 2) {
+        const { offsetPoint: alignedPt, alignGuide } =
+          snapDimensionOffsetToExisting(
+            drawingPoints[0],
+            drawingPoints[1],
+            effectiveWorld,
+            entities,
+            zoom
+          );
+        if (alignGuide) {
+          effectiveWorld = alignedPt;
+          setDimAlignGuide(alignGuide);
+        } else {
+          setDimAlignGuide(null);
+        }
+      } else if (activeGrip) {
+        const gripEnt = entities.find((e) => e.id === activeGrip.entityId);
+        if (gripEnt?.type === 'dimension' && activeGrip.gripIndex === 2) {
+          const { offsetPoint: alignedPt, alignGuide } =
+            snapDimensionOffsetToExisting(
+              gripEnt.p1,
+              gripEnt.p2,
+              effectiveWorld,
+              entities,
+              zoom,
+              gripEnt.id
+            );
+          if (alignGuide) {
+            effectiveWorld = alignedPt;
+            setDimAlignGuide(alignGuide);
+          } else {
+            setDimAlignGuide(null);
+          }
+        } else {
+          setDimAlignGuide(null);
+        }
+      } else {
+        setDimAlignGuide(null);
+      }
+
       setCursorWorld(effectiveWorld);
       onCursorMove(effectiveWorld, snap);
       return { rawWorld, effectiveWorld };
     },
     [
       activeGrip,
+      activeTool,
       drawingPoints,
       entities,
       layers,
@@ -1020,6 +1063,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
 
     if (
       activeTool === 'select' ||
+      activeTool === 'erase' ||
       activeTool === 'offset' ||
       activeTool === 'trim' ||
       activeTool === 'extend' ||
@@ -1048,7 +1092,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
 
-    // Middle mouse button or Pan tool pans
     if (e.button === 1 || activeTool === 'pan') {
       e.preventDefault();
       setIsPanning(true);
@@ -1057,7 +1100,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       return;
     }
 
-    // Right click acts as Enter / Cancel
     if (e.button === 2) {
       e.preventDefault();
       if (activeTool === 'polyline' && drawingPoints.length >= 2) {
@@ -1165,14 +1207,30 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       return;
     }
 
-    // 2. Check if in TRIM (剪切) mode
+    // 2. Check if in ERASE (刪除圖元 E) mode
+    if (activeTool === 'erase') {
+      const hitTol = 10 / zoom;
+      const hit = [...visibleEntities]
+        .reverse()
+        .find((ent) => isPointNearEntity(rawWorld, ent, hitTol));
+      if (hit) {
+        onUpdateEntities(entities.filter((e) => e.id !== hit.id));
+        onSelectChange(selectedIds.filter((id) => id !== hit.id));
+        onLogCommand(`ERASE 已刪除圖元 (${hit.type.toUpperCase()})`, 'success');
+      } else {
+        onLogCommand('ERASE 請直接點選要刪除的圖元物件', 'info');
+      }
+      return;
+    }
+
+    // 3. Check if in TRIM (剪切 TR — 支援直線、矩形、圓形、三點圓弧) mode
     if (activeTool === 'trim') {
       const hitTol = 10 / zoom;
       const hit = [...visibleEntities]
         .reverse()
         .find((ent) => isPointNearEntity(rawWorld, ent, hitTol));
       if (!hit) {
-        onLogCommand('TRIM 請點選要剪切的線段、矩形或多邊形區段', 'info');
+        onLogCommand('TRIM 請點選要剪切的直線、矩形、圓形或三點圓弧區段', 'info');
         return;
       }
       const res = computeTrimResult(rawWorld, hit, visibleEntities);
@@ -1182,16 +1240,21 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           .concat(res.replacementEntities);
         onUpdateEntities(nextEntities);
         onLogCommand(
-          `TRIM 已成功剪切圖元區段 (切除長度 ${dist(res.cutSegment[0], res.cutSegment[1]).toFixed(1)} mm)`,
+          `TRIM 已成功剪切 ${hit.type === 'circle' ? '圓形 (轉為圓弧)' : hit.type === 'arc' ? '三點圓弧' : '線段圖元'}`,
           'success'
         );
       } else {
-        onLogCommand('此類圖元不支援剪切，請點選直線、聚合線、矩形或多邊形', 'error');
+        onLogCommand(
+          hit.type === 'circle'
+            ? '剪切圓形需至少與其他圖元有 2 個交點才能切除區段'
+            : '無法剪切此圖元，請確認圖元有相交邊界',
+          'error'
+        );
       }
       return;
     }
 
-    // 3. Check if in EXTEND (延伸) mode
+    // 4. Check if in EXTEND (延伸 EX) mode
     if (activeTool === 'extend') {
       const hitTol = 12 / zoom;
       const hit = [...visibleEntities]
@@ -1212,15 +1275,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           'success'
         );
       } else {
-        onLogCommand(
-          'EXTEND 在該端點延伸方向上找不到相交的邊界圖元',
-          'error'
-        );
+        onLogCommand('EXTEND 在該端點延伸方向上找不到相交的邊界圖元', 'error');
       }
       return;
     }
 
-    // 4. Check if in JOIN (組裝圖元) mode
+    // 5. Check if in JOIN (組裝圖元 J) mode
     if (activeTool === 'join') {
       const hitTol = 10 / zoom;
       const hit = [...visibleEntities]
@@ -1233,14 +1293,14 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           onSelectChange([...selectedIds, hit.id]);
         }
         onLogCommand(
-          `JOIN 已選取 ${selectedIds.includes(hit.id) ? selectedIds.length - 1 : selectedIds.length + 1} 個圖元 — 請按空白鍵或 Enter 完成組裝`,
+          `JOIN 已選取 ${selectedIds.includes(hit.id) ? selectedIds.length - 1 : selectedIds.length + 1} 個圖元 — 按空白鍵或 Enter 保留原位置組裝為單一物件`,
           'info'
         );
       }
       return;
     }
 
-    // 5. Check if in OFFSET mode
+    // 6. Check if in OFFSET mode
     if (activeTool === 'offset') {
       if (selectedIds.length === 0) {
         const hitTol = 10 / zoom;
@@ -1255,7 +1315,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           );
         } else {
           onLogCommand(
-            'OFFSET 請點選要偏移複製的線段、圓形、矩形或多邊形',
+            'OFFSET 請點選要偏移複製的線段、圓形、圓弧、矩形或多邊形',
             'info'
           );
         }
@@ -1300,11 +1360,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     }
     if (activeGrip) {
       setActiveGrip(null);
+      setDimAlignGuide(null);
       onLogCommand('掣點編輯已套用', 'success');
     }
   };
 
-  // Touch Handlers for Mobile & Tablet Support
+  // Touch Handlers
   const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     if (e.touches.length === 2) {
@@ -1417,7 +1478,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     }
   };
 
-  // Mouse Wheel Zoom (centered at cursor position!)
+  // Mouse Wheel Zoom
   const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
     const rect = e.currentTarget.getBoundingClientRect();
@@ -1550,7 +1611,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       ctx.stroke();
     }
 
-    // 3. Helper to render a single CAD Entity
+    // 3. Helper to render a single CAD Entity (including composite GroupEntity)
     const layerMap = new Map(layers.map((l) => [l.id, l]));
 
     const drawEntity = (
@@ -1559,7 +1620,32 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       isSelected = false,
       isHovered = false
     ) => {
-      const layer = layerMap.get(ent.layerId);
+      if (ent.type === 'group') {
+        for (const child of ent.children) {
+          drawEntity(child, overrideColor, isSelected, isHovered);
+        }
+        if (isSelected || isHovered) {
+          const b = getEntityBounds(ent);
+          const sMin = worldToScreen(b.minX, b.maxY);
+          const sMax = worldToScreen(b.maxX, b.minY);
+          ctx.save();
+          ctx.strokeStyle = isSelected
+            ? 'rgba(56, 189, 248, 0.55)'
+            : 'rgba(125, 211, 252, 0.4)';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([4, 4]);
+          ctx.strokeRect(
+            sMin.x - 4,
+            sMin.y - 4,
+            sMax.x - sMin.x + 8,
+            sMax.y - sMin.y + 8
+          );
+          ctx.restore();
+        }
+        return;
+      }
+
+      const layer = layerMap.get(ent.layerId) || layers[0];
       if (!layer || !layer.visible) return;
 
       const color = overrideColor || ent.color || layer.color;
@@ -1569,9 +1655,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         ? Math.max(1.2, rawWeight * 4.5)
         : 1.5;
 
+      const hoverStroke =
+        activeTool === 'erase' && isHovered ? '#F43F5E' : '#7DD3FC';
+
       ctx.save();
-      ctx.strokeStyle = isSelected ? '#38BDF8' : isHovered ? '#7DD3FC' : color;
-      ctx.fillStyle = isSelected ? '#38BDF8' : color;
+      ctx.strokeStyle = isSelected ? '#38BDF8' : isHovered ? hoverStroke : color;
+      ctx.fillStyle = isSelected ? '#38BDF8' : isHovered ? hoverStroke : color;
       ctx.lineWidth = isSelected || isHovered ? baseWidth + 1 : baseWidth;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
@@ -1627,21 +1716,28 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             -ent.startAngle
           );
           ctx.stroke();
-          break;
-        }
-        case 'ellipse': {
-          const sc = worldToScreen(ent.center.x, ent.center.y);
-          ctx.beginPath();
-          ctx.ellipse(
-            sc.x,
-            sc.y,
-            Math.max(1, ent.rx * zoom),
-            Math.max(1, ent.ry * zoom),
-            0,
-            0,
-            Math.PI * 2
-          );
-          ctx.stroke();
+
+          // Always render the 3 defining points (P1, P2, P3) on 3-point arcs!
+          const [p1, p2, p3] = getArcThreePoints(ent);
+          const sp1 = worldToScreen(p1.x, p1.y);
+          const sp2 = worldToScreen(p2.x, p2.y);
+          const sp3 = worldToScreen(p3.x, p3.y);
+          ctx.setLineDash([]);
+          const dotRadius = isSelected || isHovered ? 3.8 : 2.6;
+          [
+            { pt: sp1, fill: '#10B981', tag: 'P1' },
+            { pt: sp2, fill: '#FBBF24', tag: 'P2' },
+            { pt: sp3, fill: '#F43F5E', tag: 'P3' },
+          ].forEach(({ pt, fill, tag }) => {
+            ctx.beginPath();
+            ctx.fillStyle = fill;
+            ctx.arc(pt.x, pt.y, dotRadius, 0, Math.PI * 2);
+            ctx.fill();
+            if (isSelected || isHovered) {
+              ctx.font = 'bold 9px "JetBrains Mono", monospace';
+              ctx.fillText(tag, pt.x + 6, pt.y - 5);
+            }
+          });
           break;
         }
         case 'dimension': {
@@ -1688,11 +1784,19 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           drawArrow(sd1, ang + Math.PI);
           drawArrow(sd2, ang);
 
+          const baseFontSize = ent.fontSize || 11;
+          const fontPx = Math.max(8, Math.round(baseFontSize));
           const label = ent.textOverride || `${length.toFixed(1)} mm`;
-          ctx.font = '600 11px "JetBrains Mono", monospace';
+          ctx.font = `600 ${fontPx}px "JetBrains Mono", monospace`;
           const tw = ctx.measureText(label).width;
+          const boxH = fontPx + 6;
           ctx.fillStyle = '#090D14';
-          ctx.fillRect(smid.x - tw / 2 - 4, smid.y - 8, tw + 8, 16);
+          ctx.fillRect(
+            smid.x - tw / 2 - 4,
+            smid.y - boxH / 2,
+            tw + 8,
+            boxH
+          );
           ctx.fillStyle = isSelected ? '#38BDF8' : color;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
@@ -1723,7 +1827,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       drawEntity(ent, undefined, isSelected, isHovered);
     }
 
-    // 4. Render Live Trim / Extend / Offset Previews when Hovering
+    // 4. Render Live Trim (including Circles & 3-Point Arcs!) / Extend / Offset Previews
     const visibleLayerIds = new Set(
       layers.filter((l) => l.visible && !l.locked).map((l) => l.id)
     );
@@ -1740,22 +1844,38 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           visibleEntities
         );
         if (trimRes) {
-          const s1 = worldToScreen(
-            trimRes.cutSegment[0].x,
-            trimRes.cutSegment[0].y
-          );
-          const s2 = worldToScreen(
-            trimRes.cutSegment[1].x,
-            trimRes.cutSegment[1].y
-          );
           ctx.save();
           ctx.strokeStyle = '#F43F5E';
           ctx.lineWidth = 3.5;
           ctx.setLineDash([6, 4]);
-          ctx.beginPath();
-          ctx.moveTo(s1.x, s1.y);
-          ctx.lineTo(s2.x, s2.y);
-          ctx.stroke();
+          if (trimRes.cutSegment) {
+            const s1 = worldToScreen(
+              trimRes.cutSegment[0].x,
+              trimRes.cutSegment[0].y
+            );
+            const s2 = worldToScreen(
+              trimRes.cutSegment[1].x,
+              trimRes.cutSegment[1].y
+            );
+            ctx.beginPath();
+            ctx.moveTo(s1.x, s1.y);
+            ctx.lineTo(s2.x, s2.y);
+            ctx.stroke();
+          } else if (trimRes.cutArc) {
+            const sc = worldToScreen(
+              trimRes.cutArc.center.x,
+              trimRes.cutArc.center.y
+            );
+            ctx.beginPath();
+            ctx.arc(
+              sc.x,
+              sc.y,
+              Math.max(1, trimRes.cutArc.radius * zoom),
+              -trimRes.cutArc.endAngle,
+              -trimRes.cutArc.startAngle
+            );
+            ctx.stroke();
+          }
           ctx.restore();
         }
       }
@@ -1809,10 +1929,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           'preview_off'
         );
         if (previewOff) {
-          drawEntity(
-            { ...previewOff, lineType: 'dashed' },
-            '#FBBF24'
-          );
+          drawEntity({ ...previewOff, lineType: 'dashed' }, '#FBBF24');
         }
       }
     }
@@ -1831,7 +1948,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             activeGrip.gripIndex === g.gripIndex
               ? '#EF4444'
               : g.type === 'midpoint'
-                ? '#38BDF8'
+                ? '#FBBF24'
                 : '#0284C7';
           ctx.strokeStyle = '#E0F2FE';
           ctx.lineWidth = 1.2;
@@ -1842,7 +1959,33 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       }
     }
 
-    // 6. Render Polar / Ortho Alignment Guide Line
+    // 6. Render Dimension Alignment Guide Line (標註尺寸相互對齊輔助線)
+    if (dimAlignGuide) {
+      const sA = worldToScreen(dimAlignGuide[0].x, dimAlignGuide[0].y);
+      const sB = worldToScreen(dimAlignGuide[1].x, dimAlignGuide[1].y);
+      ctx.save();
+      ctx.strokeStyle = '#38BDF8';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      ctx.moveTo(sA.x, sA.y);
+      ctx.lineTo(sB.x, sB.y);
+      ctx.stroke();
+
+      const midG = midpoint(sA, sB);
+      ctx.font = '600 10px "JetBrains Mono", monospace';
+      const label = '標註線對齊 (Aligned)';
+      const tw = ctx.measureText(label).width + 10;
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+      ctx.fillRect(midG.x - tw / 2, midG.y - 20, tw, 16);
+      ctx.fillStyle = '#38BDF8';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, midG.x, midG.y - 12);
+      ctx.restore();
+    }
+
+    // 7. Render Polar / Ortho Alignment Guide Line
     if (guideAngle !== null && drawingPoints.length > 0) {
       const anchor = drawingPoints[drawingPoints.length - 1];
       const sa = worldToScreen(anchor.x, anchor.y);
@@ -1858,7 +2001,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       ctx.restore();
     }
 
-    // 7. Render Relative Distance Dashed Reference Lines (相對距離虛線 ΔX / ΔY) & Rubber-Band Preview
+    // 8. Render Relative Distance Dashed Reference Lines (相對距離虛線 ΔX / ΔY) & Rubber-Band Preview
     if (drawingPoints.length > 0) {
       const p0 = drawingPoints[0];
       const pLast = drawingPoints[drawingPoints.length - 1];
@@ -1866,7 +2009,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       const sLast = worldToScreen(pLast.x, pLast.y);
       const sCur = worldToScreen(cursorWorld.x, cursorWorld.y);
 
-      // Draw Relative Distance Dashed Reference Triangle (ΔX & ΔY dashed lines + labels)
       const dxWorld = cursorWorld.x - pLast.x;
       const dyWorld = cursorWorld.y - pLast.y;
       const cornerScreen = worldToScreen(cursorWorld.x, pLast.y);
@@ -1879,7 +2021,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
 
-        // Horizontal ΔX dashed reference line
         if (Math.abs(sCur.x - sLast.x) > 24) {
           ctx.strokeStyle = 'rgba(244, 63, 94, 0.75)';
           ctx.beginPath();
@@ -1897,7 +2038,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           ctx.fillText(dxLabel, midHx, midHy);
         }
 
-        // Vertical ΔY dashed reference line
         if (Math.abs(sCur.y - sLast.y) > 24) {
           ctx.strokeStyle = 'rgba(16, 185, 129, 0.75)';
           ctx.beginPath();
@@ -1960,8 +2100,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           const rw = Math.abs(sCur.x - oppositeScreen.x);
           const rh = Math.abs(sCur.y - oppositeScreen.y);
           ctx.strokeRect(rx, ry, rw, rh);
-          // Draw diagonal/center crosshairs to indicate center-rectangle mode
-          ctx.strokeStyle = 'rgba(251, 191, 36, 0.6)';
+          ctx.strokeStyle = 'rgba(251, 191, 36, 0.7)';
           ctx.beginPath();
           ctx.moveTo(s0.x - 8, s0.y);
           ctx.lineTo(s0.x + 8, s0.y);
@@ -1987,21 +2126,30 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         ctx.lineTo(sCur.x, sCur.y);
         ctx.stroke();
       } else if (activeTool === 'arc') {
-        // 3-Point Arc Preview
+        // 3-Point Arc Preview with clear P1, P2, P3 point badges
         if (drawingPoints.length === 1) {
-          // Chord from Point 1 to Point 2
           ctx.beginPath();
           ctx.moveTo(s0.x, s0.y);
           ctx.lineTo(sCur.x, sCur.y);
           ctx.stroke();
+
+          ctx.setLineDash([]);
+          ctx.fillStyle = '#10B981';
+          ctx.beginPath();
+          ctx.arc(s0.x, s0.y, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.font = 'bold 10px "JetBrains Mono", monospace';
+          ctx.fillText('1.起點 P1', s0.x + 7, s0.y - 6);
+
+          ctx.fillStyle = '#FBBF24';
+          ctx.beginPath();
+          ctx.arc(sCur.x, sCur.y, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillText('2.第二點 P2', sCur.x + 7, sCur.y - 6);
         } else if (drawingPoints.length === 2) {
           const p1 = drawingPoints[0];
           const p2 = drawingPoints[1];
           const s2 = worldToScreen(p2.x, p2.y);
-          // Highlight P1 and P2 markers
-          ctx.fillStyle = '#FBBF24';
-          ctx.fillRect(s0.x - 3, s0.y - 3, 6, 6);
-          ctx.fillRect(s2.x - 3, s2.y - 3, 6, 6);
 
           const arcData = arcFromThreePoints(p1, p2, cursorWorld);
           if (arcData) {
@@ -2022,13 +2170,29 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             ctx.lineTo(sCur.x, sCur.y);
             ctx.stroke();
           }
+
+          // Render the 3 numbered points P1, P2, P3 clearly on the preview!
+          ctx.setLineDash([]);
+          ctx.font = 'bold 10px "JetBrains Mono", monospace';
+
+          ctx.fillStyle = '#10B981';
+          ctx.beginPath();
+          ctx.arc(s0.x, s0.y, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillText('1.起點 P1', s0.x + 7, s0.y - 6);
+
+          ctx.fillStyle = '#FBBF24';
+          ctx.beginPath();
+          ctx.arc(s2.x, s2.y, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillText('2.第二點 P2', s2.x + 7, s2.y - 6);
+
+          ctx.fillStyle = '#F43F5E';
+          ctx.beginPath();
+          ctx.arc(sCur.x, sCur.y, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillText('3.終點 P3', sCur.x + 7, sCur.y - 6);
         }
-      } else if (activeTool === 'ellipse') {
-        const rxPx = Math.max(1, Math.abs(sCur.x - s0.x));
-        const ryPx = Math.max(1, Math.abs(sCur.y - s0.y));
-        ctx.beginPath();
-        ctx.ellipse(s0.x, s0.y, rxPx, ryPx, 0, 0, Math.PI * 2);
-        ctx.stroke();
       } else if (activeTool === 'polygon') {
         const r = dist(p0, cursorWorld);
         const rot = angleBetween(p0, cursorWorld);
@@ -2056,6 +2220,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               p1: drawingPoints[0],
               p2: drawingPoints[1],
               offsetPoint: cursorWorld,
+              fontSize: defaultDimFontSize,
             },
             '#FBBF24'
           );
@@ -2099,7 +2264,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       ctx.restore();
     }
 
-    // 8. Render Completed Measure Ruler Overlay
+    // 9. Render Completed Measure Ruler Overlay
     if (measureResult) {
       const s1 = worldToScreen(measureResult.p1.x, measureResult.p1.y);
       const s2 = worldToScreen(measureResult.p2.x, measureResult.p2.y);
@@ -2129,7 +2294,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       ctx.restore();
     }
 
-    // 9. Render Window / Crossing Selection Box
+    // 10. Render Window / Crossing Selection Box
     if (selectionBoxStart) {
       const sStart = worldToScreen(selectionBoxStart.x, selectionBoxStart.y);
       const sEnd = mouseScreen;
@@ -2153,11 +2318,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       ctx.restore();
     }
 
-    // 10. Render OSNAP Marker
+    // 11. Render OSNAP Marker
     if (activeSnap && activeSnap.type !== 'grid') {
       const sp = worldToScreen(activeSnap.point.x, activeSnap.point.y);
       ctx.save();
-      ctx.strokeStyle = '#10B981';
+      ctx.strokeStyle =
+        activeSnap.type === 'dimAlign' ? '#38BDF8' : '#10B981';
       ctx.lineWidth = 2;
       ctx.setLineDash([]);
 
@@ -2171,7 +2337,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         ctx.lineTo(sp.x + sz + 1, sp.y + sz);
         ctx.closePath();
         ctx.stroke();
-      } else if (activeSnap.type === 'center') {
+      } else if (
+        activeSnap.type === 'center' ||
+        activeSnap.type === 'dimAlign'
+      ) {
         ctx.beginPath();
         ctx.arc(sp.x, sp.y, sz, 0, Math.PI * 2);
         ctx.stroke();
@@ -2194,7 +2363,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       ctx.restore();
     }
 
-    // 11. Render Authentic AutoCAD UCS Icon (Bottom-Left)
+    // 12. Render Authentic AutoCAD UCS Icon
     ctx.save();
     const ucsX = 28;
     const ucsY = canvasSize.height - 28;
@@ -2215,12 +2384,15 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     ctx.fillText('Y', ucsX - 3, ucsY - 36);
     ctx.restore();
 
-    // 12. Render Full AutoCAD Crosshair Cursor + Pickbox
+    // 13. Render Full AutoCAD Crosshair Cursor + Pickbox
     if (!isPanning && activeTool !== 'pan') {
       const cx = mouseScreen.x;
       const cy = mouseScreen.y;
       ctx.save();
-      ctx.strokeStyle = 'rgba(226, 232, 240, 0.75)';
+      ctx.strokeStyle =
+        activeTool === 'erase'
+          ? 'rgba(244, 63, 94, 0.85)'
+          : 'rgba(226, 232, 240, 0.75)';
       ctx.lineWidth = 1;
       ctx.setLineDash([]);
       const armLen = 32;
@@ -2233,6 +2405,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
 
       if (
         activeTool === 'select' ||
+        activeTool === 'erase' ||
         activeTool === 'offset' ||
         activeTool === 'trim' ||
         activeTool === 'extend' ||
@@ -2250,6 +2423,8 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     canvasSize.height,
     canvasSize.width,
     cursorWorld,
+    defaultDimFontSize,
+    dimAlignGuide,
     drawingPoints,
     dynValue,
     entities,
@@ -2286,6 +2461,22 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       ? Math.abs(cursorWorld.y - anchorPoint.y) * 2
       : Math.abs(cursorWorld.y - anchorPoint.y)
     : 0;
+
+  const selectedEntities = entities.filter((e) => selectedIds.includes(e.id));
+  const singleSelected =
+    selectedEntities.length === 1 ? selectedEntities[0] : null;
+  const selectedDims = selectedEntities.filter(
+    (e): e is DimensionEntity => e.type === 'dimension'
+  );
+
+  const updateSingleEntity = (patch: Partial<CadEntity>) => {
+    if (!singleSelected) return;
+    onUpdateEntities(
+      entities.map((e) =>
+        e.id === singleSelected.id ? ({ ...e, ...patch } as CadEntity) : e
+      )
+    );
+  };
 
   return (
     <div
@@ -2326,10 +2517,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                   : '畫轉角矩形 (R)')}
               {activeTool === 'circle' && '畫圓形 (C)'}
               {activeTool === 'arc' && '三點圓弧 (A)'}
-              {activeTool === 'ellipse' && '畫橢圓 (E)'}
               {activeTool === 'polygon' && `正 ${polygonSides} 邊形 (G)`}
               {activeTool === 'text' && '文字註解 (T)'}
               {activeTool === 'measure' && '測量距離 (K)'}
+              {activeTool === 'erase' && '刪除圖元 (E)'}
               {activeTool === 'move' && '移動物件 (M)'}
               {activeTool === 'copy' && '連續複製 (CO)'}
               {activeTool === 'rotate' && '旋轉物件 (Q)'}
@@ -2368,6 +2559,24 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               </div>
             )}
 
+            {activeTool === 'dimension' && (
+              <div className="flex items-center gap-1 bg-slate-950 px-1.5 py-0.5 rounded border border-slate-700 shrink-0">
+                <span className="text-[10px] text-amber-300">字高:</span>
+                <input
+                  type="number"
+                  min={6}
+                  max={72}
+                  value={defaultDimFontSize}
+                  onChange={(e) =>
+                    onChangeDefaultDimFontSize(
+                      Math.max(6, Math.min(72, Number(e.target.value)))
+                    )
+                  }
+                  className="w-10 px-1 py-0 text-[10px] font-mono bg-slate-900 border border-slate-700 rounded text-amber-200"
+                />
+              </div>
+            )}
+
             {activeTool === 'join' && selectedIds.length >= 2 && (
               <button
                 type="button"
@@ -2391,10 +2600,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                   : '點選終點，或直接打字輸入長度後按「空白鍵 / Enter」確認')}
               {activeTool === 'arc' &&
                 (drawingPoints.length === 0
-                  ? '步驟 1/3：點選圓弧「起點」'
+                  ? '步驟 1/3：點選圓弧「1.起點 P1」'
                   : drawingPoints.length === 1
-                    ? '步驟 2/3：點選圓弧通過的「第二點」'
-                    : '步驟 3/3：點選圓弧「終點」完成三點圓弧')}
+                    ? '步驟 2/3：點選圓弧通過的「2.第二點 P2」'
+                    : '步驟 3/3：點選圓弧「3.終點 P3」完成三點圓弧')}
               {activeTool === 'rectangle' &&
                 (drawingPoints.length === 0
                   ? rectangleMode === 'center'
@@ -2406,23 +2615,26 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                   ? '點選第一個標註端點'
                   : drawingPoints.length === 1
                     ? '點選第二個標註端點'
-                    : '移動決定標註線高度並點擊完成')}
+                    : '移動決定標註線高度（靠近既有標註線可自動相互對齊）')}
+              {activeTool === 'erase' &&
+                '直接點選畫布上的任何圖元即可立即刪除（或按 ESC 返回選取）'}
               {activeTool === 'trim' &&
-                '將游標移至相交線段上預覽紅虛線切除範圍，點擊左鍵立即剪切！'}
+                '支援剪切直線、矩形、圓形與三點圓弧！將游標移至圖元預覽紅虛線後點擊左鍵切除'}
               {activeTool === 'extend' &&
                 '將游標移至線段端點附近預覽綠虛線延伸路徑，點擊左鍵延伸至邊界！'}
               {activeTool === 'offset' &&
                 '可直接打字輸入偏移距離按「空白鍵 / Enter」，點選物件後再點選要偏移的一側'}
               {activeTool === 'join' &&
-                '點選 2 個以上線段或幾何圖元，按「空白鍵 / Enter」組裝合併為單一聚合線圖元'}
+                '點選 2 個以上圖元後按「空白鍵 / Enter」，保留原始位置組裝成單一物件'}
               {activeTool === 'select' &&
-                '點選圖元或拉框選取；空白鍵=Enter；按 Z 窗選放大、L 直線、R 矩形、A 三點圓弧'}
+                '點選圖元可在下方直接修改尺寸；支援 Ctrl+C 複製 / Ctrl+X 剪下 / Ctrl+V 貼上'}
               {![
                 'zoomWindow',
                 'line',
                 'arc',
                 'rectangle',
                 'dimension',
+                'erase',
                 'trim',
                 'extend',
                 'offset',
@@ -2452,6 +2664,325 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         >
           <Info className="w-3.5 h-3.5" />
         </button>
+      )}
+
+      {/* Floating On-Canvas Quick Dimension & Action Bar when Entities are Selected */}
+      {selectedEntities.length > 0 && (
+        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 max-w-[96%] flex flex-wrap items-center gap-2 px-3 py-1.5 bg-slate-900/95 border border-sky-500/60 rounded-xl shadow-2xl text-xs font-mono">
+          {singleSelected ? (
+            <>
+              <span className="font-sans font-semibold text-sky-300">
+                {singleSelected.type === 'line' && '直線尺寸:'}
+                {singleSelected.type === 'rectangle' && '矩形尺寸:'}
+                {singleSelected.type === 'circle' && '圓形尺寸:'}
+                {singleSelected.type === 'arc' && '三點圓弧:'}
+                {singleSelected.type === 'polygon' && '多邊形尺寸:'}
+                {singleSelected.type === 'dimension' && '標註設定:'}
+                {singleSelected.type === 'text' && '文字設定:'}
+                {singleSelected.type === 'group' &&
+                  `組裝圖元 (${singleSelected.children.length} 個子圖元)`}
+                {singleSelected.type === 'polyline' && '聚合線'}
+              </span>
+
+              {/* Line Direct Size Input */}
+              {singleSelected.type === 'line' && (
+                <div className="flex items-center gap-2">
+                  <label className="flex items-center gap-1">
+                    <span className="text-slate-400">長度L:</span>
+                    <input
+                      type="number"
+                      min={0.5}
+                      step="1"
+                      value={Number(
+                        dist(singleSelected.p1, singleSelected.p2).toFixed(2)
+                      )}
+                      onChange={(e) => {
+                        const newLen = Math.max(0.5, Number(e.target.value));
+                        const rad =
+                          angleDegrees(singleSelected.p1, singleSelected.p2) *
+                          DEG_TO_RAD;
+                        updateSingleEntity({
+                          p2: {
+                            x: singleSelected.p1.x + newLen * Math.cos(rad),
+                            y: singleSelected.p1.y + newLen * Math.sin(rad),
+                          },
+                        });
+                      }}
+                      className="w-16 px-1.5 py-0.5 bg-slate-950 border border-sky-500/60 rounded text-sky-200"
+                    />
+                    <span className="text-slate-500">mm</span>
+                  </label>
+                  <label className="flex items-center gap-1">
+                    <span className="text-slate-400">∠:</span>
+                    <input
+                      type="number"
+                      step="1"
+                      value={Number(
+                        angleDegrees(
+                          singleSelected.p1,
+                          singleSelected.p2
+                        ).toFixed(1)
+                      )}
+                      onChange={(e) => {
+                        const newDeg = Number(e.target.value);
+                        const curLen = dist(
+                          singleSelected.p1,
+                          singleSelected.p2
+                        );
+                        const rad = newDeg * DEG_TO_RAD;
+                        updateSingleEntity({
+                          p2: {
+                            x: singleSelected.p1.x + curLen * Math.cos(rad),
+                            y: singleSelected.p1.y + curLen * Math.sin(rad),
+                          },
+                        });
+                      }}
+                      className="w-14 px-1.5 py-0.5 bg-slate-950 border border-sky-500/60 rounded text-sky-200"
+                    />
+                    <span className="text-slate-500">°</span>
+                  </label>
+                </div>
+              )}
+
+              {/* Rectangle Direct Size Input */}
+              {singleSelected.type === 'rectangle' && (
+                <div className="flex items-center gap-2">
+                  <label className="flex items-center gap-1">
+                    <span className="text-slate-400">寬W:</span>
+                    <input
+                      type="number"
+                      min={1}
+                      step="1"
+                      value={Number(
+                        Math.abs(
+                          singleSelected.p2.x - singleSelected.p1.x
+                        ).toFixed(2)
+                      )}
+                      onChange={(e) => {
+                        const w = Math.max(1, Number(e.target.value));
+                        const c = midpoint(
+                          singleSelected.p1,
+                          singleSelected.p2
+                        );
+                        updateSingleEntity({
+                          p1: { ...singleSelected.p1, x: c.x - w / 2 },
+                          p2: { ...singleSelected.p2, x: c.x + w / 2 },
+                        });
+                      }}
+                      className="w-16 px-1.5 py-0.5 bg-slate-950 border border-sky-500/60 rounded text-sky-200"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1">
+                    <span className="text-slate-400">高H:</span>
+                    <input
+                      type="number"
+                      min={1}
+                      step="1"
+                      value={Number(
+                        Math.abs(
+                          singleSelected.p2.y - singleSelected.p1.y
+                        ).toFixed(2)
+                      )}
+                      onChange={(e) => {
+                        const h = Math.max(1, Number(e.target.value));
+                        const c = midpoint(
+                          singleSelected.p1,
+                          singleSelected.p2
+                        );
+                        updateSingleEntity({
+                          p1: { ...singleSelected.p1, y: c.y - h / 2 },
+                          p2: { ...singleSelected.p2, y: c.y + h / 2 },
+                        });
+                      }}
+                      className="w-16 px-1.5 py-0.5 bg-slate-950 border border-sky-500/60 rounded text-sky-200"
+                    />
+                    <span className="text-slate-500">mm</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={onExplodeSelected}
+                    className="flex items-center gap-1 px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded font-sans text-[11px]"
+                  >
+                    <Scissors className="w-3 h-3" />
+                    <span>炸開 (X)</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Circle Direct Size Input */}
+              {singleSelected.type === 'circle' && (
+                <div className="flex items-center gap-2">
+                  <label className="flex items-center gap-1">
+                    <span className="text-slate-400">半徑R:</span>
+                    <input
+                      type="number"
+                      min={0.5}
+                      step="1"
+                      value={Number(singleSelected.radius.toFixed(2))}
+                      onChange={(e) =>
+                        updateSingleEntity({
+                          radius: Math.max(0.5, Number(e.target.value)),
+                        })
+                      }
+                      className="w-16 px-1.5 py-0.5 bg-slate-950 border border-sky-500/60 rounded text-sky-200"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1">
+                    <span className="text-slate-400">直徑Ø:</span>
+                    <input
+                      type="number"
+                      min={1}
+                      step="1"
+                      value={Number((singleSelected.radius * 2).toFixed(2))}
+                      onChange={(e) =>
+                        updateSingleEntity({
+                          radius: Math.max(0.5, Number(e.target.value) / 2),
+                        })
+                      }
+                      className="w-16 px-1.5 py-0.5 bg-slate-950 border border-amber-500/60 rounded text-amber-200"
+                    />
+                    <span className="text-slate-500">mm</span>
+                  </label>
+                </div>
+              )}
+
+              {/* Arc Direct Size Input */}
+              {singleSelected.type === 'arc' && (
+                <div className="flex items-center gap-2">
+                  <label className="flex items-center gap-1">
+                    <span className="text-slate-400">半徑R:</span>
+                    <input
+                      type="number"
+                      min={1}
+                      step="1"
+                      value={Number(singleSelected.radius.toFixed(2))}
+                      onChange={(e) => {
+                        const nextR = Math.max(1, Number(e.target.value));
+                        const [p1, p2, p3] = getArcThreePoints({
+                          ...singleSelected,
+                          radius: nextR,
+                        });
+                        updateSingleEntity({ radius: nextR, p1, p2, p3 });
+                      }}
+                      className="w-16 px-1.5 py-0.5 bg-slate-950 border border-sky-500/60 rounded text-sky-200"
+                    />
+                    <span className="text-slate-500">mm</span>
+                  </label>
+                </div>
+              )}
+
+              {/* Polygon Direct Size Input */}
+              {singleSelected.type === 'polygon' && (
+                <div className="flex items-center gap-2">
+                  <label className="flex items-center gap-1">
+                    <span className="text-slate-400">外接R:</span>
+                    <input
+                      type="number"
+                      min={1}
+                      step="1"
+                      value={Number(singleSelected.radius.toFixed(2))}
+                      onChange={(e) =>
+                        updateSingleEntity({
+                          radius: Math.max(1, Number(e.target.value)),
+                        })
+                      }
+                      className="w-16 px-1.5 py-0.5 bg-slate-950 border border-sky-500/60 rounded text-sky-200"
+                    />
+                    <span className="text-slate-500">mm</span>
+                  </label>
+                  <label className="flex items-center gap-1">
+                    <span className="text-slate-400">邊數:</span>
+                    <input
+                      type="number"
+                      min={3}
+                      max={24}
+                      value={singleSelected.sides}
+                      onChange={(e) =>
+                        updateSingleEntity({
+                          sides: Math.max(
+                            3,
+                            Math.min(24, Number(e.target.value))
+                          ),
+                        })
+                      }
+                      className="w-12 px-1.5 py-0.5 bg-slate-950 border border-sky-500/60 rounded text-sky-200"
+                    />
+                  </label>
+                </div>
+              )}
+
+              {/* Dimension Direct Font Size Input */}
+              {singleSelected.type === 'dimension' && (
+                <div className="flex items-center gap-2">
+                  <label className="flex items-center gap-1">
+                    <span className="text-amber-300 font-sans">字體大小:</span>
+                    <input
+                      type="number"
+                      min={6}
+                      max={72}
+                      value={singleSelected.fontSize || 11}
+                      onChange={(e) =>
+                        updateSingleEntity({
+                          fontSize: Math.max(
+                            6,
+                            Math.min(72, Number(e.target.value))
+                          ),
+                        })
+                      }
+                      className="w-14 px-1.5 py-0.5 bg-slate-950 border border-amber-500/60 rounded text-amber-200"
+                    />
+                  </label>
+                </div>
+              )}
+
+              {/* Group Explode Action */}
+              {singleSelected.type === 'group' && (
+                <button
+                  type="button"
+                  onClick={onExplodeSelected}
+                  className="flex items-center gap-1 px-2.5 py-0.5 bg-amber-500/20 hover:bg-amber-500/35 text-amber-200 border border-amber-500/50 rounded font-sans text-[11px]"
+                >
+                  <Scissors className="w-3 h-3" />
+                  <span>炸開組裝圖元 (X)</span>
+                </button>
+              )}
+            </>
+          ) : (
+            <div className="flex items-center gap-2 font-sans">
+              <span className="text-sky-300 font-semibold">
+                已選取 {selectedEntities.length} 個圖元
+              </span>
+              <button
+                type="button"
+                onClick={onJoinSelected}
+                className="flex items-center gap-1 px-2.5 py-0.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[11px] font-medium"
+              >
+                <Combine className="w-3 h-3" />
+                <span>組裝圖元 (J)</span>
+              </button>
+              {selectedDims.length >= 2 && (
+                <button
+                  type="button"
+                  onClick={onAlignDimensions}
+                  className="flex items-center gap-1 px-2.5 py-0.5 bg-sky-600 hover:bg-sky-500 text-white rounded text-[11px] font-medium"
+                >
+                  <AlignCenterHorizontal className="w-3 h-3" />
+                  <span>相互對齊標註 ({selectedDims.length})</span>
+                </button>
+              )}
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={onDeleteSelected}
+            title="刪除選取圖元 (快捷鍵 E / DEL)"
+            className="flex items-center gap-1 px-2 py-0.5 bg-rose-950/70 hover:bg-rose-900 text-rose-200 border border-rose-700/60 rounded font-sans text-[11px]"
+          >
+            <Trash2 className="w-3 h-3" />
+            <span>刪除 (E)</span>
+          </button>
+        </div>
       )}
 
       {/* OSNAP Tooltip Badge near cursor */}

@@ -1,8 +1,11 @@
 import {
+  ArcEntity,
   CadEntity,
   CadLayer,
+  DimensionEntity,
   DraftingSettings,
   GripHandle,
+  GroupEntity,
   LineEntity,
   Point,
   PolylineEntity,
@@ -34,6 +37,36 @@ export function normalizeAngle(rad: number): number {
   let a = rad % (Math.PI * 2);
   if (a < 0) a += Math.PI * 2;
   return a;
+}
+
+/**
+ * Compute the 3 points [p1 (start), p2 (mid-arc), p3 (end)] on an ArcEntity.
+ */
+export function getArcThreePoints(arc: {
+  center: Point;
+  radius: number;
+  startAngle: number;
+  endAngle: number;
+}): [Point, Point, Point] {
+  const s = normalizeAngle(arc.startAngle);
+  const e = normalizeAngle(arc.endAngle);
+  let sweep = normalizeAngle(e - s);
+  if (sweep < 1e-5) sweep = Math.PI;
+  const midAng = s + sweep / 2;
+
+  const p1: Point = {
+    x: arc.center.x + arc.radius * Math.cos(s),
+    y: arc.center.y + arc.radius * Math.sin(s),
+  };
+  const p2: Point = {
+    x: arc.center.x + arc.radius * Math.cos(midAng),
+    y: arc.center.y + arc.radius * Math.sin(midAng),
+  };
+  const p3: Point = {
+    x: arc.center.x + arc.radius * Math.cos(e),
+    y: arc.center.y + arc.radius * Math.sin(e),
+  };
+  return [p1, p2, p3];
 }
 
 /**
@@ -77,15 +110,12 @@ export function arcFromThreePoints(
   const a2 = normalizeAngle(Math.atan2(p2.y - uy, p2.x - ux));
   const a3 = normalizeAngle(Math.atan2(p3.y - uy, p3.x - ux));
 
-  // Check if a2 lies on the CCW sweep from a1 to a3
   const ccwSweep12 = normalizeAngle(a2 - a1);
   const ccwSweep13 = normalizeAngle(a3 - a1);
 
   if (ccwSweep12 <= ccwSweep13) {
-    // CCW from a1 to a3 passes through a2
     return { center, radius, startAngle: a1, endAngle: a3 };
   } else {
-    // CW from a1 to a3 passes through a2 -> equivalent to CCW from a3 to a1
     return { center, radius, startAngle: a3, endAngle: a1 };
   }
 }
@@ -148,10 +178,6 @@ export function segmentIntersection(
   return null;
 }
 
-/**
- * Ray-segment intersection: ray starts at rayOrigin in direction (rayDirX, rayDirY) with t > 1e-4,
- * and segment is [s1, s2] with 0 <= u <= 1.
- */
 export function raySegmentIntersection(
   rayOrigin: Point,
   rayDir: Point,
@@ -178,9 +204,6 @@ export function raySegmentIntersection(
   return null;
 }
 
-/**
- * Intersections between a line segment [p1, p2] (or ray) and a circle (center, radius).
- */
 export function lineCircleIntersections(
   p1: Point,
   p2: Point,
@@ -213,6 +236,51 @@ export function lineCircleIntersections(
   return res;
 }
 
+/**
+ * Intersections between two circles (c1, r1) and (c2, r2).
+ */
+export function circleCircleIntersections(
+  c1: Point,
+  r1: number,
+  c2: Point,
+  r2: number
+): Point[] {
+  const d = dist(c1, c2);
+  if (d < 1e-6 || d > r1 + r2 + 1e-5 || d < Math.abs(r1 - r2) - 1e-5) {
+    return [];
+  }
+  const a = (r1 * r1 - r2 * r2 + d * d) / (2 * d);
+  const hSq = Math.max(0, r1 * r1 - a * a);
+  const h = Math.sqrt(hSq);
+  const x2 = c1.x + (a * (c2.x - c1.x)) / d;
+  const y2 = c1.y + (a * (c2.y - c1.y)) / d;
+
+  if (h < 1e-5) {
+    return [{ x: x2, y: y2 }];
+  }
+
+  const rx = -(c2.y - c1.y) * (h / d);
+  const ry = (c2.x - c1.x) * (h / d);
+  return [
+    { x: x2 + rx, y: y2 + ry },
+    { x: x2 - rx, y: y2 - ry },
+  ];
+}
+
+export function isAngleOnArc(
+  angle: number,
+  startAngle: number,
+  endAngle: number,
+  tol = 0.015
+): boolean {
+  const ang = normalizeAngle(angle);
+  const s = normalizeAngle(startAngle);
+  const e = normalizeAngle(endAngle);
+  const sweep = normalizeAngle(e - s);
+  const rel = normalizeAngle(ang - s);
+  return rel <= sweep + tol || Math.PI * 2 - rel <= tol;
+}
+
 export function getPolygonVertices(
   center: Point,
   radius: number,
@@ -228,6 +296,21 @@ export function getPolygonVertices(
     });
   }
   return pts;
+}
+
+/**
+ * Flatten any GroupEntity into its leaf entities for intersection / snapping calculations.
+ */
+export function flattenEntities(entities: CadEntity[]): CadEntity[] {
+  const out: CadEntity[] = [];
+  for (const ent of entities) {
+    if (ent.type === 'group') {
+      out.push(...flattenEntities(ent.children));
+    } else {
+      out.push(ent);
+    }
+  }
+  return out;
 }
 
 export function getEntitySegments(entity: CadEntity): Array<[Point, Point]> {
@@ -269,15 +352,18 @@ export function getEntitySegments(entity: CadEntity): Array<[Point, Point]> {
       }
       return segs;
     }
+    case 'group': {
+      const segs: Array<[Point, Point]> = [];
+      for (const child of entity.children) {
+        segs.push(...getEntitySegments(child));
+      }
+      return segs;
+    }
     default:
       return [];
   }
 }
 
-/**
- * Find all intersection points along a segment [segA, segB] with all other entities.
- * Returns parameter values t in (0, 1) sorted ascending.
- */
 function findSegmentIntersectionsT(
   segA: Point,
   segB: Point,
@@ -298,7 +384,11 @@ function findSegmentIntersectionsT(
     }
   };
 
-  for (const other of allEntities) {
+  const leaves = flattenEntities(
+    allEntities.filter((e) => e.id !== ignoreEntityId)
+  );
+
+  for (const other of leaves) {
     if (other.id === ignoreEntityId) continue;
 
     const otherSegs = getEntitySegments(other);
@@ -308,18 +398,27 @@ function findSegmentIntersectionsT(
     }
 
     if (other.type === 'circle') {
-      const pts = lineCircleIntersections(segA, segB, other.center, other.radius, false);
+      const pts = lineCircleIntersections(
+        segA,
+        segB,
+        other.center,
+        other.radius,
+        false
+      );
       pts.forEach(addPoint);
     } else if (other.type === 'arc') {
-      const pts = lineCircleIntersections(segA, segB, other.center, other.radius, false);
+      const pts = lineCircleIntersections(
+        segA,
+        segB,
+        other.center,
+        other.radius,
+        false
+      );
       for (const pt of pts) {
-        const ang = normalizeAngle(
-          Math.atan2(pt.y - other.center.y, pt.x - other.center.x)
-        );
-        const s = normalizeAngle(other.startAngle);
-        const e = normalizeAngle(other.endAngle);
-        const inArc = s <= e ? ang >= s - 0.02 && ang <= e + 0.02 : ang >= s - 0.02 || ang <= e + 0.02;
-        if (inArc) addPoint(pt);
+        const ang = Math.atan2(pt.y - other.center.y, pt.x - other.center.x);
+        if (isAngleOnArc(ang, other.startAngle, other.endAngle)) {
+          addPoint(pt);
+        }
       }
     }
   }
@@ -328,21 +427,254 @@ function findSegmentIntersectionsT(
 }
 
 /**
- * Compute Trim (剪切) operation on a target entity at clickPt.
- * Returns the segment that will be cut [cutStart, cutEnd] for preview, and the resulting entity list after cutting.
+ * Find all intersection points on a circle (center, radius) with all other entities.
+ */
+function findCircleIntersectionPoints(
+  center: Point,
+  radius: number,
+  ignoreEntityId: string,
+  allEntities: CadEntity[]
+): Point[] {
+  const pts: Point[] = [];
+  const leaves = flattenEntities(
+    allEntities.filter((e) => e.id !== ignoreEntityId)
+  );
+
+  for (const other of leaves) {
+    if (other.id === ignoreEntityId) continue;
+
+    const otherSegs = getEntitySegments(other);
+    for (const [o1, o2] of otherSegs) {
+      const hits = lineCircleIntersections(o1, o2, center, radius, false);
+      pts.push(...hits);
+    }
+
+    if (other.type === 'circle') {
+      const hits = circleCircleIntersections(
+        center,
+        radius,
+        other.center,
+        other.radius
+      );
+      pts.push(...hits);
+    } else if (other.type === 'arc') {
+      const hits = circleCircleIntersections(
+        center,
+        radius,
+        other.center,
+        other.radius
+      );
+      for (const h of hits) {
+        const ang = Math.atan2(h.y - other.center.y, h.x - other.center.x);
+        if (isAngleOnArc(ang, other.startAngle, other.endAngle)) {
+          pts.push(h);
+        }
+      }
+    }
+  }
+
+  return pts;
+}
+
+export interface TrimResult {
+  cutSegment?: [Point, Point];
+  cutArc?: {
+    center: Point;
+    radius: number;
+    startAngle: number;
+    endAngle: number;
+  };
+  replacementEntities: CadEntity[];
+}
+
+/**
+ * Compute Trim (剪切) operation on a target entity (Line, Polyline, Rectangle, Polygon, Circle, or 3-Point Arc) at clickPt.
  */
 export function computeTrimResult(
   clickPt: Point,
   target: CadEntity,
   allEntities: CadEntity[]
-): {
-  cutSegment: [Point, Point];
-  replacementEntities: CadEntity[];
-} | null {
+): TrimResult | null {
+  // 1. Circle Trimming -> converts trimmed circle into an ArcEntity!
+  if (target.type === 'circle') {
+    const rawPts = findCircleIntersectionPoints(
+      target.center,
+      target.radius,
+      target.id,
+      allEntities
+    );
+    const angles: number[] = [];
+    for (const pt of rawPts) {
+      const ang = normalizeAngle(
+        Math.atan2(pt.y - target.center.y, pt.x - target.center.x)
+      );
+      if (
+        !angles.some(
+          (a) =>
+            Math.abs(a - ang) < 0.015 ||
+            Math.abs(Math.abs(a - ang) - Math.PI * 2) < 0.015
+        )
+      ) {
+        angles.push(ang);
+      }
+    }
+    angles.sort((a, b) => a - b);
+
+    // If circle has fewer than 2 intersections, cannot split into arc
+    if (angles.length < 2) {
+      return null;
+    }
+
+    const clickAng = normalizeAngle(
+      Math.atan2(clickPt.y - target.center.y, clickPt.x - target.center.x)
+    );
+
+    // Find which CCW sector [angles[i], angles[(i+1)%n]] contains clickAng
+    let sectorIdx = angles.length - 1;
+    for (let i = 0; i < angles.length - 1; i++) {
+      if (clickAng >= angles[i] && clickAng <= angles[i + 1]) {
+        sectorIdx = i;
+        break;
+      }
+    }
+
+    const cutStart = angles[sectorIdx];
+    const cutEnd = angles[(sectorIdx + 1) % angles.length];
+
+    // Remaining arc goes CCW from cutEnd to cutStart
+    const remArcBase = {
+      center: target.center,
+      radius: target.radius,
+      startAngle: cutEnd,
+      endAngle: cutStart,
+    };
+    const [p1, p2, p3] = getArcThreePoints(remArcBase);
+
+    const replacementArc: ArcEntity = {
+      id: `${target.id}_trim_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      type: 'arc',
+      layerId: target.layerId,
+      color: target.color,
+      lineType: target.lineType,
+      lineWeight: target.lineWeight,
+      center: target.center,
+      radius: target.radius,
+      startAngle: cutEnd,
+      endAngle: cutStart,
+      p1,
+      p2,
+      p3,
+    };
+
+    return {
+      cutArc: {
+        center: target.center,
+        radius: target.radius,
+        startAngle: cutStart,
+        endAngle: cutEnd,
+      },
+      replacementEntities: [replacementArc],
+    };
+  }
+
+  // 2. 3-Point Arc Trimming -> trims the sub-arc between intersections!
+  if (target.type === 'arc') {
+    const s = normalizeAngle(target.startAngle);
+    const e = normalizeAngle(target.endAngle);
+    const totalSweep = normalizeAngle(e - s);
+    if (totalSweep < 0.02) return null;
+
+    const rawPts = findCircleIntersectionPoints(
+      target.center,
+      target.radius,
+      target.id,
+      allEntities
+    );
+
+    const offsets: number[] = [];
+    for (const pt of rawPts) {
+      const ang = normalizeAngle(
+        Math.atan2(pt.y - target.center.y, pt.x - target.center.x)
+      );
+      const rel = normalizeAngle(ang - s);
+      if (rel > 0.015 && rel < totalSweep - 0.015) {
+        if (!offsets.some((o) => Math.abs(o - rel) < 0.015)) {
+          offsets.push(rel);
+        }
+      }
+    }
+    offsets.sort((a, b) => a - b);
+
+    const clickAng = normalizeAngle(
+      Math.atan2(clickPt.y - target.center.y, clickPt.x - target.center.x)
+    );
+    const clickRel = Math.max(
+      0,
+      Math.min(totalSweep, normalizeAngle(clickAng - s))
+    );
+
+    const boundaries = [0, ...offsets, totalSweep];
+    let intervalIdx = 0;
+    for (let i = 0; i < boundaries.length - 1; i++) {
+      if (clickRel >= boundaries[i] && clickRel <= boundaries[i + 1]) {
+        intervalIdx = i;
+        break;
+      }
+    }
+
+    const dStart = boundaries[intervalIdx];
+    const dEnd = boundaries[intervalIdx + 1];
+    const cutStart = normalizeAngle(s + dStart);
+    const cutEnd = normalizeAngle(s + dEnd);
+
+    const replacementEntities: CadEntity[] = [];
+
+    const makeSubArc = (subStart: number, subEnd: number, idx: number): ArcEntity => {
+      const [p1, p2, p3] = getArcThreePoints({
+        center: target.center,
+        radius: target.radius,
+        startAngle: subStart,
+        endAngle: subEnd,
+      });
+      return {
+        id: `${target.id}_trim_${idx}_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+        type: 'arc',
+        layerId: target.layerId,
+        color: target.color,
+        lineType: target.lineType,
+        lineWeight: target.lineWeight,
+        center: target.center,
+        radius: target.radius,
+        startAngle: subStart,
+        endAngle: subEnd,
+        p1,
+        p2,
+        p3,
+      };
+    };
+
+    if (dStart > 0.015) {
+      replacementEntities.push(makeSubArc(s, cutStart, 0));
+    }
+    if (dEnd < totalSweep - 0.015) {
+      replacementEntities.push(makeSubArc(cutEnd, e, 1));
+    }
+
+    return {
+      cutArc: {
+        center: target.center,
+        radius: target.radius,
+        startAngle: cutStart,
+        endAngle: cutEnd,
+      },
+      replacementEntities,
+    };
+  }
+
+  // 3. Segment-based entities (Line, Rectangle, Polyline, Polygon)
   const segs = getEntitySegments(target);
   if (segs.length === 0) return null;
 
-  // Find which segment of target is closest to clickPt
   let bestSegIdx = 0;
   let bestDist = Infinity;
   for (let i = 0; i < segs.length; i++) {
@@ -359,12 +691,15 @@ export function computeTrimResult(
 
   const ts = findSegmentIntersectionsT(segA, segB, target.id, allEntities);
 
-  // Project clickPt onto [segA, segB] to get clickT in [0, 1]
   const dx = segB.x - segA.x;
   const dy = segB.y - segA.y;
   const clickT = Math.max(
     0,
-    Math.min(1, ((clickPt.x - segA.x) * dx + (clickPt.y - segA.y) * dy) / (segLen * segLen))
+    Math.min(
+      1,
+      ((clickPt.x - segA.x) * dx + (clickPt.y - segA.y) * dy) /
+        (segLen * segLen)
+    )
   );
 
   const lerpPt = (t: number): Point => ({
@@ -372,7 +707,6 @@ export function computeTrimResult(
     y: segA.y + t * dy,
   });
 
-  // Determine the interval [tStart, tEnd] containing clickT bounded by intersections (and 0, 1)
   const boundaries = [0, ...ts, 1];
   let intervalIdx = 0;
   for (let i = 0; i < boundaries.length - 1; i++) {
@@ -386,7 +720,6 @@ export function computeTrimResult(
   const tEnd = boundaries[intervalIdx + 1];
   const cutSegment: [Point, Point] = [lerpPt(tStart), lerpPt(tEnd)];
 
-  // Build replacement LineEntities for all remaining segments
   const remainingSegments: Array<[Point, Point]> = [];
   for (let i = 0; i < segs.length; i++) {
     if (i !== bestSegIdx) {
@@ -418,8 +751,7 @@ export function computeTrimResult(
 }
 
 /**
- * Compute Extend (延伸) operation on a line or open polyline near clickPt.
- * Extends the endpoint closest to clickPt until it hits the nearest boundary entity.
+ * Compute Extend (延伸) operation on a line, open polyline, or 3-point arc near clickPt.
  */
 export function computeExtendResult(
   clickPt: Point,
@@ -485,7 +817,6 @@ export function computeExtendResult(
     }
   }
 
-  // Find closest intersection along rayOrigin + t * rayDir (t > 0.05)
   let bestHit: Point | null = null;
   let bestHitDist = Infinity;
 
@@ -502,7 +833,11 @@ export function computeExtendResult(
     y: rayOrigin.y + rayDir.y * 10000,
   };
 
-  for (const other of allEntities) {
+  const leaves = flattenEntities(
+    allEntities.filter((e) => e.id !== target.id)
+  );
+
+  for (const other of leaves) {
     if (other.id === target.id) continue;
 
     const otherSegs = getEntitySegments(other);
@@ -520,6 +855,20 @@ export function computeExtendResult(
         false
       );
       hits.forEach(considerHit);
+    } else if (other.type === 'arc') {
+      const hits = lineCircleIntersections(
+        rayOrigin,
+        farRayPt,
+        other.center,
+        other.radius,
+        false
+      );
+      for (const h of hits) {
+        const ang = Math.atan2(h.y - other.center.y, h.x - other.center.x);
+        if (isAngleOnArc(ang, other.startAngle, other.endAngle)) {
+          considerHit(h);
+        }
+      }
     }
   }
 
@@ -546,82 +895,74 @@ export function computeExtendResult(
 }
 
 /**
- * Assemble / Join (組裝圖元) multiple selected entities into a single PolylineEntity.
- * Chains connected segments automatically and closes the loop if endpoints meet.
+ * Assemble / Join (組裝圖元) multiple selected entities into a single composite GroupEntity.
+ * Preserves the exact position, geometry, curves, and style of all selected entities!
  */
 export function joinSelectedEntities(
   selectedEntities: CadEntity[],
   layerId: string
-): PolylineEntity | null {
-  const allSegs: Array<[Point, Point]> = [];
+): GroupEntity | null {
+  if (selectedEntities.length < 2) return null;
+
+  const children: CadEntity[] = [];
   for (const ent of selectedEntities) {
-    const segs = getEntitySegments(ent);
-    allSegs.push(...segs);
-  }
-  if (allSegs.length === 0) return null;
-
-  const used = new Array(allSegs.length).fill(false);
-  const chain: Point[] = [allSegs[0][0], allSegs[0][1]];
-  used[0] = true;
-
-  const tol = 2.0;
-  let progress = true;
-  while (progress) {
-    progress = false;
-    for (let i = 0; i < allSegs.length; i++) {
-      if (used[i]) continue;
-      const [a, b] = allSegs[i];
-      const head = chain[0];
-      const tail = chain[chain.length - 1];
-
-      if (dist(tail, a) <= tol) {
-        chain.push(b);
-        used[i] = true;
-        progress = true;
-      } else if (dist(tail, b) <= tol) {
-        chain.push(a);
-        used[i] = true;
-        progress = true;
-      } else if (dist(head, b) <= tol) {
-        chain.unshift(a);
-        used[i] = true;
-        progress = true;
-      } else if (dist(head, a) <= tol) {
-        chain.unshift(b);
-        used[i] = true;
-        progress = true;
-      }
+    if (ent.type === 'group') {
+      children.push(
+        ...ent.children.map((c, idx) => ({
+          ...c,
+          id: `${c.id}_sub_${idx}_${Date.now()}`,
+        }))
+      );
+    } else {
+      children.push({
+        ...ent,
+        id: `${ent.id}_sub_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      });
     }
-  }
-
-  // Append any remaining non-contiguous segments so all selected geometry is assembled into one unit
-  for (let i = 0; i < allSegs.length; i++) {
-    if (!used[i]) {
-      const [a, b] = allSegs[i];
-      if (dist(chain[chain.length - 1], a) > tol) {
-        chain.push(a);
-      }
-      chain.push(b);
-    }
-  }
-
-  let closed = false;
-  if (chain.length >= 3 && dist(chain[0], chain[chain.length - 1]) <= tol) {
-    closed = true;
-    chain.pop();
   }
 
   const first = selectedEntities[0];
   return {
-    id: `join_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-    type: 'polyline',
+    id: `group_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    type: 'group',
     layerId: first.layerId || layerId,
     color: first.color,
     lineType: first.lineType,
     lineWeight: first.lineWeight,
-    points: chain,
-    closed,
+    children,
+    name: `組裝圖元 (${children.length} 個子圖元)`,
   };
+}
+
+/**
+ * Explode (炸開圖元):
+ * - If entity is a GroupEntity (組裝好的圖元), restores its constituent children at their exact positions!
+ * - If entity is a RectangleEntity (轉角或中心矩形), PolylineEntity, or PolygonEntity, explodes into independent LineEntities!
+ */
+export function explodeEntity(entity: CadEntity): CadEntity[] | null {
+  if (entity.type === 'group') {
+    return entity.children.map((child, idx) => ({
+      ...child,
+      id: `${child.id}_exp_${idx}_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      layerId: child.layerId || entity.layerId,
+      color: child.color ?? entity.color,
+      lineType: child.lineType ?? entity.lineType,
+      lineWeight: child.lineWeight ?? entity.lineWeight,
+    }));
+  }
+
+  const segs = getEntitySegments(entity);
+  if (segs.length === 0 || entity.type === 'line') return null;
+  return segs.map(([p1, p2], idx) => ({
+    id: `${entity.id}_exp_${idx}_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+    type: 'line',
+    layerId: entity.layerId,
+    color: entity.color,
+    lineType: entity.lineType,
+    lineWeight: entity.lineWeight,
+    p1: { ...p1 },
+    p2: { ...p2 },
+  }));
 }
 
 export function findBestSnapPoint(
@@ -634,7 +975,8 @@ export function findBestSnapPoint(
   const visibleLayerIds = new Set(
     layers.filter((l) => l.visible).map((l) => l.id)
   );
-  const visibleEntities = entities.filter((e) => visibleLayerIds.has(e.layerId));
+  const topVisible = entities.filter((e) => visibleLayerIds.has(e.layerId));
+  const visibleEntities = flattenEntities(topVisible);
 
   const maxSnapDist = 14 / zoom;
   let bestSnap: SnapPoint | null = null;
@@ -644,12 +986,13 @@ export function findBestSnapPoint(
     pt: Point,
     type: SnapPoint['type'],
     label: string,
-    entityId?: string
+    entityId?: string,
+    alignGuideLine?: [Point, Point]
   ) => {
     const d = dist(cursorWorld, pt);
     if (d < bestDist) {
       bestDist = d;
-      bestSnap = { point: pt, type, label, entityId };
+      bestSnap = { point: pt, type, label, entityId, alignGuideLine };
     }
   };
 
@@ -666,28 +1009,36 @@ export function findBestSnapPoint(
           consider(e, 'endpoint', '端點 (Endpoint)', ent.id);
         }
         if (ent.type === 'arc') {
-          consider(
-            {
-              x: ent.center.x + ent.radius * Math.cos(ent.startAngle),
-              y: ent.center.y + ent.radius * Math.sin(ent.startAngle),
-            },
-            'endpoint',
-            '端點 (Endpoint)',
-            ent.id
-          );
-          consider(
-            {
-              x: ent.center.x + ent.radius * Math.cos(ent.endAngle),
-              y: ent.center.y + ent.radius * Math.sin(ent.endAngle),
-            },
-            'endpoint',
-            '端點 (Endpoint)',
-            ent.id
-          );
+          const [p1, p2, p3] = getArcThreePoints(ent);
+          consider(p1, 'endpoint', '圓弧起點 (P1)', ent.id);
+          consider(p2, 'midpoint', '圓弧中點 (P2)', ent.id);
+          consider(p3, 'endpoint', '圓弧終點 (P3)', ent.id);
         }
         if (ent.type === 'dimension') {
-          consider(ent.p1, 'endpoint', '端點 (Endpoint)', ent.id);
-          consider(ent.p2, 'endpoint', '端點 (Endpoint)', ent.id);
+          consider(ent.p1, 'endpoint', '標註原點 (Endpoint)', ent.id);
+          consider(ent.p2, 'endpoint', '標註原點 (Endpoint)', ent.id);
+          const { dimP1, dimP2, mid } = getDimensionLinePoints(ent);
+          consider(
+            dimP1,
+            'dimAlign',
+            '標註線對齊點 (Dim Align)',
+            ent.id,
+            [dimP1, dimP2]
+          );
+          consider(
+            dimP2,
+            'dimAlign',
+            '標註線對齊點 (Dim Align)',
+            ent.id,
+            [dimP1, dimP2]
+          );
+          consider(
+            mid,
+            'dimAlign',
+            '標註線對齊中點 (Dim Align)',
+            ent.id,
+            [dimP1, dimP2]
+          );
         }
       }
 
@@ -701,7 +1052,6 @@ export function findBestSnapPoint(
         if (
           ent.type === 'circle' ||
           ent.type === 'arc' ||
-          ent.type === 'ellipse' ||
           ent.type === 'polygon'
         ) {
           consider(ent.center, 'center', '圓心 (Center)', ent.id);
@@ -742,32 +1092,6 @@ export function findBestSnapPoint(
             '四分點 (Quadrant)',
             ent.id
           );
-        } else if (ent.type === 'ellipse') {
-          const { center, rx, ry } = ent;
-          consider(
-            { x: center.x + rx, y: center.y },
-            'quadrant',
-            '四分點 (Quadrant)',
-            ent.id
-          );
-          consider(
-            { x: center.x - rx, y: center.y },
-            'quadrant',
-            '四分點 (Quadrant)',
-            ent.id
-          );
-          consider(
-            { x: center.x, y: center.y + ry },
-            'quadrant',
-            '四分點 (Quadrant)',
-            ent.id
-          );
-          consider(
-            { x: center.x, y: center.y - ry },
-            'quadrant',
-            '四分點 (Quadrant)',
-            ent.id
-          );
         }
       }
     }
@@ -803,6 +1127,100 @@ export function findBestSnapPoint(
   }
 
   return null;
+}
+
+/**
+ * When placing or dragging a DimensionEntity's offsetPoint, check if it is close to aligning with any existing DimensionEntity's line.
+ * Returns a snapped offsetPoint and an alignment guide line so multiple dimensions align cleanly.
+ */
+export function snapDimensionOffsetToExisting(
+  p1: Point,
+  p2: Point,
+  rawOffsetPt: Point,
+  entities: CadEntity[],
+  zoom: number,
+  ignoreId?: string
+): {
+  offsetPoint: Point;
+  alignGuide: [Point, Point] | null;
+} {
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-4) return { offsetPoint: rawOffsetPt, alignGuide: null };
+
+  const ux = dx / len;
+  const uy = dy / len;
+  const nx = -uy;
+  const ny = ux;
+  const curOffsetDist =
+    (rawOffsetPt.x - p1.x) * nx + (rawOffsetPt.y - p1.y) * ny;
+  const curMid = midpoint(
+    { x: p1.x + nx * curOffsetDist, y: p1.y + ny * curOffsetDist },
+    { x: p2.x + nx * curOffsetDist, y: p2.y + ny * curOffsetDist }
+  );
+
+  const tol = 12 / zoom;
+  let bestDiff = tol;
+  let bestOffsetPt = rawOffsetPt;
+  let bestGuide: [Point, Point] | null = null;
+
+  const leaves = flattenEntities(entities);
+  for (const ent of leaves) {
+    if (ent.type !== 'dimension' || ent.id === ignoreId) continue;
+    const otherDim = getDimensionLinePoints(ent);
+
+    // Project existing dimension's dimP1 onto this dimension's normal vector (nx, ny)
+    const targetOffsetDist =
+      (otherDim.dimP1.x - p1.x) * nx + (otherDim.dimP1.y - p1.y) * ny;
+    const diff = Math.abs(curOffsetDist - targetOffsetDist);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      const snappedMid = {
+        x: (p1.x + p2.x) / 2 + nx * targetOffsetDist,
+        y: (p1.y + p2.y) / 2 + ny * targetOffsetDist,
+      };
+      bestOffsetPt = snappedMid;
+      bestGuide = [otherDim.mid, snappedMid];
+    }
+  }
+
+  return { offsetPoint: bestOffsetPt, alignGuide: bestGuide };
+}
+
+/**
+ * Align multiple selected DimensionEntities so they all share the first selected dimension's offset line.
+ */
+export function alignSelectedDimensions(
+  entities: CadEntity[],
+  selectedIds: string[]
+): { updated: CadEntity[]; alignedCount: number } {
+  const selectedDims = entities.filter(
+    (e): e is DimensionEntity =>
+      selectedIds.includes(e.id) && e.type === 'dimension'
+  );
+  if (selectedDims.length < 2) {
+    return { updated: entities, alignedCount: 0 };
+  }
+
+  const refDim = selectedDims[0];
+  const refLine = getDimensionLinePoints(refDim);
+
+  const updated = entities.map((ent) => {
+    if (
+      !selectedIds.includes(ent.id) ||
+      ent.type !== 'dimension' ||
+      ent.id === refDim.id
+    ) {
+      return ent;
+    }
+    return {
+      ...ent,
+      offsetPoint: { ...refLine.mid },
+    };
+  });
+
+  return { updated, alignedCount: selectedDims.length };
 }
 
 export function applyOrthoAndPolar(
@@ -874,21 +1292,8 @@ export function isPointNearEntity(
     case 'arc': {
       const d = dist(p, entity.center);
       if (Math.abs(d - entity.radius) > tolerance) return false;
-      const angle = normalizeAngle(
-        Math.atan2(p.y - entity.center.y, p.x - entity.center.x)
-      );
-      const s = normalizeAngle(entity.startAngle);
-      const e = normalizeAngle(entity.endAngle);
-      if (s <= e) return angle >= s - 0.05 && angle <= e + 0.05;
-      return angle >= s - 0.05 || angle <= e + 0.05;
-    }
-    case 'ellipse': {
-      if (entity.rx < 1e-3 || entity.ry < 1e-3) return false;
-      const nx = (p.x - entity.center.x) / entity.rx;
-      const ny = (p.y - entity.center.y) / entity.ry;
-      const val = Math.hypot(nx, ny);
-      const avgR = (entity.rx + entity.ry) / 2;
-      return Math.abs(val - 1) * avgR <= tolerance;
+      const angle = Math.atan2(p.y - entity.center.y, p.x - entity.center.x);
+      return isAngleOnArc(angle, entity.startAngle, entity.endAngle, 0.05);
     }
     case 'dimension': {
       const { dimP1, dimP2 } = getDimensionLinePoints(entity);
@@ -911,6 +1316,13 @@ export function isPointNearEntity(
         p.y <= entity.position.y + approxHeight / 2 + tolerance
       );
     }
+    case 'group': {
+      return entity.children.some((child) =>
+        isPointNearEntity(p, child, tolerance)
+      );
+    }
+    default:
+      return false;
   }
 }
 
@@ -961,6 +1373,9 @@ export function getEntityBounds(entity: CadEntity): {
   maxX: number;
   maxY: number;
 } {
+  if (!entity || typeof entity !== 'object') {
+    return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+  }
   switch (entity.type) {
     case 'line':
       return {
@@ -977,6 +1392,9 @@ export function getEntityBounds(entity: CadEntity): {
         maxY: Math.max(entity.p1.y, entity.p2.y),
       };
     case 'polyline': {
+      if (!entity.points || entity.points.length === 0) {
+        return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+      }
       const xs = entity.points.map((p) => p.x);
       const ys = entity.points.map((p) => p.y);
       return {
@@ -994,13 +1412,6 @@ export function getEntityBounds(entity: CadEntity): {
         minY: entity.center.y - entity.radius,
         maxX: entity.center.x + entity.radius,
         maxY: entity.center.y + entity.radius,
-      };
-    case 'ellipse':
-      return {
-        minX: entity.center.x - entity.rx,
-        minY: entity.center.y - entity.ry,
-        maxX: entity.center.x + entity.rx,
-        maxY: entity.center.y + entity.ry,
       };
     case 'dimension': {
       const { dimP1, dimP2 } = getDimensionLinePoints(entity);
@@ -1023,6 +1434,20 @@ export function getEntityBounds(entity: CadEntity): {
         maxY: entity.position.y + h / 2,
       };
     }
+    case 'group': {
+      if (!entity.children || entity.children.length === 0) {
+        return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+      }
+      const childBounds = entity.children.map(getEntityBounds);
+      return {
+        minX: Math.min(...childBounds.map((b) => b.minX)),
+        minY: Math.min(...childBounds.map((b) => b.minY)),
+        maxX: Math.max(...childBounds.map((b) => b.maxX)),
+        maxY: Math.max(...childBounds.map((b) => b.maxY)),
+      };
+    }
+    default:
+      return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
   }
 }
 
@@ -1049,6 +1474,12 @@ export function isEntityInSelectionBox(
     b.maxX >= minX && b.minX <= maxX && b.maxY >= minY && b.minY <= maxY;
   if (!boxesOverlap) return false;
   if (fullyInside) return true;
+
+  if (entity.type === 'group') {
+    return entity.children.some((c) =>
+      isEntityInSelectionBox(c, boxStart, boxEnd, isCrossing)
+    );
+  }
 
   const boxCorners: Point[] = [
     { x: minX, y: minY },
@@ -1096,10 +1527,16 @@ export function translateEntity(
     case 'polyline':
       return { ...entity, points: entity.points.map(shift) };
     case 'circle':
-    case 'arc':
-    case 'ellipse':
     case 'polygon':
       return { ...entity, center: shift(entity.center) };
+    case 'arc':
+      return {
+        ...entity,
+        center: shift(entity.center),
+        p1: entity.p1 ? shift(entity.p1) : undefined,
+        p2: entity.p2 ? shift(entity.p2) : undefined,
+        p3: entity.p3 ? shift(entity.p3) : undefined,
+      };
     case 'dimension':
       return {
         ...entity,
@@ -1109,6 +1546,13 @@ export function translateEntity(
       };
     case 'text':
       return { ...entity, position: shift(entity.position) };
+    case 'group':
+      return {
+        ...entity,
+        children: entity.children.map((c) => translateEntity(c, dx, dy)),
+      };
+    default:
+      return entity;
   }
 }
 
@@ -1138,7 +1582,6 @@ export function rotateEntity(
     case 'polyline':
       return { ...entity, points: entity.points.map(rot) };
     case 'circle':
-    case 'ellipse':
       return { ...entity, center: rot(entity.center) };
     case 'arc':
       return {
@@ -1146,6 +1589,9 @@ export function rotateEntity(
         center: rot(entity.center),
         startAngle: entity.startAngle + angleRad,
         endAngle: entity.endAngle + angleRad,
+        p1: entity.p1 ? rot(entity.p1) : undefined,
+        p2: entity.p2 ? rot(entity.p2) : undefined,
+        p3: entity.p3 ? rot(entity.p3) : undefined,
       };
     case 'polygon':
       return {
@@ -1166,6 +1612,13 @@ export function rotateEntity(
         position: rot(entity.position),
         rotation: (entity.rotation + angleRad * RAD_TO_DEG) % 360,
       };
+    case 'group':
+      return {
+        ...entity,
+        children: entity.children.map((c) => rotateEntity(c, pivot, angleRad)),
+      };
+    default:
+      return entity;
   }
 }
 
@@ -1183,27 +1636,27 @@ export function mirrorEntity(
     case 'polyline':
       return { ...entity, points: entity.points.map(mir) };
     case 'circle':
-    case 'ellipse':
     case 'polygon':
       return { ...entity, center: mir(entity.center) };
     case 'arc': {
-      const pStart = {
-        x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
-        y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
-      };
-      const pEnd = {
-        x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
-        y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
-      };
-      const newCenter = mir(entity.center);
-      const mStart = mir(pStart);
-      const mEnd = mir(pEnd);
-      return {
-        ...entity,
-        center: newCenter,
-        startAngle: Math.atan2(mEnd.y - newCenter.y, mEnd.x - newCenter.x),
-        endAngle: Math.atan2(mStart.y - newCenter.y, mStart.x - newCenter.x),
-      };
+      const [p1, p2, p3] = getArcThreePoints(entity);
+      const mp1 = mir(p1);
+      const mp2 = mir(p2);
+      const mp3 = mir(p3);
+      const arcData = arcFromThreePoints(mp1, mp2, mp3);
+      if (arcData) {
+        return {
+          ...entity,
+          center: arcData.center,
+          radius: arcData.radius,
+          startAngle: arcData.startAngle,
+          endAngle: arcData.endAngle,
+          p1: mp1,
+          p2: mp2,
+          p3: mp3,
+        };
+      }
+      return entity;
     }
     case 'dimension':
       return {
@@ -1214,6 +1667,13 @@ export function mirrorEntity(
       };
     case 'text':
       return { ...entity, position: mir(entity.position) };
+    case 'group':
+      return {
+        ...entity,
+        children: entity.children.map((c) => mirrorEntity(c, axisA, axisB)),
+      };
+    default:
+      return entity;
   }
 }
 
@@ -1258,6 +1718,13 @@ export function offsetEntity(
       const sign = d >= entity.radius ? 1 : -1;
       const nextRadius = entity.radius + sign * offsetDist;
       if (nextRadius <= 0.5) return null;
+      if (entity.type === 'arc') {
+        const [p1, p2, p3] = getArcThreePoints({
+          ...entity,
+          radius: nextRadius,
+        });
+        return { ...entity, id: newId, radius: nextRadius, p1, p2, p3 };
+      }
       return { ...entity, id: newId, radius: nextRadius };
     }
     case 'rectangle': {
@@ -1281,48 +1748,17 @@ export function offsetEntity(
         p2: { x: maxX + delta, y: maxY + delta },
       };
     }
-    case 'ellipse': {
-      const d = dist(sidePoint, entity.center);
-      const avg = (entity.rx + entity.ry) / 2;
-      const sign = d >= avg ? 1 : -1;
-      if (
-        entity.rx + sign * offsetDist <= 1 ||
-        entity.ry + sign * offsetDist <= 1
-      )
-        return null;
-      return {
-        ...entity,
-        id: newId,
-        rx: entity.rx + sign * offsetDist,
-        ry: entity.ry + sign * offsetDist,
-      };
-    }
     default:
       return null;
   }
-}
-
-export function explodeEntity(entity: CadEntity): LineEntity[] | null {
-  const segs = getEntitySegments(entity);
-  if (segs.length === 0 || entity.type === 'line') return null;
-  return segs.map(([p1, p2], idx) => ({
-    id: `${entity.id}_exp_${idx}_${Date.now()}`,
-    type: 'line',
-    layerId: entity.layerId,
-    color: entity.color,
-    lineType: entity.lineType,
-    lineWeight: entity.lineWeight,
-    p1: { ...p1 },
-    p2: { ...p2 },
-  }));
 }
 
 export function getEntityGripHandles(entity: CadEntity): GripHandle[] {
   switch (entity.type) {
     case 'line':
       return [
-        { entityId: entity.id, gripIndex: 0, point: entity.p1, type: 'vertex' },
-        { entityId: entity.id, gripIndex: 1, point: entity.p2, type: 'vertex' },
+        { entityId: entity.id, gripIndex: 0, point: entity.p1, type: 'vertex', label: 'P1' },
+        { entityId: entity.id, gripIndex: 1, point: entity.p2, type: 'vertex', label: 'P2' },
         {
           entityId: entity.id,
           gripIndex: 2,
@@ -1375,27 +1811,6 @@ export function getEntityGripHandles(entity: CadEntity): GripHandle[] {
           type: 'radius',
         },
       ];
-    case 'ellipse':
-      return [
-        {
-          entityId: entity.id,
-          gripIndex: 0,
-          point: entity.center,
-          type: 'center',
-        },
-        {
-          entityId: entity.id,
-          gripIndex: 1,
-          point: { x: entity.center.x + entity.rx, y: entity.center.y },
-          type: 'radius',
-        },
-        {
-          entityId: entity.id,
-          gripIndex: 2,
-          point: { x: entity.center.x, y: entity.center.y + entity.ry },
-          type: 'radius',
-        },
-      ];
     case 'polyline':
       return entity.points.map((pt, idx) => ({
         entityId: entity.id,
@@ -1403,17 +1818,19 @@ export function getEntityGripHandles(entity: CadEntity): GripHandle[] {
         point: pt,
         type: 'vertex' as const,
       }));
-    case 'dimension':
+    case 'dimension': {
+      const { mid } = getDimensionLinePoints(entity);
       return [
         { entityId: entity.id, gripIndex: 0, point: entity.p1, type: 'vertex' },
         { entityId: entity.id, gripIndex: 1, point: entity.p2, type: 'vertex' },
         {
           entityId: entity.id,
           gripIndex: 2,
-          point: entity.offsetPoint,
+          point: mid,
           type: 'midpoint',
         },
       ];
+    }
     case 'text':
       return [
         {
@@ -1423,33 +1840,52 @@ export function getEntityGripHandles(entity: CadEntity): GripHandle[] {
           type: 'center',
         },
       ];
-    case 'arc':
+    case 'arc': {
+      const [p1, p2, p3] = getArcThreePoints(entity);
       return [
         {
           entityId: entity.id,
           gripIndex: 0,
-          point: entity.center,
-          type: 'center',
+          point: p1,
+          type: 'vertex',
+          label: 'P1',
         },
         {
           entityId: entity.id,
           gripIndex: 1,
-          point: {
-            x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
-            y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
-          },
-          type: 'vertex',
+          point: p2,
+          type: 'midpoint',
+          label: 'P2',
         },
         {
           entityId: entity.id,
           gripIndex: 2,
-          point: {
-            x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
-            y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
-          },
+          point: p3,
           type: 'vertex',
+          label: 'P3',
+        },
+        {
+          entityId: entity.id,
+          gripIndex: 3,
+          point: entity.center,
+          type: 'center',
         },
       ];
+    }
+    case 'group': {
+      const b = getEntityBounds(entity);
+      const center = { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 };
+      return [
+        {
+          entityId: entity.id,
+          gripIndex: 0,
+          point: center,
+          type: 'center',
+        },
+      ];
+    }
+    default:
+      return [];
   }
 }
 
@@ -1491,18 +1927,6 @@ export function applyGripMove(
         radius: Math.max(1, dist(entity.center, newPoint)),
       };
     }
-    case 'ellipse': {
-      if (gripIndex === 0) return { ...entity, center: newPoint };
-      if (gripIndex === 1)
-        return {
-          ...entity,
-          rx: Math.max(1, Math.abs(newPoint.x - entity.center.x)),
-        };
-      return {
-        ...entity,
-        ry: Math.max(1, Math.abs(newPoint.y - entity.center.y)),
-      };
-    }
     case 'polyline': {
       const nextPts = [...entity.points];
       if (gripIndex >= 0 && gripIndex < nextPts.length) {
@@ -1518,23 +1942,43 @@ export function applyGripMove(
     case 'text':
       return { ...entity, position: newPoint };
     case 'arc': {
-      if (gripIndex === 0) return { ...entity, center: newPoint };
-      if (gripIndex === 1)
+      const [p1, p2, p3] = getArcThreePoints(entity);
+      if (gripIndex === 3) {
+        return translateEntity(
+          entity,
+          newPoint.x - entity.center.x,
+          newPoint.y - entity.center.y
+        );
+      }
+      const nextP1 = gripIndex === 0 ? newPoint : p1;
+      const nextP2 = gripIndex === 1 ? newPoint : p2;
+      const nextP3 = gripIndex === 2 ? newPoint : p3;
+      const arcData = arcFromThreePoints(nextP1, nextP2, nextP3);
+      if (arcData) {
         return {
           ...entity,
-          startAngle: Math.atan2(
-            newPoint.y - entity.center.y,
-            newPoint.x - entity.center.x
-          ),
+          center: arcData.center,
+          radius: arcData.radius,
+          startAngle: arcData.startAngle,
+          endAngle: arcData.endAngle,
+          p1: nextP1,
+          p2: nextP2,
+          p3: nextP3,
         };
-      return {
-        ...entity,
-        endAngle: Math.atan2(
-          newPoint.y - entity.center.y,
-          newPoint.x - entity.center.x
-        ),
-      };
+      }
+      return entity;
     }
+    case 'group': {
+      const b = getEntityBounds(entity);
+      const center = { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 };
+      return translateEntity(
+        entity,
+        newPoint.x - center.x,
+        newPoint.y - center.y
+      );
+    }
+    default:
+      return entity;
   }
 }
 
@@ -1567,23 +2011,9 @@ export function getEntityMetrics(entity: CadEntity): {
         area: Math.PI * entity.radius * entity.radius,
       };
     case 'arc': {
-      let sweep = entity.endAngle - entity.startAngle;
-      while (sweep < 0) sweep += Math.PI * 2;
+      const sweep = normalizeAngle(entity.endAngle - entity.startAngle);
       return {
         length: entity.radius * sweep,
-      };
-    }
-    case 'ellipse': {
-      const a = entity.rx;
-      const b = entity.ry;
-      const h = (a - b) ** 2 / ((a + b) ** 2 || 1);
-      const perim =
-        Math.PI * (a + b) * (1 + (3 * h) / (10 + Math.sqrt(4 - 3 * h)));
-      return {
-        width: a * 2,
-        height: b * 2,
-        length: perim,
-        area: Math.PI * a * b,
       };
     }
     case 'polygon': {
@@ -1598,6 +2028,7 @@ export function getEntityMetrics(entity: CadEntity): {
     case 'polyline': {
       const segs = getEntitySegments(entity);
       const len = segs.reduce((acc, [a, b]) => acc + dist(a, b), 0);
+      const b = getEntityBounds(entity);
       let area: number | undefined;
       if (entity.closed && entity.points.length >= 3) {
         let sum = 0;
@@ -1608,12 +2039,24 @@ export function getEntityMetrics(entity: CadEntity): {
         }
         area = Math.abs(sum) / 2;
       }
-      return { length: len, area };
+      return {
+        length: len,
+        area,
+        width: b.maxX - b.minX,
+        height: b.maxY - b.minY,
+      };
     }
     case 'dimension':
       return {
         length: dist(entity.p1, entity.p2),
       };
+    case 'group': {
+      const b = getEntityBounds(entity);
+      return {
+        width: b.maxX - b.minX,
+        height: b.maxY - b.minY,
+      };
+    }
     default:
       return {};
   }
@@ -1645,7 +2088,9 @@ export function exportToDXF(entities: CadEntity[], layers: CadLayer[]): string {
   const getLayerName = (id: string) =>
     (layerMap.get(id) || '0').replace(/\s+/g, '_');
 
-  for (const ent of entities) {
+  const leaves = flattenEntities(entities);
+
+  for (const ent of leaves) {
     const layer = getLayerName(ent.layerId);
     if (ent.type === 'line') {
       lines.push(
@@ -1745,6 +2190,7 @@ export function exportToDXF(entities: CadEntity[], layers: CadLayer[]): string {
       );
     } else if (ent.type === 'dimension') {
       const { dimP1, dimP2, mid, length } = getDimensionLinePoints(ent);
+      const fSize = ent.fontSize || 11;
       lines.push(
         '0',
         'LINE',
@@ -1773,7 +2219,7 @@ export function exportToDXF(entities: CadEntity[], layers: CadLayer[]): string {
         '30',
         '0.0',
         '40',
-        '8.0',
+        fSize.toFixed(2),
         '1',
         ent.textOverride || `${length.toFixed(1)}`
       );
@@ -1788,7 +2234,9 @@ export function exportToSVG(entities: CadEntity[], layers: CadLayer[]): string {
   const visibleLayers = new Map(
     layers.filter((l) => l.visible).map((l) => [l.id, l])
   );
-  const visibleEntities = entities.filter((e) => visibleLayers.has(e.layerId));
+  const visibleEntities = flattenEntities(
+    entities.filter((e) => visibleLayers.has(e.layerId))
+  );
 
   let minX = -200,
     minY = -200,
@@ -1808,7 +2256,7 @@ export function exportToSVG(entities: CadEntity[], layers: CadLayer[]): string {
 
   const elements: string[] = [];
   for (const ent of visibleEntities) {
-    const layer = visibleLayers.get(ent.layerId)!;
+    const layer = visibleLayers.get(ent.layerId) || layers[0];
     const stroke = ent.color || layer.color;
     const lw = (ent.lineWeight || layer.lineWeight || 0.25) * 4;
     const lt = ent.lineType || layer.lineType;
@@ -1840,21 +2288,18 @@ export function exportToSVG(entities: CadEntity[], layers: CadLayer[]): string {
       elements.push(
         `<circle cx="${ent.center.x}" cy="${sy(ent.center.y)}" r="${ent.radius}" fill="none" stroke="${stroke}" stroke-width="${lw}" ${dash} />`
       );
-    } else if (ent.type === 'ellipse') {
-      elements.push(
-        `<ellipse cx="${ent.center.x}" cy="${sy(ent.center.y)}" rx="${ent.rx}" ry="${ent.ry}" fill="none" stroke="${stroke}" stroke-width="${lw}" ${dash} />`
-      );
     } else if (ent.type === 'text') {
       elements.push(
         `<text x="${ent.position.x}" y="${sy(ent.position.y)}" fill="${stroke}" font-family="JetBrains Mono, monospace" font-size="${ent.fontSize}">${ent.content}</text>`
       );
     } else if (ent.type === 'dimension') {
       const { dimP1, dimP2, mid, length } = getDimensionLinePoints(ent);
+      const fSize = ent.fontSize || 11;
       elements.push(
         `<line x1="${ent.p1.x}" y1="${sy(ent.p1.y)}" x2="${dimP1.x}" y2="${sy(dimP1.y)}" stroke="${stroke}" stroke-width="1" stroke-opacity="0.6" />`,
         `<line x1="${ent.p2.x}" y1="${sy(ent.p2.y)}" x2="${dimP2.x}" y2="${sy(dimP2.y)}" stroke="${stroke}" stroke-width="1" stroke-opacity="0.6" />`,
         `<line x1="${dimP1.x}" y1="${sy(dimP1.y)}" x2="${dimP2.x}" y2="${sy(dimP2.y)}" stroke="${stroke}" stroke-width="1.2" />`,
-        `<text x="${mid.x}" y="${sy(mid.y) - 6}" fill="${stroke}" font-family="JetBrains Mono, monospace" font-size="10" text-anchor="middle">${ent.textOverride || `${length.toFixed(1)} mm`}</text>`
+        `<text x="${mid.x}" y="${sy(mid.y) - 6}" fill="${stroke}" font-family="JetBrains Mono, monospace" font-size="${fSize}" text-anchor="middle">${ent.textOverride || `${length.toFixed(1)} mm`}</text>`
       );
     }
   }
