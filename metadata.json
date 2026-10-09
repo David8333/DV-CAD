@@ -1,0 +1,6 @@
+{
+  "name": "VektorCAD — 專業 2D 工程製圖與 AutoCAD 工作站",
+  "description": "具備物件鎖點 (OSNAP)、正交與極座標追蹤、動態尺寸輸入、圖層管理、指令列與 DXF/SVG 匯出的專業網頁版 AutoCAD 工程製圖系統。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
