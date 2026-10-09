@@ -27,8 +27,10 @@ import {
   getArcThreePoints,
   getEntityBounds,
   getEntityMetrics,
+  getSelectionReferencePoint,
   midpoint,
   RAD_TO_DEG,
+  translateEntity,
 } from '../utils/geometry';
 
 interface InspectorSidebarProps {
@@ -106,6 +108,30 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
     onUpdateEntities(
       entities.map((e) =>
         selectedIds.includes(e.id) ? ({ ...e, ...patch } as CadEntity) : e
+      )
+    );
+  };
+
+  const updateSelectedDimensions = (patch: Partial<DimensionEntity>) => {
+    onUpdateEntities(
+      entities.map((e) =>
+        selectedIds.includes(e.id) && e.type === 'dimension'
+          ? { ...e, ...patch }
+          : e
+      )
+    );
+  };
+
+  const selectionRefPt = getSelectionReferencePoint(selectedEntities);
+
+  const jumpSelectionToCoord = (nextX: number, nextY: number) => {
+    if (!Number.isFinite(nextX) || !Number.isFinite(nextY)) return;
+    const dx = nextX - selectionRefPt.x;
+    const dy = nextY - selectionRefPt.y;
+    if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6) return;
+    onUpdateEntities(
+      entities.map((ent) =>
+        selectedIds.includes(ent.id) ? translateEntity(ent, dx, dy) : ent
       )
     );
   };
@@ -375,59 +401,362 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                 )}
               </div>
 
-              {/* Multi-selected Dimension Font Size Control */}
-              {selectedDimensions.length >= 1 && (
-                <div className="bg-slate-900/90 border border-amber-500/40 rounded-lg p-3 space-y-2 text-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="font-semibold text-amber-300">
-                      標註尺寸字體大小 (mm)
-                    </span>
+              {/* Move / Jump Selected Entities by X, Y Coordinates */}
+              <div className="bg-slate-900/90 border border-emerald-500/40 rounded-lg p-3 space-y-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-emerald-300">
+                    移動物件座標跳轉 (X, Y)
+                  </span>
+                  <span className="text-[10px] font-mono text-slate-400">
+                    基準點座標
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 font-mono">
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-0.5">
+                      目標 X 座標 (mm)
+                    </label>
                     <input
                       type="number"
-                      min={6}
-                      max={72}
-                      value={selectedDimensions[0].fontSize || 11}
+                      step="0.01"
+                      value={Number(selectionRefPt.x.toFixed(2))}
                       onChange={(e) => {
-                        const fSize = Math.max(
-                          6,
-                          Math.min(72, Number(e.target.value))
-                        );
-                        onUpdateEntities(
-                          entities.map((ent) =>
-                            selectedIds.includes(ent.id) &&
-                            ent.type === 'dimension'
-                              ? { ...ent, fontSize: fSize }
-                              : ent
-                          )
-                        );
+                        const val = parseFloat(e.target.value);
+                        if (!isNaN(val)) {
+                          jumpSelectionToCoord(val, selectionRefPt.y);
+                        }
                       }}
-                      className="w-16 px-2 py-1 text-right font-mono bg-slate-950 border border-amber-500/60 rounded text-amber-200"
+                      className="w-full px-2 py-1 bg-slate-950 border border-emerald-500/50 rounded text-emerald-200"
                     />
                   </div>
-                  <div className="grid grid-cols-6 gap-1">
-                    {[8, 10, 12, 14, 18, 24].map((sz) => (
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-0.5">
+                      目標 Y 座標 (mm)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={Number(selectionRefPt.y.toFixed(2))}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        if (!isNaN(val)) {
+                          jumpSelectionToCoord(selectionRefPt.x, val);
+                        }
+                      }}
+                      className="w-full px-2 py-1 bg-slate-950 border border-emerald-500/50 rounded text-emerald-200"
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center justify-between pt-0.5">
+                  <span className="text-[10px] text-slate-400">
+                    輸入 X, Y 數值即可將所選物件直接跳轉至該座標
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => jumpSelectionToCoord(0, 0)}
+                    className="px-2 py-0.5 text-[10px] font-mono bg-emerald-600/25 hover:bg-emerald-600/40 text-emerald-200 border border-emerald-500/40 rounded shrink-0"
+                  >
+                    跳至 (0,0)
+                  </button>
+                </div>
+              </div>
+
+              {/* Multi-selected Dimension Precision, Tolerance (+/-), ISO Diameter & Font Size Control */}
+              {selectedDimensions.length >= 1 && (
+                <div className="bg-slate-900/90 border border-amber-500/40 rounded-lg p-3 space-y-3 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-amber-300">
+                      標註尺寸設定與正負公差
+                    </span>
+                    <span className="text-[10px] font-mono text-amber-200/80">
+                      已選 {selectedDimensions.length} 組標註
+                    </span>
+                  </div>
+
+                  {/* 1. Dimension Mode: Linear vs ISO International Circle Diameter */}
+                  <div className="space-y-1">
+                    <span className="block text-[11px] text-slate-300">
+                      標註規範模式：
+                    </span>
+                    <div className="grid grid-cols-2 gap-1 p-0.5 bg-slate-950 rounded border border-slate-800">
                       <button
-                        key={sz}
                         type="button"
-                        onClick={() => {
-                          onUpdateEntities(
-                            entities.map((ent) =>
-                              selectedIds.includes(ent.id) &&
-                              ent.type === 'dimension'
-                                ? { ...ent, fontSize: sz }
-                                : ent
-                            )
-                          );
-                        }}
-                        className={`py-1 rounded font-mono text-[11px] border ${
-                          (selectedDimensions[0].fontSize || 11) === sz
-                            ? 'bg-amber-500 text-slate-950 border-amber-400 font-bold'
-                            : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-600'
+                        onClick={() =>
+                          updateSelectedDimensions({
+                            dimMode: 'linear',
+                            textOverride: undefined,
+                          })
+                        }
+                        className={`py-1 px-2 rounded text-[11px] font-medium transition-colors ${
+                          (selectedDimensions[0].dimMode || 'linear') ===
+                          'linear'
+                            ? 'bg-sky-600 text-white'
+                            : 'text-slate-400 hover:text-slate-200'
                         }`}
                       >
-                        {sz}
+                        線性尺寸標註
                       </button>
-                    ))}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateSelectedDimensions({
+                            dimMode: 'diameter',
+                            textOverride: undefined,
+                          })
+                        }
+                        className={`py-1 px-2 rounded text-[11px] font-medium transition-colors ${
+                          selectedDimensions[0].dimMode === 'diameter'
+                            ? 'bg-amber-500 text-slate-950 font-semibold'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        國際規範圓直徑 (Ø)
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 2. Decimal Precision: 0, 1, 2 decimal places */}
+                  <div className="space-y-1">
+                    <span className="block text-[11px] text-slate-300">
+                      標註數值小數位數：
+                    </span>
+                    <div className="grid grid-cols-3 gap-1">
+                      {(
+                        [
+                          { val: 0, label: '第0位 (0)' },
+                          { val: 1, label: '後第1位 (0.0)' },
+                          { val: 2, label: '後第2位 (0.00)' },
+                        ] as const
+                      ).map((opt) => {
+                        const curPrec = selectedDimensions[0].precision ?? 1;
+                        return (
+                          <button
+                            key={opt.val}
+                            type="button"
+                            onClick={() =>
+                              updateSelectedDimensions({
+                                precision: opt.val,
+                                textOverride: undefined,
+                              })
+                            }
+                            className={`py-1 px-1.5 rounded font-mono text-[10px] border transition-colors ${
+                              curPrec === opt.val
+                                ? 'bg-sky-600 text-white border-sky-400 font-bold'
+                                : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-600'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* 3. Plus / Minus Tolerance Configuration */}
+                  <div className="space-y-2 pt-1 border-t border-slate-800">
+                    <span className="block text-[11px] text-amber-300 font-medium">
+                      正負公差標註設定 (正值最小 0.01 / 負值最大 -0.01)：
+                    </span>
+                    <div className="grid grid-cols-3 gap-1">
+                      {(
+                        [
+                          { mode: 'none', label: '無公差' },
+                          { mode: 'symmetric', label: '對稱 ±' },
+                          { mode: 'deviation', label: '正負 + / -' },
+                        ] as const
+                      ).map((item) => {
+                        const curMode =
+                          selectedDimensions[0].toleranceMode || 'none';
+                        return (
+                          <button
+                            key={item.mode}
+                            type="button"
+                            onClick={() =>
+                              updateSelectedDimensions({
+                                toleranceMode: item.mode,
+                                toleranceUpper:
+                                  selectedDimensions[0].toleranceUpper ?? 0.05,
+                                toleranceLower:
+                                  selectedDimensions[0].toleranceLower ?? -0.02,
+                                textOverride: undefined,
+                              })
+                            }
+                            className={`py-1 px-1.5 rounded text-[11px] font-medium border transition-colors ${
+                              curMode === item.mode
+                                ? 'bg-amber-500 text-slate-950 border-amber-400 font-bold'
+                                : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-600'
+                            }`}
+                          >
+                            {item.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {selectedDimensions[0].toleranceMode === 'symmetric' && (
+                      <div className="space-y-1.5 pt-1 font-mono">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] text-slate-300">
+                            對稱公差 ± (最小 0.01):
+                          </span>
+                          <input
+                            type="number"
+                            min={0.01}
+                            step="0.01"
+                            value={
+                              selectedDimensions[0].toleranceUpper ?? 0.05
+                            }
+                            onChange={(e) => {
+                              const raw = parseFloat(e.target.value);
+                              if (!isNaN(raw)) {
+                                const clamped = Math.max(0.01, Math.abs(raw));
+                                updateSelectedDimensions({
+                                  toleranceUpper: clamped,
+                                  toleranceLower: -clamped,
+                                  textOverride: undefined,
+                                });
+                              }
+                            }}
+                            className="w-20 px-2 py-1 text-right bg-slate-950 border border-amber-500/60 rounded text-amber-200"
+                          />
+                        </div>
+                        <div className="grid grid-cols-4 gap-1">
+                          {[0.01, 0.02, 0.05, 0.1].map((v) => (
+                            <button
+                              key={v}
+                              type="button"
+                              onClick={() =>
+                                updateSelectedDimensions({
+                                  toleranceUpper: v,
+                                  toleranceLower: -v,
+                                  textOverride: undefined,
+                                })
+                              }
+                              className="py-0.5 rounded bg-slate-950 hover:bg-slate-800 text-amber-300 border border-slate-800 text-[10px]"
+                            >
+                              ±{v.toFixed(2)}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedDimensions[0].toleranceMode === 'deviation' && (
+                      <div className="space-y-2 pt-1 font-mono">
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-[10px] text-emerald-300 mb-0.5">
+                              正公差 + (最小 0.01)
+                            </label>
+                            <input
+                              type="number"
+                              min={0.01}
+                              step="0.01"
+                              value={
+                                selectedDimensions[0].toleranceUpper ?? 0.05
+                              }
+                              onChange={(e) => {
+                                const raw = parseFloat(e.target.value);
+                                if (!isNaN(raw)) {
+                                  updateSelectedDimensions({
+                                    toleranceUpper: Math.max(0.01, raw),
+                                    textOverride: undefined,
+                                  });
+                                }
+                              }}
+                              className="w-full px-2 py-1 bg-slate-950 border border-emerald-500/60 rounded text-emerald-200"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-rose-300 mb-0.5">
+                              負公差 - (最大 -0.01)
+                            </label>
+                            <input
+                              type="number"
+                              max={-0.01}
+                              step="0.01"
+                              value={
+                                selectedDimensions[0].toleranceLower ?? -0.02
+                              }
+                              onChange={(e) => {
+                                const raw = parseFloat(e.target.value);
+                                if (!isNaN(raw)) {
+                                  updateSelectedDimensions({
+                                    toleranceLower: Math.min(-0.01, raw),
+                                    textOverride: undefined,
+                                  });
+                                }
+                              }}
+                              className="w-full px-2 py-1 bg-slate-950 border border-rose-500/60 rounded text-rose-200"
+                            />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-1">
+                          {[
+                            { up: 0.01, low: -0.01 },
+                            { up: 0.02, low: -0.01 },
+                            { up: 0.05, low: -0.02 },
+                            { up: 0.1, low: -0.05 },
+                          ].map((p, i) => (
+                            <button
+                              key={i}
+                              type="button"
+                              onClick={() =>
+                                updateSelectedDimensions({
+                                  toleranceUpper: p.up,
+                                  toleranceLower: p.low,
+                                  textOverride: undefined,
+                                })
+                              }
+                              className="py-0.5 px-1 rounded bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-800 text-[10px]"
+                            >
+                              +{p.up.toFixed(2)} / {p.low.toFixed(2)}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 4. Font Size */}
+                  <div className="pt-1 border-t border-slate-800 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] text-slate-300">
+                        標註字體大小 (mm)
+                      </span>
+                      <input
+                        type="number"
+                        min={6}
+                        max={72}
+                        value={selectedDimensions[0].fontSize || 11}
+                        onChange={(e) => {
+                          const fSize = Math.max(
+                            6,
+                            Math.min(72, Number(e.target.value))
+                          );
+                          updateSelectedDimensions({ fontSize: fSize });
+                        }}
+                        className="w-16 px-2 py-1 text-right font-mono bg-slate-950 border border-amber-500/60 rounded text-amber-200"
+                      />
+                    </div>
+                    <div className="grid grid-cols-6 gap-1">
+                      {[8, 10, 12, 14, 18, 24].map((sz) => (
+                        <button
+                          key={sz}
+                          type="button"
+                          onClick={() =>
+                            updateSelectedDimensions({ fontSize: sz })
+                          }
+                          className={`py-1 rounded font-mono text-[11px] border ${
+                            (selectedDimensions[0].fontSize || 11) === sz
+                              ? 'bg-amber-500 text-slate-950 border-amber-400 font-bold'
+                              : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-600'
+                          }`}
+                        >
+                          {sz}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
               )}
@@ -541,13 +870,16 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                           </label>
                           <input
                             type="number"
-                            min={0.5}
-                            step="1"
+                            min={0.01}
+                            step="0.01"
                             value={Number(
                               dist(singleEntity.p1, singleEntity.p2).toFixed(2)
                             )}
                             onChange={(e) => {
-                              const newLen = Math.max(0.5, Number(e.target.value));
+                              const newLen = Math.max(
+                                0.01,
+                                Number(e.target.value)
+                              );
                               const angRad =
                                 angleDegrees(singleEntity.p1, singleEntity.p2) *
                                 DEG_TO_RAD;
@@ -571,7 +903,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                           </label>
                           <input
                             type="number"
-                            step="1"
+                            step="0.01"
                             value={Number(
                               angleDegrees(
                                 singleEntity.p1,
@@ -606,6 +938,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                           </label>
                           <input
                             type="number"
+                            step="0.01"
                             value={Number(singleEntity.p1.x.toFixed(2))}
                             onChange={(e) =>
                               updateSingleEntity({
@@ -624,6 +957,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                           </label>
                           <input
                             type="number"
+                            step="0.01"
                             value={Number(singleEntity.p1.y.toFixed(2))}
                             onChange={(e) =>
                               updateSingleEntity({
@@ -642,6 +976,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                           </label>
                           <input
                             type="number"
+                            step="0.01"
                             value={Number(singleEntity.p2.x.toFixed(2))}
                             onChange={(e) =>
                               updateSingleEntity({
@@ -660,6 +995,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                           </label>
                           <input
                             type="number"
+                            step="0.01"
                             value={Number(singleEntity.p2.y.toFixed(2))}
                             onChange={(e) =>
                               updateSingleEntity({
@@ -684,11 +1020,12 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                         </label>
                         <input
                           type="number"
-                          min={0.5}
+                          min={0.01}
+                          step="0.01"
                           value={Number(singleEntity.radius.toFixed(2))}
                           onChange={(e) =>
                             updateSingleEntity({
-                              radius: Math.max(0.5, Number(e.target.value)),
+                              radius: Math.max(0.01, Number(e.target.value)),
                             })
                           }
                           className="w-full px-2 py-1 bg-slate-950 border border-sky-500/60 rounded text-sky-200"
@@ -700,11 +1037,15 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                         </label>
                         <input
                           type="number"
-                          min={1}
+                          min={0.02}
+                          step="0.01"
                           value={Number((singleEntity.radius * 2).toFixed(2))}
                           onChange={(e) =>
                             updateSingleEntity({
-                              radius: Math.max(0.5, Number(e.target.value) / 2),
+                              radius: Math.max(
+                                0.01,
+                                Number(e.target.value) / 2
+                              ),
                             })
                           }
                           className="w-full px-2 py-1 bg-slate-950 border border-amber-500/60 rounded text-amber-200"
@@ -716,6 +1057,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                         </label>
                         <input
                           type="number"
+                          step="0.01"
                           value={Number(singleEntity.center.x.toFixed(2))}
                           onChange={(e) =>
                             updateSingleEntity({
@@ -734,6 +1076,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                         </label>
                         <input
                           type="number"
+                          step="0.01"
                           value={Number(singleEntity.center.y.toFixed(2))}
                           onChange={(e) =>
                             updateSingleEntity({
@@ -758,10 +1101,14 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                           </label>
                           <input
                             type="number"
-                            min={1}
+                            min={0.01}
+                            step="0.01"
                             value={Number(singleEntity.radius.toFixed(2))}
                             onChange={(e) => {
-                              const nextR = Math.max(1, Number(e.target.value));
+                              const nextR = Math.max(
+                                0.01,
+                                Number(e.target.value)
+                              );
                               const [p1, p2, p3] = getArcThreePoints({
                                 ...singleEntity,
                                 radius: nextR,
@@ -782,6 +1129,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                           </label>
                           <input
                             type="number"
+                            step="0.1"
                             value={Number(
                               (singleEntity.startAngle * RAD_TO_DEG).toFixed(1)
                             )}
@@ -808,6 +1156,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                           </label>
                           <input
                             type="number"
+                            step="0.1"
                             value={Number(
                               (singleEntity.endAngle * RAD_TO_DEG).toFixed(1)
                             )}
@@ -837,13 +1186,13 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                               三點圓弧控制點座標（可拖曳畫布上 P1/P2/P3 調整）：
                             </div>
                             <div className="text-emerald-300">
-                              P1 起點: ({p1.x.toFixed(1)}, {p1.y.toFixed(1)})
+                              P1 起點: ({p1.x.toFixed(2)}, {p1.y.toFixed(2)})
                             </div>
                             <div className="text-amber-300">
-                              P2 第二點: ({p2.x.toFixed(1)}, {p2.y.toFixed(1)})
+                              P2 第二點: ({p2.x.toFixed(2)}, {p2.y.toFixed(2)})
                             </div>
                             <div className="text-rose-300">
-                              P3 終點: ({p3.x.toFixed(1)}, {p3.y.toFixed(1)})
+                              P3 終點: ({p3.x.toFixed(2)}, {p3.y.toFixed(2)})
                             </div>
                           </div>
                         );
@@ -860,14 +1209,15 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                           </label>
                           <input
                             type="number"
-                            min={1}
+                            min={0.01}
+                            step="0.01"
                             value={Number(
                               Math.abs(
                                 singleEntity.p2.x - singleEntity.p1.x
                               ).toFixed(2)
                             )}
                             onChange={(e) => {
-                              const w = Math.max(1, Number(e.target.value));
+                              const w = Math.max(0.01, Number(e.target.value));
                               const c = midpoint(
                                 singleEntity.p1,
                                 singleEntity.p2
@@ -886,14 +1236,15 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                           </label>
                           <input
                             type="number"
-                            min={1}
+                            min={0.01}
+                            step="0.01"
                             value={Number(
                               Math.abs(
                                 singleEntity.p2.y - singleEntity.p1.y
                               ).toFixed(2)
                             )}
                             onChange={(e) => {
-                              const h = Math.max(1, Number(e.target.value));
+                              const h = Math.max(0.01, Number(e.target.value));
                               const c = midpoint(
                                 singleEntity.p1,
                                 singleEntity.p2
@@ -938,11 +1289,12 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                         </label>
                         <input
                           type="number"
-                          min={1}
+                          min={0.01}
+                          step="0.01"
                           value={Number(singleEntity.radius.toFixed(2))}
                           onChange={(e) =>
                             updateSingleEntity({
-                              radius: Math.max(1, Number(e.target.value)),
+                              radius: Math.max(0.01, Number(e.target.value)),
                             })
                           }
                           className="w-full px-2 py-1 bg-slate-950 border border-sky-500/60 rounded text-sky-100"

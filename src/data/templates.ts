@@ -269,15 +269,24 @@ function createMechanicalFlangeEntities(): CadEntity[] {
       p1: { x: sx, y: cy - 101 },
       p2: { x: sx + 32, y: cy - 101 },
     },
-    // Dimensions
+    // Dimensions (ISO 129-1 Diameter & Linear with Tolerances)
     {
       id: 'dim-outer-dia',
       type: 'dimension',
       layerId: 'DIM',
-      p1: { x: cx - 120, y: cy + 120 },
-      p2: { x: cx + 120, y: cy + 120 },
-      offsetPoint: { x: cx, y: cy + 158 },
-      textOverride: 'Ø240.0 ±0.05',
+      dimMode: 'diameter',
+      p1: {
+        x: cx - 120 * Math.cos(Math.PI / 6),
+        y: cy - 120 * Math.sin(Math.PI / 6),
+      },
+      p2: {
+        x: cx + 120 * Math.cos(Math.PI / 6),
+        y: cy + 120 * Math.sin(Math.PI / 6),
+      },
+      offsetPoint: { x: cx - 155, y: cy + 145 },
+      precision: 2,
+      toleranceMode: 'symmetric',
+      toleranceUpper: 0.05,
     },
     {
       id: 'dim-pitch-dia',
@@ -295,7 +304,10 @@ function createMechanicalFlangeEntities(): CadEntity[] {
       p1: { x: sx, y: cy + 120 },
       p2: { x: sx + 80, y: cy + 120 },
       offsetPoint: { x: sx + 40, y: cy + 158 },
-      textOverride: '80.0 mm',
+      precision: 2,
+      toleranceMode: 'deviation',
+      toleranceUpper: 0.05,
+      toleranceLower: -0.02,
     },
     {
       id: 'dim-sec-height',
@@ -304,7 +316,7 @@ function createMechanicalFlangeEntities(): CadEntity[] {
       p1: { x: sx + 80, y: cy - 120 },
       p2: { x: sx + 80, y: cy + 120 },
       offsetPoint: { x: sx + 128, y: cy },
-      textOverride: '240.0 mm',
+      precision: 1,
     },
     // Labels
     {

@@ -53,6 +53,7 @@ import {
   explodeEntity,
   exportToDXF,
   exportToSVG,
+  getSelectionReferencePoint,
   joinSelectedEntities,
   midpoint,
   rotateEntity,
@@ -698,14 +699,28 @@ export default function App() {
         );
       } else if (ent.type === 'circle') {
         const { center, radius } = ent;
+        const diag = Math.PI / 4;
         newDims.push({
           id: `dim_auto_c_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           type: 'dimension',
           layerId: dimLayer,
-          p1: { x: center.x - radius, y: center.y },
-          p2: { x: center.x + radius, y: center.y },
-          offsetPoint: { x: center.x, y: center.y + radius + 28 },
-          textOverride: `Ø${(radius * 2).toFixed(1)} mm`,
+          dimMode: 'diameter',
+          precision: 2,
+          toleranceMode: 'none',
+          toleranceUpper: 0.05,
+          toleranceLower: -0.05,
+          p1: {
+            x: center.x - radius * Math.cos(diag),
+            y: center.y - radius * Math.sin(diag),
+          },
+          p2: {
+            x: center.x + radius * Math.cos(diag),
+            y: center.y + radius * Math.sin(diag),
+          },
+          offsetPoint: {
+            x: center.x + (radius + 26) * Math.cos(diag),
+            y: center.y + (radius + 26) * Math.sin(diag),
+          },
           fontSize: defaultDimFontSize,
         });
       }
@@ -1263,7 +1278,7 @@ export default function App() {
 
     if (activeTool === 'offset' && /^-?\d+(?:\.\d+)?$/.test(trimmed)) {
       const val = parseFloat(trimmed);
-      if (!isNaN(val) && val > 0) {
+      if (!isNaN(val) && val >= 0.01) {
         setOffsetDistance(val);
         logCommand(`OFFSET 已設定偏移距離 = ${val.toFixed(2)} mm`, 'success');
         return;
@@ -1294,7 +1309,13 @@ export default function App() {
         const dx = parseFloat(parts[0]);
         const dy = parseFloat(parts[1]);
         if (!isNaN(dx) && !isNaN(dy)) {
-          targetPt = { x: anchor.x + dx, y: anchor.y + dy };
+          if (activeTool === 'move' && selectedIds.length > 0 && drawingPoints.length === 0) {
+            const sel = entities.filter((e) => selectedIds.includes(e.id));
+            const refPt = getSelectionReferencePoint(sel);
+            targetPt = { x: refPt.x + dx, y: refPt.y + dy };
+          } else {
+            targetPt = { x: anchor.x + dx, y: anchor.y + dy };
+          }
         }
       }
     }
@@ -1312,7 +1333,7 @@ export default function App() {
 
     if (!targetPt && /^-?\d+(?:\.\d+)?$/.test(trimmed)) {
       const val = parseFloat(trimmed);
-      if (!isNaN(val) && val > 0 && drawingPoints.length > 0) {
+      if (!isNaN(val) && Math.abs(val) >= 0.01 && drawingPoints.length > 0) {
         const deg = angleDegrees(anchor, cursorWorld);
         const rad = deg * DEG_TO_RAD;
         targetPt = {
@@ -1323,11 +1344,32 @@ export default function App() {
     }
 
     if (targetPt) {
-      if (activeTool === 'line') {
+      if (
+        (activeTool === 'move' || activeTool === 'select') &&
+        selectedIds.length > 0
+      ) {
+        const sel = entities.filter((e) => selectedIds.includes(e.id));
+        const basePt =
+          drawingPoints.length > 0
+            ? drawingPoints[0]
+            : getSelectionReferencePoint(sel);
+        const dx = targetPt.x - basePt.x;
+        const dy = targetPt.y - basePt.y;
+        const updated = entities.map((e) =>
+          selectedIds.includes(e.id) ? translateEntity(e, dx, dy) : e
+        );
+        pushEntities(updated);
+        setDrawingPoints([]);
+        setActiveTool('select');
+        logCommand(
+          `MOVE 已將 ${selectedIds.length} 個選取物件跳轉移動至座標 (${targetPt.x.toFixed(2)}, ${targetPt.y.toFixed(2)}) [ΔX=${dx.toFixed(2)}, ΔY=${dy.toFixed(2)}]`,
+          'success'
+        );
+      } else if (activeTool === 'line') {
         if (drawingPoints.length === 0) {
           setDrawingPoints([targetPt]);
           logCommand(
-            `已指定直線起點: (${targetPt.x.toFixed(1)}, ${targetPt.y.toFixed(1)})`,
+            `已指定直線起點: (${targetPt.x.toFixed(2)}, ${targetPt.y.toFixed(2)})`,
             'info'
           );
         } else {
@@ -1341,7 +1383,7 @@ export default function App() {
           });
           setDrawingPoints([targetPt]);
           logCommand(
-            `已依座標建立直線至 (${targetPt.x.toFixed(1)}, ${targetPt.y.toFixed(1)})，長度 = ${dist(prev, targetPt).toFixed(2)} mm`,
+            `已依座標建立直線至 (${targetPt.x.toFixed(2)}, ${targetPt.y.toFixed(2)})，長度 = ${dist(prev, targetPt).toFixed(2)} mm`,
             'success'
           );
         }
@@ -1359,7 +1401,7 @@ export default function App() {
       } else {
         setDrawingPoints((prev) => [...prev, targetPt!]);
         logCommand(
-          `已輸入座標點: (${targetPt.x.toFixed(1)}, ${targetPt.y.toFixed(1)})`,
+          `已輸入座標點: (${targetPt.x.toFixed(2)}, ${targetPt.y.toFixed(2)})`,
           'info'
         );
       }
@@ -1588,14 +1630,6 @@ export default function App() {
         <nav className="flex items-center gap-3 sm:gap-6 text-xs font-medium text-slate-300 overflow-x-auto">
           <button
             type="button"
-            onClick={() => directFileInputRef.current?.click()}
-            className="flex items-center gap-1 text-emerald-300 hover:text-emerald-200 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 font-semibold"
-          >
-            <Upload className="w-3.5 h-3.5" />
-            <span>匯入 DXF / DWG</span>
-          </button>
-          <button
-            type="button"
             onClick={() => setActiveModal('templates')}
             className="hover:text-sky-300 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
           >
@@ -1635,7 +1669,7 @@ export default function App() {
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-sky-600 rounded-lg hover:bg-sky-500 transition-colors whitespace-nowrap shrink-0"
           >
             <FileCode2 className="w-3.5 h-3.5" />
-            <span>匯入 / 匯出 (DXF·DWG)</span>
+            <span>匯入 / 輸出 (DXF·DWG)</span>
           </button>
           <button
             type="button"
@@ -1663,16 +1697,6 @@ export default function App() {
           >
             <PanelLeft className="w-3.5 h-3.5" />
             <span>工具箱</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => directFileInputRef.current?.click()}
-            title="從電腦選取 .DXF 或 .DWG 工程圖檔匯入 (Ctrl+O)"
-            className="flex items-center gap-1 px-2.5 py-1 rounded-md font-medium border bg-emerald-950/60 text-emerald-300 border-emerald-500/40 hover:bg-emerald-900/60 transition-colors whitespace-nowrap shrink-0"
-          >
-            <Upload className="w-3.5 h-3.5" />
-            <span>匯入 DXF/DWG</span>
           </button>
 
           <div className="h-4 w-px bg-slate-800 mx-0.5" />
@@ -1841,16 +1865,16 @@ export default function App() {
           </button>
           <button
             type="button"
-            onClick={() => setZoom((z) => Math.min(25, z * 1.25))}
-            title="放大視角"
+            onClick={() => setZoom((z) => Math.min(350, z * 1.25))}
+            title="放大視角 (最高支援 35000% 放大)"
             className="p-1.5 rounded bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800 shrink-0"
           >
             <ZoomIn className="w-3.5 h-3.5" />
           </button>
           <button
             type="button"
-            onClick={() => setZoom((z) => Math.max(0.15, z / 1.25))}
-            title="縮小視角"
+            onClick={() => setZoom((z) => Math.max(0.015, z / 1.25))}
+            title="縮小視角 (繪圖工作區支援 10 倍廣角)"
             className="p-1.5 rounded bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800 shrink-0"
           >
             <ZoomOut className="w-3.5 h-3.5" />
@@ -1945,12 +1969,12 @@ export default function App() {
               <span className="text-amber-300 font-medium">偏移距離(mm):</span>
               <input
                 type="number"
-                min={0.5}
+                min={0.01}
                 max={5000}
-                step="1"
+                step="0.01"
                 value={offsetDistance}
                 onChange={(e) =>
-                  setOffsetDistance(Math.max(0.5, Number(e.target.value)))
+                  setOffsetDistance(Math.max(0.01, Number(e.target.value)))
                 }
                 className="w-16 px-2 py-0.5 font-mono bg-slate-900 border border-amber-500/60 rounded text-amber-200 focus:outline-none focus:border-amber-400"
               />
@@ -2311,19 +2335,6 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-3 font-mono">
                   <div>
                     <label className="block text-slate-400 mb-1">
-                      列數 (Rows)
-                    </label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={20}
-                      value={arrayRows}
-                      onChange={(e) => setArrayRows(Number(e.target.value))}
-                      className="w-full px-3 py-1.5 bg-slate-950 border border-slate-700 rounded text-slate-100"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-slate-400 mb-1">
                       欄數 (Columns)
                     </label>
                     <input
@@ -2337,10 +2348,24 @@ export default function App() {
                   </div>
                   <div>
                     <label className="block text-slate-400 mb-1">
+                      列數 (Rows)
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={20}
+                      value={arrayRows}
+                      onChange={(e) => setArrayRows(Number(e.target.value))}
+                      className="w-full px-3 py-1.5 bg-slate-950 border border-slate-700 rounded text-slate-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">
                       水平間距 ΔX (mm)
                     </label>
                     <input
                       type="number"
+                      step="0.01"
                       value={arraySpacingX}
                       onChange={(e) => setArraySpacingX(Number(e.target.value))}
                       className="w-full px-3 py-1.5 bg-slate-950 border border-slate-700 rounded text-slate-100"
@@ -2352,6 +2377,7 @@ export default function App() {
                     </label>
                     <input
                       type="number"
+                      step="0.01"
                       value={arraySpacingY}
                       onChange={(e) => setArraySpacingY(Number(e.target.value))}
                       className="w-full px-3 py-1.5 bg-slate-950 border border-slate-700 rounded text-slate-100"

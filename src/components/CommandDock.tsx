@@ -33,15 +33,16 @@ const TOOL_PROMPTS: Record<ToolType, string> = {
   circle: 'CIRCLE 指定圓心與半徑 R，或輸入半徑數值按空白鍵/Enter',
   arc: 'ARC [三點圓弧] 依序點選 [1.起點 P1] → [2.弧上第二點 P2] → [3.終點 P3]',
   polygon: 'POLYGON 指定正多邊形中心點與外接圓半徑方向',
-  dimension: 'DIMLINEAR 依序點選兩端測量點，移動時可自動吸附對齊既有標註線',
+  dimension:
+    'DIM 直接點擊圓周建立 ISO 國際規範 Ø 直徑標註，或點選兩點建立線性標註（可調小數位數與正負公差）',
   text: 'TEXT 點選圖面要放置工程文字註解的座標位置',
   measure: 'DIST 點選兩點以量測距離、ΔX、ΔY 與夾角',
   erase: 'ERASE 刪除圖元模式 (E) — 點選畫布上的任何圖元立即刪除，或按 ESC 返回',
-  move: 'MOVE 指定移動基準點，再點選目標位移點',
-  copy: 'COPY 指定複製基準點，可連續點選多個目標點放置副本',
+  move: 'MOVE 點選基準點與目標點，或直接輸入 X,Y 座標（例如 100,50）按空白鍵/Enter 跳轉移動',
+  copy: 'COPY 指定複製基準點，可連續點選多個目標點或輸入 X,Y 座標放置副本',
   rotate: 'ROTATE 指定旋轉中心基準點，再拖曳或輸入旋轉角度',
   mirror: 'MIRROR 依序點選兩點定義對稱鏡射軸線',
-  offset: 'OFFSET 支援同時偏移選取的所有圖形！輸入距離按空白鍵/Enter，點選要偏移的一側',
+  offset: 'OFFSET 支援同時偏移選取的所有圖形（最小 0.01）！輸入距離按空白鍵/Enter，點選要偏移的一側',
   trim: 'TRIM 剪切模式 (TR) — 支援剪切直線、矩形、圓形與三點圓弧！移至圖元預覽紅虛線後點擊切除',
   extend: 'EXTEND 延伸模式 (EX) — 依序點選兩個線段可互相延伸接合至交點（或點選同一線段延伸至邊界）',
   join: 'JOIN 組裝圖元 (J) — 保留所有選取圖元原始位置並合併成單一物件，按空白鍵或 Enter 完成',
@@ -152,15 +153,15 @@ export const CommandDock: React.FC<CommandDockProps> = ({
         <div className="hidden md:flex items-center gap-2.5 px-2.5 py-1 bg-slate-900/90 border border-slate-800 rounded-md font-mono text-[11px] tabular-nums shrink-0">
           <div className="flex items-center gap-1">
             <span className="text-rose-400 font-semibold">X:</span>
-            <span className="w-14 text-right text-slate-200">
-              {cursorWorld.x.toFixed(1)}
+            <span className="w-16 text-right text-slate-200">
+              {cursorWorld.x.toFixed(2)}
             </span>
           </div>
           <span className="text-slate-700">|</span>
           <div className="flex items-center gap-1">
             <span className="text-emerald-400 font-semibold">Y:</span>
-            <span className="w-14 text-right text-slate-200">
-              {cursorWorld.y.toFixed(1)}
+            <span className="w-16 text-right text-slate-200">
+              {cursorWorld.y.toFixed(2)}
             </span>
           </div>
           <span className="text-slate-700">|</span>

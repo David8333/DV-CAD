@@ -32,12 +32,14 @@ import {
   dist,
   findBestSnapPoint,
   findConnectedEntityIds,
+  formatDimensionLabel,
   getArcThreePoints,
   getDimensionLinePoints,
   getEntityBounds,
   getEntityGripHandles,
   getEntitySegments,
   getPolygonVertices,
+  getSelectionReferencePoint,
   isEntityInSelectionBox,
   isPointNearEntity,
   midpoint,
@@ -161,10 +163,23 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   // Selection box state
   const [selectionBoxStart, setSelectionBoxStart] = useState<Point | null>(null);
 
-  // Grip editing state
+  // Grip editing & entity dragging state (buffered in local preview to prevent history/state thrashing crash)
   const [activeGrip, setActiveGrip] = useState<GripHandle | null>(null);
+  const [activeEntityDrag, setActiveEntityDrag] = useState<{
+    startWorld: Point;
+    currentWorld: Point;
+    initialEntities: CadEntity[];
+  } | null>(null);
+  const [dragPreviewEntities, setDragPreviewEntities] = useState<
+    CadEntity[] | null
+  >(null);
+  const dragPreviewRef = useRef<CadEntity[] | null>(null);
 
-  // Dynamic numeric input while drawing or offsetting
+  // Move X,Y coordinate jump input state in banner
+  const [moveTargetInputX, setMoveTargetInputX] = useState<string>('0');
+  const [moveTargetInputY, setMoveTargetInputY] = useState<string>('0');
+
+  // Dynamic numeric input while drawing, moving, or offsetting
   const [dynValue, setDynValue] = useState<string>('');
   const [dynAngleValue, setDynAngleValue] = useState<string>('');
   const [dynField, setDynField] = useState<'primary' | 'secondary'>('primary');
@@ -330,6 +345,16 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     zoom,
   ]);
 
+  // Sync move target X,Y inputs with current selection reference point
+  useEffect(() => {
+    const sel = entities.filter((e) => selectedIds.includes(e.id));
+    if (sel.length > 0) {
+      const refPt = getSelectionReferencePoint(sel);
+      setMoveTargetInputX(Number(refPt.x.toFixed(2)).toString());
+      setMoveTargetInputY(Number(refPt.y.toFixed(2)).toString());
+    }
+  }, [selectedIds, entities]);
+
   // Reset transient states when activeTool changes
   useEffect(() => {
     setDynValue('');
@@ -337,12 +362,53 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     setDynField('primary');
     setSelectionBoxStart(null);
     setActiveGrip(null);
+    setActiveEntityDrag(null);
+    setDragPreviewEntities(null);
+    dragPreviewRef.current = null;
     setDimAlignGuide(null);
     setExtendFirstPick(null);
     if (activeTool !== 'measure') {
       setMeasureResult(null);
     }
   }, [activeTool]);
+
+  // Execute X,Y coordinate jump for selected entities in move tool
+  const executeMoveToCoordinates = useCallback(
+    (targetX: number, targetY: number) => {
+      if (selectedIds.length === 0) {
+        onLogCommand('MOVE 請先選取要移動的物件。', 'error');
+        return;
+      }
+      const sel = entities.filter((e) => selectedIds.includes(e.id));
+      const basePt =
+        drawingPoints.length > 0
+          ? drawingPoints[0]
+          : getSelectionReferencePoint(sel);
+      const dx = targetX - basePt.x;
+      const dy = targetY - basePt.y;
+      const updated = entities.map((e) =>
+        selectedIds.includes(e.id) ? translateEntity(e, dx, dy) : e
+      );
+      onUpdateEntities(updated);
+      setDrawingPoints([]);
+      setDynValue('');
+      setDynAngleValue('');
+      onToolComplete();
+      onLogCommand(
+        `MOVE 已跳轉移動 ${selectedIds.length} 個物件至座標 (${targetX.toFixed(2)}, ${targetY.toFixed(2)}) [ΔX=${dx.toFixed(2)}, ΔY=${dy.toFixed(2)}]`,
+        'success'
+      );
+    },
+    [
+      drawingPoints,
+      entities,
+      onLogCommand,
+      onToolComplete,
+      onUpdateEntities,
+      selectedIds,
+      setDrawingPoints,
+    ]
+  );
 
   // Commit point logic (shared by mouse click, touch tap, and Enter/Space key with Dynamic Input)
   const commitPoint = useCallback(
@@ -351,20 +417,20 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         if (drawingPoints.length === 0) {
           setDrawingPoints([pt]);
           onLogCommand(
-            `ZOOM WINDOW 指定局部放大第一角點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請點選對角點`,
+            `ZOOM WINDOW 指定局部放大第一角點: (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)}) — 請點選對角點`,
             'info'
           );
         } else {
           const p1 = drawingPoints[0];
           const rw = Math.abs(pt.x - p1.x);
           const rh = Math.abs(pt.y - p1.y);
-          if (rw > 1 && rh > 1) {
+          if (rw > 0.01 && rh > 0.01) {
             const cx = (p1.x + pt.x) / 2;
             const cy = (p1.y + pt.y) / 2;
             const nextZoom = Math.min(
-              35,
+              350,
               Math.max(
-                0.2,
+                0.015,
                 Math.min(
                   (canvasSize.width * 0.85) / rw,
                   (canvasSize.height * 0.85) / rh
@@ -375,7 +441,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             setDrawingPoints([]);
             onToolComplete();
             onLogCommand(
-              `ZOOM WINDOW 已局部放大至選取區域 (${rw.toFixed(1)} × ${rh.toFixed(1)} mm)`,
+              `ZOOM WINDOW 已局部放大至選取區域 (${rw.toFixed(2)} × ${rh.toFixed(2)} mm)`,
               'success'
             );
           }
@@ -456,8 +522,8 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           } else {
             const p0 = drawingPoints[0];
             if (
-              Math.abs(pt.x - p0.x) > 0.1 &&
-              Math.abs(pt.y - p0.y) > 0.1
+              Math.abs(pt.x - p0.x) >= 0.01 &&
+              Math.abs(pt.y - p0.y) >= 0.01
             ) {
               const corner1 =
                 rectangleMode === 'center'
@@ -474,7 +540,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               });
               setDrawingPoints([]);
               onLogCommand(
-                `RECTANG 已建立${rectangleMode === 'center' ? '中心' : '轉角'}矩形: ${Math.abs(corner2.x - corner1.x).toFixed(1)} × ${Math.abs(corner2.y - corner1.y).toFixed(1)} mm (支援按 X 炸開為 4 條直線)`,
+                `RECTANG 已建立${rectangleMode === 'center' ? '中心' : '轉角'}矩形: ${Math.abs(corner2.x - corner1.x).toFixed(2)} × ${Math.abs(corner2.y - corner1.y).toFixed(2)} mm (支援按 X 炸開為 4 條直線)`,
                 'success'
               );
             }
@@ -486,13 +552,13 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
             onLogCommand(
-              `CIRCLE 指定圓心: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請指定半徑或直接輸入數值按空白鍵/Enter`,
+              `CIRCLE 指定圓心: (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)}) — 請指定半徑或直接輸入數值按空白鍵/Enter`,
               'info'
             );
           } else {
             const center = drawingPoints[0];
             const r = dist(center, pt);
-            if (r > 0.1) {
+            if (r >= 0.01) {
               onAddEntity({
                 id,
                 type: 'circle',
@@ -515,14 +581,14 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
             onLogCommand(
-              `ARC [三點圓弧] 步驟 1/3 已指定圓弧起點 P1: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請點選圓弧通過的第二點 P2`,
+              `ARC [三點圓弧] 步驟 1/3 已指定圓弧起點 P1: (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)}) — 請點選圓弧通過的第二點 P2`,
               'info'
             );
           } else if (drawingPoints.length === 1) {
-            if (dist(drawingPoints[0], pt) > 0.1) {
+            if (dist(drawingPoints[0], pt) >= 0.01) {
               setDrawingPoints([drawingPoints[0], pt]);
               onLogCommand(
-                `ARC [三點圓弧] 步驟 2/3 已指定弧上第二點 P2: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請點選圓弧終點 P3`,
+                `ARC [三點圓弧] 步驟 2/3 已指定弧上第二點 P2: (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)}) — 請點選圓弧終點 P3`,
                 'info'
               );
             }
@@ -559,14 +625,14 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
             onLogCommand(
-              `POLYGON (${polygonSides} 邊形) 指定中心點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)})`,
+              `POLYGON (${polygonSides} 邊形) 指定中心點: (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)})`,
               'info'
             );
           } else {
             const center = drawingPoints[0];
             const r = dist(center, pt);
             const rot = angleBetween(center, pt);
-            if (r > 0.5) {
+            if (r >= 0.01) {
               onAddEntity({
                 id,
                 type: 'polygon',
@@ -590,26 +656,42 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
             onLogCommand(
-              `DIMLINEAR 指定第一條延伸線原點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)})`,
+              `DIM 指定第一條延伸線原點（或直接點擊圓周建立 ISO 國際規範 Ø 直徑標註）: (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)})`,
               'info'
             );
           } else if (drawingPoints.length === 1) {
             setDrawingPoints([drawingPoints[0], pt]);
             onLogCommand(
-              `DIMLINEAR 指定第二條延伸線原點 — 移動決定標註線偏移位置（靠近既有標註線可自動相互對齊！）`,
+              `DIM 指定第二點 — 移動決定標註線偏移位置（靠近既有標註線可自動相互對齊！）`,
               'info'
             );
           } else {
             const p1 = drawingPoints[0];
             const p2 = drawingPoints[1];
-            const { offsetPoint: snappedOffset } =
-              snapDimensionOffsetToExisting(p1, p2, pt, entities, zoom);
+            // Check if p1 & p2 are opposite points on a circle -> auto-set dimMode: 'diameter'
+            const midPt = midpoint(p1, p2);
+            const halfLen = dist(p1, p2) / 2;
+            const matchedCircle = entities.find(
+              (ent) =>
+                ent.type === 'circle' &&
+                dist(ent.center, midPt) <= Math.max(2, ent.radius * 0.08) &&
+                Math.abs(ent.radius - halfLen) <= Math.max(2, ent.radius * 0.08)
+            );
+            const isDia = Boolean(matchedCircle);
+            const { offsetPoint: snappedOffset } = isDia
+              ? { offsetPoint: pt }
+              : snapDimensionOffsetToExisting(p1, p2, pt, entities, zoom);
             onAddEntity({
               id,
               type: 'dimension',
               layerId: layers.some((l) => l.id === 'DIM')
                 ? 'DIM'
                 : activeLayerId,
+              dimMode: isDia ? 'diameter' : 'linear',
+              precision: 2,
+              toleranceMode: 'none',
+              toleranceUpper: 0.05,
+              toleranceLower: -0.05,
               p1,
               p2,
               offsetPoint: snappedOffset,
@@ -618,7 +700,9 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             setDrawingPoints([]);
             setDimAlignGuide(null);
             onLogCommand(
-              `DIMLINEAR 已標註尺寸: ${dist(p1, p2).toFixed(2)} mm (字高 ${defaultDimFontSize})`,
+              isDia
+                ? `DIMDIAMETER 已依 ISO 國際規範標註圓形直徑: Ø${dist(p1, p2).toFixed(2)} (可於下方或右側屬性設定正負公差與小數位數)`
+                : `DIMLINEAR 已標註尺寸: ${dist(p1, p2).toFixed(2)} (可於下方或右側屬性設定正負公差與小數位數)`,
               'success'
             );
           }
@@ -890,14 +974,27 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         return;
       }
 
-      // Dynamic numeric typing when drawing OR when in offset tool
+      // Dynamic numeric typing when drawing, moving, or in offset tool
       if (
         (drawingPoints.length > 0 && settings.dynInput) ||
-        activeTool === 'offset'
+        activeTool === 'offset' ||
+        activeTool === 'move' ||
+        activeTool === 'copy'
       ) {
         if (e.key === 'Tab') {
           e.preventDefault();
           setDynField((prev) => (prev === 'primary' ? 'secondary' : 'primary'));
+          return;
+        }
+        if (e.key === ',') {
+          e.preventDefault();
+          if (
+            activeTool === 'move' ||
+            activeTool === 'copy' ||
+            drawingPoints.length > 0
+          ) {
+            setDynField('secondary');
+          }
           return;
         }
         if (/^[0-9.-]$/.test(e.key)) {
@@ -914,7 +1011,11 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           if (dynField === 'primary') {
             setDynValue((prev) => prev.slice(0, -1));
           } else {
-            setDynAngleValue((prev) => prev.slice(0, -1));
+            if (dynAngleValue.length > 0) {
+              setDynAngleValue((prev) => prev.slice(0, -1));
+            } else {
+              setDynField('primary');
+            }
           }
           return;
         }
@@ -925,7 +1026,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         if (activeTool === 'offset' && dynValue.trim() !== '') {
           e.preventDefault();
           const newDist = parseFloat(dynValue);
-          if (!isNaN(newDist) && newDist > 0) {
+          if (!isNaN(newDist) && newDist >= 0.01) {
             onChangeOffsetDistance(newDist);
             onLogCommand(
               `OFFSET 已設定偏移距離 = ${newDist.toFixed(2)} mm — 請點選要偏移的一側（支援同時偏移所有已選取圖形）`,
@@ -934,6 +1035,25 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           }
           setDynValue('');
           return;
+        }
+
+        // Direct X,Y coordinate jump in MOVE or COPY mode!
+        if (
+          (activeTool === 'move' || activeTool === 'copy') &&
+          dynValue.trim() !== '' &&
+          dynAngleValue.trim() !== ''
+        ) {
+          e.preventDefault();
+          const tx = parseFloat(dynValue);
+          const ty = parseFloat(dynAngleValue);
+          if (!isNaN(tx) && !isNaN(ty)) {
+            if (activeTool === 'move') {
+              executeMoveToCoordinates(tx, ty);
+            } else {
+              commitPoint({ x: tx, y: ty });
+            }
+            return;
+          }
         }
 
         if (activeTool === 'join' && selectedIds.length >= 2) {
@@ -968,7 +1088,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               setExtendFirstPick(null);
               onSelectChange([]);
               onLogCommand(
-                `EXTEND 已延伸線段至交界處 (+${dist(res.extensionSegment[0], res.extensionSegment[1]).toFixed(1)} mm)`,
+                `EXTEND 已延伸線段至交界處 (+${dist(res.extensionSegment[0], res.extensionSegment[1]).toFixed(2)} mm)`,
                 'success'
               );
               return;
@@ -984,8 +1104,8 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           const val2 = parseFloat(dynAngleValue);
 
           if (activeTool === 'rectangle' && !isNaN(val1)) {
-            const w = Math.abs(val1);
-            const h = !isNaN(val2) ? Math.abs(val2) : w;
+            const w = Math.max(0.01, Math.abs(val1));
+            const h = !isNaN(val2) ? Math.max(0.01, Math.abs(val2)) : w;
             const signX = cursorWorld.x >= anchor.x ? 1 : -1;
             const signY = cursorWorld.y >= anchor.y ? 1 : -1;
             if (rectangleMode === 'center') {
@@ -1002,7 +1122,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             return;
           }
 
-          if (!isNaN(val1) && val1 > 0) {
+          if (!isNaN(val1) && Math.abs(val1) >= 0.01) {
             const currentDeg = angleDegrees(anchor, cursorWorld);
             const targetDeg = !isNaN(val2) ? val2 : currentDeg;
             const rad = targetDeg * DEG_TO_RAD;
@@ -1113,6 +1233,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     dynField,
     dynValue,
     entities,
+    executeMoveToCoordinates,
     extendFirstPick,
     hoveredEntityId,
     layers,
@@ -1263,13 +1384,29 @@ export const CadViewport: React.FC<CadViewportProps> = ({
 
     const { rawWorld, effectiveWorld } = updateCursorFromScreen(sx, sy);
 
+    // Local preview buffer during grip drag -> prevents history stack flooding / browser freeze!
     if (activeGrip) {
       const updated = entities.map((ent) =>
         ent.id === activeGrip.entityId
           ? applyGripMove(ent, activeGrip.gripIndex, effectiveWorld)
           : ent
       );
-      onUpdateEntities(updated);
+      dragPreviewRef.current = updated;
+      setDragPreviewEntities(updated);
+      return;
+    }
+
+    // Local preview buffer during direct entity drag on canvas -> smooth 60fps without crash!
+    if (activeEntityDrag) {
+      const dx = effectiveWorld.x - activeEntityDrag.startWorld.x;
+      const dy = effectiveWorld.y - activeEntityDrag.startWorld.y;
+      if (Math.hypot(dx, dy) > 0.01) {
+        const updated = activeEntityDrag.initialEntities.map((ent) =>
+          selectedIds.includes(ent.id) ? translateEntity(ent, dx, dy) : ent
+        );
+        dragPreviewRef.current = updated;
+        setDragPreviewEntities(updated);
+      }
       return;
     }
 
@@ -1279,7 +1416,8 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       activeTool === 'offset' ||
       activeTool === 'trim' ||
       activeTool === 'extend' ||
-      activeTool === 'join'
+      activeTool === 'join' ||
+      activeTool === 'dimension'
     ) {
       const visibleLayerIds = new Set(
         layers.filter((l) => l.visible && !l.locked).map((l) => l.id)
@@ -1358,6 +1496,8 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           const hitGrip = grips.find((g) => dist(rawWorld, g.point) <= gripTol);
           if (hitGrip) {
             setActiveGrip(hitGrip);
+            dragPreviewRef.current = null;
+            setDragPreviewEntities(null);
             onLogCommand(
               `掣點編輯 (GRIP EDIT): 拖曳控點至新位置後放開完成`,
               'info'
@@ -1412,7 +1552,17 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             onSelectChange([...selectedIds, hit.id]);
           }
         } else {
-          onSelectChange([hit.id]);
+          if (!selectedIds.includes(hit.id)) {
+            onSelectChange([hit.id]);
+          }
+          // Allow direct smooth dragging of selected entities on canvas without freezing
+          setActiveEntityDrag({
+            startWorld: effectiveWorld,
+            currentWorld: effectiveWorld,
+            initialEntities: entities,
+          });
+          dragPreviewRef.current = null;
+          setDragPreviewEntities(null);
         }
       } else {
         setSelectionBoxStart(rawWorld);
@@ -1421,6 +1571,35 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         }
       }
       return;
+    }
+
+    // 1b. If in DIMENSION mode and drawingPoints is empty, clicking directly on a Circle circumference starts an ISO Diameter Dimension!
+    if (activeTool === 'dimension' && drawingPoints.length === 0) {
+      const hitTol = 10 / zoom;
+      const hitCircle = [...visibleEntities]
+        .reverse()
+        .find(
+          (ent) =>
+            ent.type === 'circle' &&
+            Math.abs(dist(rawWorld, ent.center) - ent.radius) <= hitTol
+        );
+      if (hitCircle && hitCircle.type === 'circle') {
+        const ang = angleBetween(hitCircle.center, rawWorld);
+        const p1: Point = {
+          x: hitCircle.center.x - hitCircle.radius * Math.cos(ang),
+          y: hitCircle.center.y - hitCircle.radius * Math.sin(ang),
+        };
+        const p2: Point = {
+          x: hitCircle.center.x + hitCircle.radius * Math.cos(ang),
+          y: hitCircle.center.y + hitCircle.radius * Math.sin(ang),
+        };
+        setDrawingPoints([p1, p2]);
+        onLogCommand(
+          `DIMDIAMETER 已偵測圓形 (Ø${(hitCircle.radius * 2).toFixed(2)}) — 移動滑鼠指定國際規範直徑標註位置並點擊完成！`,
+          'info'
+        );
+        return;
+      }
     }
 
     // 2. Check if in ERASE (刪除圖元 E) mode
@@ -1633,7 +1812,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         );
         const effectiveOffset =
           dynValue.trim() !== '' && !isNaN(parseFloat(dynValue))
-            ? Math.max(0.5, parseFloat(dynValue))
+            ? Math.max(0.01, parseFloat(dynValue))
             : offsetDistance;
         if (effectiveOffset !== offsetDistance) {
           onChangeOffsetDistance(effectiveOffset);
@@ -1667,9 +1846,23 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       setIsPanning(false);
     }
     if (activeGrip) {
+      if (dragPreviewRef.current) {
+        onUpdateEntities(dragPreviewRef.current);
+      }
+      dragPreviewRef.current = null;
+      setDragPreviewEntities(null);
       setActiveGrip(null);
       setDimAlignGuide(null);
       onLogCommand('掣點編輯已套用', 'success');
+    }
+    if (activeEntityDrag) {
+      if (dragPreviewRef.current) {
+        onUpdateEntities(dragPreviewRef.current);
+        onLogCommand('已拖曳移動選取圖元', 'success');
+      }
+      dragPreviewRef.current = null;
+      setDragPreviewEntities(null);
+      setActiveEntityDrag(null);
     }
   };
 
@@ -1744,8 +1937,8 @@ export const CadViewport: React.FC<CadViewportProps> = ({
 
       const scale = curDist / touchPinchRef.current.initialDist;
       const nextZoom = Math.min(
-        25,
-        Math.max(0.15, touchPinchRef.current.initialZoom * scale)
+        350,
+        Math.max(0.015, touchPinchRef.current.initialZoom * scale)
       );
       const dx = curMid.x - touchPinchRef.current.initialMid.x;
       const dy = curMid.y - touchPinchRef.current.initialMid.y;
@@ -1786,7 +1979,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     }
   };
 
-  // Mouse Wheel Zoom
+  // Mouse Wheel Zoom (workspace zoom increased 10x up to 350x!)
   const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
     const rect = e.currentTarget.getBoundingClientRect();
@@ -1794,7 +1987,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     const sy = e.clientY - rect.top;
 
     const zoomFactor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-    const nextZoom = Math.min(35, Math.max(0.15, zoom * zoomFactor));
+    const nextZoom = Math.min(350, Math.max(0.015, zoom * zoomFactor));
 
     const wx = (sx - canvasSize.width / 2 - pan.x) / zoom;
     const wy = -(sy - canvasSize.height / 2 - pan.y) / zoom;
@@ -1837,13 +2030,17 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       }
     };
 
-    // 2. Render Calibrated Coordinate Grid
+    // 2. Render Calibrated Coordinate Grid (supports 10x expanded workspace & micro-zoom up to 350x)
     if (settings.grid) {
       let minorStep = 10;
-      if (zoom < 0.4) minorStep = 50;
+      if (zoom < 0.05) minorStep = 500;
+      else if (zoom < 0.15) minorStep = 200;
+      else if (zoom < 0.4) minorStep = 50;
       else if (zoom < 0.8) minorStep = 20;
-      else if (zoom > 4) minorStep = 5;
+      else if (zoom > 120) minorStep = 0.1;
+      else if (zoom > 35) minorStep = 0.5;
       else if (zoom > 10) minorStep = 1;
+      else if (zoom > 4) minorStep = 5;
 
       const majorStep = minorStep * 5;
 
@@ -1863,14 +2060,27 @@ export const CadViewport: React.FC<CadViewportProps> = ({
 
       ctx.beginPath();
       ctx.strokeStyle = 'rgba(148, 163, 184, 0.06)';
-      for (let x = startX; x <= endX; x += minorStep) {
-        if (Math.abs(x % majorStep) < 1e-4) continue;
+      const maxGridLines = 400;
+      let countX = 0;
+      for (
+        let x = startX;
+        x <= endX && countX < maxGridLines;
+        x += minorStep, countX++
+      ) {
+        if (Math.abs(x / majorStep - Math.round(x / majorStep)) < 1e-3)
+          continue;
         const sx = Math.round(worldToScreen(x, 0).x) + 0.5;
         ctx.moveTo(sx, 0);
         ctx.lineTo(sx, canvasSize.height);
       }
-      for (let y = startY; y <= endY; y += minorStep) {
-        if (Math.abs(y % majorStep) < 1e-4) continue;
+      let countY = 0;
+      for (
+        let y = startY;
+        y <= endY && countY < maxGridLines;
+        y += minorStep, countY++
+      ) {
+        if (Math.abs(y / majorStep - Math.round(y / majorStep)) < 1e-3)
+          continue;
         const sy = Math.round(worldToScreen(0, y).y) + 0.5;
         ctx.moveTo(0, sy);
         ctx.lineTo(canvasSize.width, sy);
@@ -1881,27 +2091,30 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       ctx.strokeStyle = 'rgba(148, 163, 184, 0.13)';
       ctx.fillStyle = 'rgba(148, 163, 184, 0.42)';
       ctx.font = '10px "JetBrains Mono", monospace';
+      const labelDecimals = minorStep < 1 ? 1 : 0;
+      let mCountX = 0;
       for (
         let x = Math.floor(topLeftWorld.x / majorStep) * majorStep;
-        x <= endX;
-        x += majorStep
+        x <= endX && mCountX < 120;
+        x += majorStep, mCountX++
       ) {
         if (Math.abs(x) < 1e-4) continue;
         const sx = Math.round(worldToScreen(x, 0).x) + 0.5;
         ctx.moveTo(sx, 0);
         ctx.lineTo(sx, canvasSize.height);
-        ctx.fillText(`${x}`, sx + 4, 14);
+        ctx.fillText(x.toFixed(labelDecimals), sx + 4, 14);
       }
+      let mCountY = 0;
       for (
         let y = Math.floor(bottomRightWorld.y / majorStep) * majorStep;
-        y <= endY;
-        y += majorStep
+        y <= endY && mCountY < 120;
+        y += majorStep, mCountY++
       ) {
         if (Math.abs(y) < 1e-4) continue;
         const sy = Math.round(worldToScreen(0, y).y) + 0.5;
         ctx.moveTo(0, sy);
         ctx.lineTo(canvasSize.width, sy);
-        ctx.fillText(`${y}`, 6, sy - 4);
+        ctx.fillText(y.toFixed(labelDecimals), 6, sy - 4);
       }
       ctx.stroke();
 
@@ -2050,28 +2263,22 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         }
         case 'dimension': {
           ctx.setLineDash([]);
-          const { dimP1, dimP2, mid, length } = getDimensionLinePoints(ent);
+          const {
+            dimP1,
+            dimP2,
+            mid,
+            length,
+            isDiameter,
+            center,
+            leaderOutside,
+            leaderElbow,
+            leaderLanding,
+          } = getDimensionLinePoints(ent);
           const sp1 = worldToScreen(ent.p1.x, ent.p1.y);
           const sp2 = worldToScreen(ent.p2.x, ent.p2.y);
           const sd1 = worldToScreen(dimP1.x, dimP1.y);
           const sd2 = worldToScreen(dimP2.x, dimP2.y);
           const smid = worldToScreen(mid.x, mid.y);
-
-          ctx.lineWidth = 1;
-          ctx.globalAlpha = 0.75;
-          ctx.beginPath();
-          ctx.moveTo(sp1.x, sp1.y);
-          ctx.lineTo(sd1.x, sd1.y);
-          ctx.moveTo(sp2.x, sp2.y);
-          ctx.lineTo(sd2.x, sd2.y);
-          ctx.stroke();
-
-          ctx.globalAlpha = 1;
-          ctx.lineWidth = 1.25;
-          ctx.beginPath();
-          ctx.moveTo(sd1.x, sd1.y);
-          ctx.lineTo(sd2.x, sd2.y);
-          ctx.stroke();
 
           const ang = Math.atan2(sd2.y - sd1.y, sd2.x - sd1.x);
           const arrowLen = Math.min(10, Math.max(5, dist(sd1, sd2) * 0.15));
@@ -2089,26 +2296,125 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             ctx.closePath();
             ctx.fill();
           };
-          drawArrow(sd1, ang + Math.PI);
-          drawArrow(sd2, ang);
+
+          if (isDiameter) {
+            // ISO 129-1 / CNS International Standard Circle Diameter Dimension Rendering
+            if (center) {
+              const sc = worldToScreen(center.x, center.y);
+              ctx.save();
+              ctx.lineWidth = 1;
+              ctx.globalAlpha = 0.65;
+              ctx.beginPath();
+              ctx.moveTo(sc.x - 5, sc.y);
+              ctx.lineTo(sc.x + 5, sc.y);
+              ctx.moveTo(sc.x, sc.y - 5);
+              ctx.lineTo(sc.x, sc.y + 5);
+              ctx.stroke();
+              ctx.restore();
+            }
+
+            ctx.globalAlpha = 1;
+            ctx.lineWidth = 1.25;
+            ctx.beginPath();
+            ctx.moveTo(sd1.x, sd1.y);
+            ctx.lineTo(sd2.x, sd2.y);
+            if (leaderOutside && leaderElbow && leaderLanding) {
+              const sElbow = worldToScreen(leaderElbow.x, leaderElbow.y);
+              const sLanding = worldToScreen(leaderLanding.x, leaderLanding.y);
+              ctx.moveTo(sd2.x, sd2.y);
+              ctx.lineTo(sElbow.x, sElbow.y);
+              ctx.lineTo(sLanding.x, sLanding.y);
+            }
+            ctx.stroke();
+
+            drawArrow(sd1, ang + Math.PI);
+            drawArrow(sd2, ang);
+          } else {
+            ctx.lineWidth = 1;
+            ctx.globalAlpha = 0.75;
+            ctx.beginPath();
+            ctx.moveTo(sp1.x, sp1.y);
+            ctx.lineTo(sd1.x, sd1.y);
+            ctx.moveTo(sp2.x, sp2.y);
+            ctx.lineTo(sd2.x, sd2.y);
+            ctx.stroke();
+
+            ctx.globalAlpha = 1;
+            ctx.lineWidth = 1.25;
+            ctx.beginPath();
+            ctx.moveTo(sd1.x, sd1.y);
+            ctx.lineTo(sd2.x, sd2.y);
+            ctx.stroke();
+
+            drawArrow(sd1, ang + Math.PI);
+            drawArrow(sd2, ang);
+          }
 
           const baseFontSize = ent.fontSize || 11;
           const fontPx = Math.max(8, Math.round(baseFontSize));
-          const label = ent.textOverride || `${length.toFixed(1)} mm`;
+          const tolFontPx = Math.max(7, Math.round(fontPx * 0.72));
+          const formatted = formatDimensionLabel(ent, length);
+
           ctx.font = `600 ${fontPx}px "JetBrains Mono", monospace`;
-          const tw = ctx.measureText(label).width;
-          const boxH = fontPx + 6;
+          const mainW = ctx.measureText(formatted.mainText).width;
+
+          let symW = 0;
+          let devW = 0;
+          if (formatted.symmetricText) {
+            ctx.font = `600 ${Math.max(8, Math.round(fontPx * 0.88))}px "JetBrains Mono", monospace`;
+            symW = ctx.measureText(` ${formatted.symmetricText}`).width;
+          } else if (formatted.upperText && formatted.lowerText) {
+            ctx.font = `600 ${tolFontPx}px "JetBrains Mono", monospace`;
+            devW =
+              Math.max(
+                ctx.measureText(formatted.upperText).width,
+                ctx.measureText(formatted.lowerText).width
+              ) + 6;
+          }
+
+          const totalW = mainW + symW + devW;
+          const boxH =
+            formatted.upperText && formatted.lowerText
+              ? Math.max(fontPx + 8, tolFontPx * 2 + 6)
+              : fontPx + 6;
+
           ctx.fillStyle = '#090D14';
           ctx.fillRect(
-            smid.x - tw / 2 - 4,
+            smid.x - totalW / 2 - 4,
             smid.y - boxH / 2,
-            tw + 8,
+            totalW + 8,
             boxH
           );
-          ctx.fillStyle = isSelected ? '#38BDF8' : color;
-          ctx.textAlign = 'center';
+
+          const textColor = isSelected ? '#38BDF8' : color;
+          ctx.fillStyle = textColor;
           ctx.textBaseline = 'middle';
-          ctx.fillText(label, smid.x, smid.y);
+
+          const startX = smid.x - totalW / 2;
+          ctx.font = `600 ${fontPx}px "JetBrains Mono", monospace`;
+          ctx.textAlign = 'left';
+          ctx.fillText(formatted.mainText, startX, smid.y);
+
+          if (formatted.symmetricText) {
+            ctx.font = `600 ${Math.max(8, Math.round(fontPx * 0.88))}px "JetBrains Mono", monospace`;
+            ctx.fillText(
+              ` ${formatted.symmetricText}`,
+              startX + mainW,
+              smid.y
+            );
+          } else if (formatted.upperText && formatted.lowerText) {
+            ctx.font = `600 ${tolFontPx}px "JetBrains Mono", monospace`;
+            ctx.fillText(
+              formatted.upperText,
+              startX + mainW + 4,
+              smid.y - tolFontPx * 0.52
+            );
+            ctx.fillText(
+              formatted.lowerText,
+              startX + mainW + 4,
+              smid.y + tolFontPx * 0.52
+            );
+          }
           break;
         }
         case 'text': {
@@ -2129,7 +2435,8 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       ctx.restore();
     };
 
-    for (const ent of entities) {
+    const renderedEntities = dragPreviewEntities || entities;
+    for (const ent of renderedEntities) {
       const isSelected = selectedIds.includes(ent.id);
       const isHovered = hoveredEntityId === ent.id;
       drawEntity(ent, undefined, isSelected, isHovered);
@@ -2301,7 +2608,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       const selectedEnts = entities.filter((e) => selectedIds.includes(e.id));
       const effectiveOffset =
         dynValue.trim() !== '' && !isNaN(parseFloat(dynValue))
-          ? Math.max(0.5, parseFloat(dynValue))
+          ? Math.max(0.01, parseFloat(dynValue))
           : offsetDistance;
       const previewEnts = offsetSelectedEntities(
         selectedEnts,
@@ -2316,7 +2623,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
 
     // 5. Render Grip Handles for Selected Entities in Select Mode
     if (activeTool === 'select' && selectedIds.length > 0) {
-      for (const ent of entities) {
+      for (const ent of renderedEntities) {
         if (!selectedIds.includes(ent.id)) continue;
         const grips = getEntityGripHandles(ent);
         const halfSz = ent.type === 'arc' ? 2 : 4;
@@ -2594,13 +2901,25 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           ctx.lineTo(sCur.x, sCur.y);
           ctx.stroke();
         } else if (drawingPoints.length === 2) {
+          const p1 = drawingPoints[0];
+          const p2 = drawingPoints[1];
+          const midPt = midpoint(p1, p2);
+          const halfLen = dist(p1, p2) / 2;
+          const isDia = entities.some(
+            (ent) =>
+              ent.type === 'circle' &&
+              dist(ent.center, midPt) <= Math.max(2, ent.radius * 0.08) &&
+              Math.abs(ent.radius - halfLen) <= Math.max(2, ent.radius * 0.08)
+          );
           drawEntity(
             {
               id: 'preview-dim',
               type: 'dimension',
               layerId: activeLayerId,
-              p1: drawingPoints[0],
-              p2: drawingPoints[1],
+              dimMode: isDia ? 'diameter' : 'linear',
+              precision: 2,
+              p1,
+              p2,
               offsetPoint: cursorWorld,
               fontSize: defaultDimFontSize,
             },
@@ -2810,6 +3129,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     }
   }, [
     activeGrip,
+    activeEntityDrag,
     activeLayerId,
     activeSnap,
     activeTool,
@@ -2819,6 +3139,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     cursorWorld,
     defaultDimFontSize,
     dimAlignGuide,
+    dragPreviewEntities,
     drawingPoints,
     dynValue,
     entities,
@@ -2972,6 +3293,60 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               </div>
             )}
 
+            {activeTool === 'move' && selectedIds.length > 0 && (
+              <div className="flex items-center gap-1 bg-slate-950 px-1.5 py-0.5 rounded border border-sky-500/50 shrink-0 font-mono">
+                <span className="text-[10px] text-sky-300 font-sans">
+                  座標跳轉 X:
+                </span>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={moveTargetInputX}
+                  onChange={(e) => setMoveTargetInputX(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const tx = parseFloat(moveTargetInputX);
+                      const ty = parseFloat(moveTargetInputY);
+                      if (!isNaN(tx) && !isNaN(ty)) {
+                        executeMoveToCoordinates(tx, ty);
+                      }
+                    }
+                  }}
+                  className="w-14 px-1 py-0 text-[10px] bg-slate-900 border border-slate-700 rounded text-sky-200"
+                />
+                <span className="text-[10px] text-sky-300 font-sans">Y:</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={moveTargetInputY}
+                  onChange={(e) => setMoveTargetInputY(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const tx = parseFloat(moveTargetInputX);
+                      const ty = parseFloat(moveTargetInputY);
+                      if (!isNaN(tx) && !isNaN(ty)) {
+                        executeMoveToCoordinates(tx, ty);
+                      }
+                    }
+                  }}
+                  className="w-14 px-1 py-0 text-[10px] bg-slate-900 border border-slate-700 rounded text-sky-200"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    const tx = parseFloat(moveTargetInputX);
+                    const ty = parseFloat(moveTargetInputY);
+                    if (!isNaN(tx) && !isNaN(ty)) {
+                      executeMoveToCoordinates(tx, ty);
+                    }
+                  }}
+                  className="px-1.5 py-0.5 bg-sky-600 hover:bg-sky-500 text-white rounded text-[10px] font-sans font-medium"
+                >
+                  跳轉移動
+                </button>
+              </div>
+            )}
+
             {activeTool === 'join' && selectedIds.length >= 2 && (
               <button
                 type="button"
@@ -3007,10 +3382,14 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                   : '步驟 2：點選角點或輸入寬[Tab]高後按「空白鍵 / Enter」')}
               {activeTool === 'dimension' &&
                 (drawingPoints.length === 0
-                  ? '點選第一個標註端點'
+                  ? '直接點擊圓周可建立 ISO 國際規範 Ø 直徑標註，或點選第一端點建立線性標註'
                   : drawingPoints.length === 1
                     ? '點選第二個標註端點'
-                    : '移動決定標註線高度（靠近既有標註線可自動相互對齊）')}
+                    : '移動決定標註線位置（圓外自動產生國際規範水平折線引線，靠近既有標註自動對齊）')}
+              {activeTool === 'move' &&
+                (drawingPoints.length === 0
+                  ? '點選基準點，或直接輸入 X,Y 座標（亦可使用上方/右側座標跳轉欄）按空白鍵/Enter 跳轉移動'
+                  : '移動指定目標位置點，或直接輸入 X,Y 座標按「空白鍵 / Enter」')}
               {activeTool === 'erase' &&
                 '直接點選畫布上的任何圖元即可立即刪除（或按 ESC 返回選取）'}
               {activeTool === 'trim' &&
@@ -3020,17 +3399,18 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                   ? '已選取第一條線段 — 請點選第二條線段以互相延伸接合至交點（或再點一次延伸至最近邊界）'
                   : '依序點選兩個線段即可互相延伸至交點！（或點選同一線段兩次延伸至既有邊界）')}
               {activeTool === 'offset' &&
-                '支援同時偏移選取的所有圖形（可按 TAB 連鎖選取）！輸入距離按空白鍵/Enter 後點選要偏移的一側'}
+                '支援同時偏移選取的所有圖形（最小 0.01）！輸入距離按空白鍵/Enter 後點選要偏移的一側'}
               {activeTool === 'join' &&
                 '點選 2 個以上圖元後按「空白鍵 / Enter」，保留原始位置組裝成單一物件'}
               {activeTool === 'select' &&
-                '點選圖元可在下方直接修改尺寸；支援 Ctrl+C 複製 / Ctrl+X 剪下 / Ctrl+V 貼上'}
+                '點選或直接拖曳圖元移動；可在下方修改尺寸、設定正負公差與小數位數，或輸入 X,Y 座標跳轉'}
               {![
                 'zoomWindow',
                 'line',
                 'arc',
                 'rectangle',
                 'dimension',
+                'move',
                 'erase',
                 'trim',
                 'extend',
@@ -3088,13 +3468,13 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                     <span className="text-slate-400">長度L:</span>
                     <input
                       type="number"
-                      min={0.5}
-                      step="1"
+                      min={0.01}
+                      step="0.01"
                       value={Number(
                         dist(singleSelected.p1, singleSelected.p2).toFixed(2)
                       )}
                       onChange={(e) => {
-                        const newLen = Math.max(0.5, Number(e.target.value));
+                        const newLen = Math.max(0.01, Number(e.target.value));
                         const rad =
                           angleDegrees(singleSelected.p1, singleSelected.p2) *
                           DEG_TO_RAD;
@@ -3113,12 +3493,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                     <span className="text-slate-400">∠:</span>
                     <input
                       type="number"
-                      step="1"
+                      step="0.01"
                       value={Number(
                         angleDegrees(
                           singleSelected.p1,
                           singleSelected.p2
-                        ).toFixed(1)
+                        ).toFixed(2)
                       )}
                       onChange={(e) => {
                         const newDeg = Number(e.target.value);
@@ -3148,15 +3528,15 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                     <span className="text-slate-400">寬W:</span>
                     <input
                       type="number"
-                      min={1}
-                      step="1"
+                      min={0.01}
+                      step="0.01"
                       value={Number(
                         Math.abs(
                           singleSelected.p2.x - singleSelected.p1.x
                         ).toFixed(2)
                       )}
                       onChange={(e) => {
-                        const w = Math.max(1, Number(e.target.value));
+                        const w = Math.max(0.01, Number(e.target.value));
                         const c = midpoint(
                           singleSelected.p1,
                           singleSelected.p2
@@ -3173,15 +3553,15 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                     <span className="text-slate-400">高H:</span>
                     <input
                       type="number"
-                      min={1}
-                      step="1"
+                      min={0.01}
+                      step="0.01"
                       value={Number(
                         Math.abs(
                           singleSelected.p2.y - singleSelected.p1.y
                         ).toFixed(2)
                       )}
                       onChange={(e) => {
-                        const h = Math.max(1, Number(e.target.value));
+                        const h = Math.max(0.01, Number(e.target.value));
                         const c = midpoint(
                           singleSelected.p1,
                           singleSelected.p2
@@ -3213,12 +3593,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                     <span className="text-slate-400">半徑R:</span>
                     <input
                       type="number"
-                      min={0.5}
-                      step="1"
+                      min={0.01}
+                      step="0.01"
                       value={Number(singleSelected.radius.toFixed(2))}
                       onChange={(e) =>
                         updateSingleEntity({
-                          radius: Math.max(0.5, Number(e.target.value)),
+                          radius: Math.max(0.01, Number(e.target.value)),
                         })
                       }
                       className="w-16 px-1.5 py-0.5 bg-slate-950 border border-sky-500/60 rounded text-sky-200"
@@ -3228,12 +3608,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                     <span className="text-slate-400">直徑Ø:</span>
                     <input
                       type="number"
-                      min={1}
-                      step="1"
+                      min={0.02}
+                      step="0.01"
                       value={Number((singleSelected.radius * 2).toFixed(2))}
                       onChange={(e) =>
                         updateSingleEntity({
-                          radius: Math.max(0.5, Number(e.target.value) / 2),
+                          radius: Math.max(0.01, Number(e.target.value) / 2),
                         })
                       }
                       className="w-16 px-1.5 py-0.5 bg-slate-950 border border-amber-500/60 rounded text-amber-200"
@@ -3250,11 +3630,11 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                     <span className="text-slate-400">半徑R:</span>
                     <input
                       type="number"
-                      min={1}
-                      step="1"
+                      min={0.01}
+                      step="0.01"
                       value={Number(singleSelected.radius.toFixed(2))}
                       onChange={(e) => {
-                        const nextR = Math.max(1, Number(e.target.value));
+                        const nextR = Math.max(0.01, Number(e.target.value));
                         const [p1, p2, p3] = getArcThreePoints({
                           ...singleSelected,
                           radius: nextR,
@@ -3275,12 +3655,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                     <span className="text-slate-400">外接R:</span>
                     <input
                       type="number"
-                      min={1}
-                      step="1"
+                      min={0.01}
+                      step="0.01"
                       value={Number(singleSelected.radius.toFixed(2))}
                       onChange={(e) =>
                         updateSingleEntity({
-                          radius: Math.max(1, Number(e.target.value)),
+                          radius: Math.max(0.01, Number(e.target.value)),
                         })
                       }
                       className="w-16 px-1.5 py-0.5 bg-slate-950 border border-sky-500/60 rounded text-sky-200"
@@ -3308,11 +3688,179 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                 </div>
               )}
 
-              {/* Dimension Direct Font Size Input */}
+              {/* Dimension Direct Modification Bar: Mode (Linear / ISO Diameter), Precision (0 / 1 / 2), Tolerance (+/-), Font Size */}
               {singleSelected.type === 'dimension' && (
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2 font-sans">
+                  {/* ISO Diameter / Linear toggle */}
+                  <div className="flex items-center bg-slate-950 border border-slate-700 rounded p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => updateSingleEntity({ dimMode: 'linear' })}
+                      className={`px-1.5 py-0.5 rounded text-[10px] ${
+                        (singleSelected.dimMode ?? 'linear') === 'linear'
+                          ? 'bg-sky-600 text-white'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      線性
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateSingleEntity({ dimMode: 'diameter' })
+                      }
+                      className={`px-1.5 py-0.5 rounded text-[10px] ${
+                        singleSelected.dimMode === 'diameter'
+                          ? 'bg-sky-600 text-white'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      Ø直徑(ISO)
+                    </button>
+                  </div>
+
+                  {/* Decimal Precision: 0, 1, 2 */}
+                  <div className="flex items-center gap-1 bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5">
+                    <span className="text-[10px] text-slate-400">小數:</span>
+                    {(
+                      [
+                        { p: 0, label: '第0位' },
+                        { p: 1, label: '後1位' },
+                        { p: 2, label: '後2位' },
+                      ] as const
+                    ).map(({ p, label }) => (
+                      <button
+                        key={p}
+                        type="button"
+                        onClick={() =>
+                          updateSingleEntity({
+                            precision: p,
+                            textOverride: undefined,
+                          })
+                        }
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${
+                          (singleSelected.precision ?? 1) === p
+                            ? 'bg-sky-600 text-white'
+                            : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* +/- Tolerance Mode & Inputs */}
+                  <div className="flex items-center gap-1 bg-slate-950 border border-amber-500/40 rounded px-1.5 py-0.5">
+                    <span className="text-[10px] text-amber-300">公差:</span>
+                    <select
+                      value={singleSelected.toleranceMode ?? 'none'}
+                      onChange={(e) =>
+                        updateSingleEntity({
+                          toleranceMode: e.target.value as
+                            | 'none'
+                            | 'symmetric'
+                            | 'deviation',
+                          toleranceUpper: singleSelected.toleranceUpper ?? 0.05,
+                          toleranceLower:
+                            singleSelected.toleranceLower ?? -0.05,
+                          textOverride: undefined,
+                        })
+                      }
+                      className="bg-slate-900 border border-slate-700 rounded px-1 py-0 text-[10px] text-amber-200"
+                    >
+                      <option value="none">無</option>
+                      <option value="symmetric">±對稱公差</option>
+                      <option value="deviation">+/-正負公差</option>
+                    </select>
+
+                    {singleSelected.toleranceMode === 'symmetric' && (
+                      <label className="flex items-center gap-0.5 font-mono">
+                        <span className="text-amber-300 text-[10px]">±</span>
+                        <input
+                          type="number"
+                          min={0.01}
+                          step="0.01"
+                          value={Math.max(
+                            0.01,
+                            Math.abs(singleSelected.toleranceUpper ?? 0.05)
+                          )}
+                          onChange={(e) => {
+                            const v = Math.max(
+                              0.01,
+                              Math.abs(Number(e.target.value))
+                            );
+                            updateSingleEntity({
+                              toleranceUpper: v,
+                              toleranceLower: -v,
+                              textOverride: undefined,
+                            });
+                          }}
+                          className="w-14 px-1 py-0 bg-slate-900 border border-amber-500/60 rounded text-amber-200 text-[11px]"
+                        />
+                      </label>
+                    )}
+
+                    {singleSelected.toleranceMode === 'deviation' && (
+                      <div className="flex items-center gap-1 font-mono">
+                        <label className="flex items-center gap-0.5">
+                          <span className="text-emerald-400 text-[10px]">
+                            +
+                          </span>
+                          <input
+                            type="number"
+                            min={0.01}
+                            step="0.01"
+                            value={
+                              singleSelected.toleranceUpper !== undefined
+                                ? singleSelected.toleranceUpper
+                                : 0.05
+                            }
+                            onChange={(e) => {
+                              const raw = Number(e.target.value);
+                              const v =
+                                raw > 0 && raw < 0.01 ? 0.01 : Math.max(0, raw);
+                              updateSingleEntity({
+                                toleranceUpper: v,
+                                textOverride: undefined,
+                              });
+                            }}
+                            className="w-14 px-1 py-0 bg-slate-900 border border-emerald-500/60 rounded text-emerald-200 text-[11px]"
+                          />
+                        </label>
+                        <label className="flex items-center gap-0.5">
+                          <span className="text-rose-400 text-[10px]">-</span>
+                          <input
+                            type="number"
+                            max={-0.01}
+                            step="0.01"
+                            value={
+                              singleSelected.toleranceLower !== undefined
+                                ? singleSelected.toleranceLower
+                                : -0.05
+                            }
+                            onChange={(e) => {
+                              const raw = Number(e.target.value);
+                              const v =
+                                raw < 0 && raw > -0.01
+                                  ? -0.01
+                                  : raw > 0
+                                    ? -Math.max(0.01, raw)
+                                    : raw;
+                              updateSingleEntity({
+                                toleranceLower: v,
+                                textOverride: undefined,
+                              });
+                            }}
+                            className="w-14 px-1 py-0 bg-slate-900 border border-rose-500/60 rounded text-rose-200 text-[11px]"
+                          />
+                        </label>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Font size */}
                   <label className="flex items-center gap-1">
-                    <span className="text-amber-300 font-sans">字體大小:</span>
+                    <span className="text-amber-300 text-[10px]">字高:</span>
                     <input
                       type="number"
                       min={6}
@@ -3326,7 +3874,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                           ),
                         })
                       }
-                      className="w-14 px-1.5 py-0.5 bg-slate-950 border border-amber-500/60 rounded text-amber-200"
+                      className="w-12 px-1 py-0.5 font-mono bg-slate-950 border border-amber-500/60 rounded text-amber-200 text-[11px]"
                     />
                   </label>
                 </div>
@@ -3369,6 +3917,60 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               )}
             </div>
           )}
+
+          {/* Quick Coordinate Jump (X, Y) for any selected object(s) */}
+          <div className="flex items-center gap-1 bg-slate-950 border border-slate-700/80 rounded px-1.5 py-0.5 font-mono">
+            <span className="text-[10px] text-slate-400 font-sans">
+              座標X:
+            </span>
+            <input
+              type="number"
+              step="0.01"
+              value={moveTargetInputX}
+              onChange={(e) => setMoveTargetInputX(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const tx = parseFloat(moveTargetInputX);
+                  const ty = parseFloat(moveTargetInputY);
+                  if (!isNaN(tx) && !isNaN(ty)) {
+                    executeMoveToCoordinates(tx, ty);
+                  }
+                }
+              }}
+              className="w-14 px-1 py-0 bg-slate-900 border border-slate-700 rounded text-sky-200 text-[11px]"
+            />
+            <span className="text-[10px] text-slate-400 font-sans">Y:</span>
+            <input
+              type="number"
+              step="0.01"
+              value={moveTargetInputY}
+              onChange={(e) => setMoveTargetInputY(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const tx = parseFloat(moveTargetInputX);
+                  const ty = parseFloat(moveTargetInputY);
+                  if (!isNaN(tx) && !isNaN(ty)) {
+                    executeMoveToCoordinates(tx, ty);
+                  }
+                }
+              }}
+              className="w-14 px-1 py-0 bg-slate-900 border border-slate-700 rounded text-sky-200 text-[11px]"
+            />
+            <button
+              type="button"
+              onClick={() => {
+                const tx = parseFloat(moveTargetInputX);
+                const ty = parseFloat(moveTargetInputY);
+                if (!isNaN(tx) && !isNaN(ty)) {
+                  executeMoveToCoordinates(tx, ty);
+                }
+              }}
+              title="將選取物件跳轉移動至指定 (X, Y) 座標"
+              className="px-1.5 py-0.5 bg-sky-600/80 hover:bg-sky-500 text-white rounded text-[10px] font-sans"
+            >
+              跳轉
+            </button>
+          </div>
 
           <button
             type="button"
@@ -3420,75 +4022,107 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       )}
 
       {/* Dynamic Input (DYN - F12) Heads-Up Display next to Crosshair */}
-      {settings.dynInput && anchorPoint && activeTool !== 'zoomWindow' && (
-        <div
-          style={{
-            transform: `translate(${Math.min(
-              Math.max(8, canvasSize.width - 240),
-              Math.max(8, mouseScreen.x + 16)
-            )}px, ${Math.min(
-              Math.max(8, canvasSize.height - 56),
-              Math.max(8, mouseScreen.y + 16)
-            )}px)`,
-          }}
-          className="pointer-events-none absolute top-0 left-0 z-20 flex items-center gap-1.5 bg-slate-900/95 border border-sky-500/60 rounded px-2 py-1 shadow-lg font-mono text-xs"
-        >
-          {activeTool === 'rectangle' ? (
-            <>
-              <span className="text-slate-400">
-                {rectangleMode === 'center' ? '總寬W:' : '寬W:'}
-              </span>
-              <span
-                className={`px-1 rounded ${
-                  dynField === 'primary'
-                    ? 'bg-sky-500/25 text-sky-200 border border-sky-400/50'
-                    : 'text-slate-200'
-                }`}
-              >
-                {dynValue !== '' ? dynValue : liveWidth.toFixed(1)}
-              </span>
-              <span className="text-slate-400">
-                {rectangleMode === 'center' ? '總高H:' : '高H:'}
-              </span>
-              <span
-                className={`px-1 rounded ${
-                  dynField === 'secondary'
-                    ? 'bg-sky-500/25 text-sky-200 border border-sky-400/50'
-                    : 'text-slate-200'
-                }`}
-              >
-                {dynAngleValue !== '' ? dynAngleValue : liveHeight.toFixed(1)}
-              </span>
-            </>
-          ) : (
-            <>
-              <span className="text-slate-400">
-                {activeTool === 'circle' ? 'R:' : 'L:'}
-              </span>
-              <span
-                className={`px-1 rounded ${
-                  dynField === 'primary'
-                    ? 'bg-sky-500/25 text-sky-200 border border-sky-400/50'
-                    : 'text-slate-200'
-                }`}
-              >
-                {dynValue !== '' ? dynValue : liveDist.toFixed(1)} mm
-              </span>
-              <span className="text-slate-400">∠</span>
-              <span
-                className={`px-1 rounded ${
-                  dynField === 'secondary'
-                    ? 'bg-sky-500/25 text-sky-200 border border-sky-400/50'
-                    : 'text-slate-200'
-                }`}
-              >
-                {dynAngleValue !== '' ? dynAngleValue : liveAngle.toFixed(1)}°
-              </span>
-            </>
-          )}
-          <span className="text-[10px] text-slate-400">[空白鍵/Enter]</span>
-        </div>
-      )}
+      {settings.dynInput &&
+        (anchorPoint || activeTool === 'move' || activeTool === 'copy') &&
+        activeTool !== 'zoomWindow' && (
+          <div
+            style={{
+              transform: `translate(${Math.min(
+                Math.max(8, canvasSize.width - 260),
+                Math.max(8, mouseScreen.x + 16)
+              )}px, ${Math.min(
+                Math.max(8, canvasSize.height - 56),
+                Math.max(8, mouseScreen.y + 16)
+              )}px)`,
+            }}
+            className="pointer-events-none absolute top-0 left-0 z-20 flex items-center gap-1.5 bg-slate-900/95 border border-sky-500/60 rounded px-2 py-1 shadow-lg font-mono text-xs"
+          >
+            {activeTool === 'move' || activeTool === 'copy' ? (
+              <>
+                <span className="text-sky-300 font-sans">目標X:</span>
+                <span
+                  className={`px-1 rounded ${
+                    dynField === 'primary'
+                      ? 'bg-sky-500/25 text-sky-200 border border-sky-400/50'
+                      : 'text-slate-200'
+                  }`}
+                >
+                  {dynValue !== '' ? dynValue : cursorWorld.x.toFixed(2)}
+                </span>
+                <span className="text-sky-300 font-sans">Y:</span>
+                <span
+                  className={`px-1 rounded ${
+                    dynField === 'secondary'
+                      ? 'bg-sky-500/25 text-sky-200 border border-sky-400/50'
+                      : 'text-slate-200'
+                  }`}
+                >
+                  {dynAngleValue !== ''
+                    ? dynAngleValue
+                    : cursorWorld.y.toFixed(2)}
+                </span>
+                <span className="text-[10px] text-slate-400">
+                  [輸入X,Y+空白鍵跳轉]
+                </span>
+              </>
+            ) : activeTool === 'rectangle' ? (
+              <>
+                <span className="text-slate-400">
+                  {rectangleMode === 'center' ? '總寬W:' : '寬W:'}
+                </span>
+                <span
+                  className={`px-1 rounded ${
+                    dynField === 'primary'
+                      ? 'bg-sky-500/25 text-sky-200 border border-sky-400/50'
+                      : 'text-slate-200'
+                  }`}
+                >
+                  {dynValue !== '' ? dynValue : liveWidth.toFixed(2)}
+                </span>
+                <span className="text-slate-400">
+                  {rectangleMode === 'center' ? '總高H:' : '高H:'}
+                </span>
+                <span
+                  className={`px-1 rounded ${
+                    dynField === 'secondary'
+                      ? 'bg-sky-500/25 text-sky-200 border border-sky-400/50'
+                      : 'text-slate-200'
+                  }`}
+                >
+                  {dynAngleValue !== '' ? dynAngleValue : liveHeight.toFixed(2)}
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="text-slate-400">
+                  {activeTool === 'circle' ? 'R:' : 'L:'}
+                </span>
+                <span
+                  className={`px-1 rounded ${
+                    dynField === 'primary'
+                      ? 'bg-sky-500/25 text-sky-200 border border-sky-400/50'
+                      : 'text-slate-200'
+                  }`}
+                >
+                  {dynValue !== '' ? dynValue : liveDist.toFixed(2)} mm
+                </span>
+                <span className="text-slate-400">∠</span>
+                <span
+                  className={`px-1 rounded ${
+                    dynField === 'secondary'
+                      ? 'bg-sky-500/25 text-sky-200 border border-sky-400/50'
+                      : 'text-slate-200'
+                  }`}
+                >
+                  {dynAngleValue !== '' ? dynAngleValue : liveAngle.toFixed(1)}°
+                </span>
+              </>
+            )}
+            {activeTool !== 'move' && activeTool !== 'copy' && (
+              <span className="text-[10px] text-slate-400">[空白鍵/Enter]</span>
+            )}
+          </div>
+        )}
 
       {/* Text Annotation Input Popover */}
       {pendingTextPos && (

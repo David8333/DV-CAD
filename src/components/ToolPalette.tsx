@@ -614,11 +614,11 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
             <div className="flex items-center gap-1">
               <input
                 type="number"
-                min={0.5}
-                step="1"
+                min={0.01}
+                step="0.01"
                 value={offsetDistance}
                 onChange={(e) =>
-                  onChangeOffsetDistance(Math.max(0.5, Number(e.target.value)))
+                  onChangeOffsetDistance(Math.max(0.01, Number(e.target.value)))
                 }
                 className="w-16 px-2 py-1 text-right text-xs font-mono bg-slate-950 border border-amber-500/50 rounded text-amber-200 focus:outline-none focus:border-amber-400"
               />

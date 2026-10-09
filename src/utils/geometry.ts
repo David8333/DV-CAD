@@ -1491,10 +1491,25 @@ export function getDimensionLinePoints(entity: {
   p1: Point;
   p2: Point;
   offsetPoint: Point;
-}): { dimP1: Point; dimP2: Point; mid: Point; angle: number; length: number } {
+  dimMode?: 'linear' | 'diameter';
+  textOverride?: string;
+}): {
+  dimP1: Point;
+  dimP2: Point;
+  mid: Point;
+  angle: number;
+  length: number;
+  isDiameter: boolean;
+  center: Point;
+  leaderOutside: boolean;
+  leaderElbow?: Point;
+  leaderLanding?: Point;
+} {
   const dx = entity.p2.x - entity.p1.x;
   const dy = entity.p2.y - entity.p1.y;
   const len = Math.hypot(dx, dy);
+  const center = midpoint(entity.p1, entity.p2);
+
   if (len < 1e-5) {
     return {
       dimP1: entity.p1,
@@ -1502,8 +1517,74 @@ export function getDimensionLinePoints(entity: {
       mid: entity.p1,
       angle: 0,
       length: 0,
+      isDiameter: false,
+      center: entity.p1,
+      leaderOutside: false,
     };
   }
+
+  const isDiameter = entity.dimMode === 'diameter';
+
+  if (isDiameter) {
+    const radius = len / 2;
+    const odx = entity.offsetPoint.x - center.x;
+    const ody = entity.offsetPoint.y - center.y;
+    const distFromCenter = Math.hypot(odx, ody);
+    // International standard ISO 129-1 diameter line passes through circle center at an oblique angle (default 30°)
+    const dirAngle =
+      distFromCenter > 1e-3 ? Math.atan2(ody, odx) : 30 * DEG_TO_RAD;
+    const dimP1 = {
+      x: center.x - radius * Math.cos(dirAngle),
+      y: center.y - radius * Math.sin(dirAngle),
+    };
+    const dimP2 = {
+      x: center.x + radius * Math.cos(dirAngle),
+      y: center.y + radius * Math.sin(dirAngle),
+    };
+
+    const leaderOutside = distFromCenter > radius * 1.05;
+    if (leaderOutside) {
+      const shelfSign = Math.cos(dirAngle) >= 0 ? 1 : -1;
+      const shelfLen = Math.max(18, radius * 0.35);
+      const leaderElbow = { ...entity.offsetPoint };
+      const leaderLanding = {
+        x: leaderElbow.x + shelfSign * shelfLen,
+        y: leaderElbow.y,
+      };
+      return {
+        dimP1,
+        dimP2,
+        mid: {
+          x: leaderElbow.x + (shelfSign * shelfLen) / 2,
+          y: leaderElbow.y,
+        },
+        angle: dirAngle,
+        length: len,
+        isDiameter: true,
+        center,
+        leaderOutside: true,
+        leaderElbow,
+        leaderLanding,
+      };
+    }
+
+    const midPt =
+      distFromCenter > 1e-3 && distFromCenter < radius * 0.65
+        ? entity.offsetPoint
+        : center;
+
+    return {
+      dimP1,
+      dimP2,
+      mid: midPt,
+      angle: dirAngle,
+      length: len,
+      isDiameter: true,
+      center,
+      leaderOutside: false,
+    };
+  }
+
   const ux = dx / len;
   const uy = dy / len;
   const nx = -uy;
@@ -1525,7 +1606,112 @@ export function getDimensionLinePoints(entity: {
     mid: midpoint(dimP1, dimP2),
     angle: Math.atan2(dy, dx),
     length: len,
+    isDiameter: false,
+    center,
+    leaderOutside: false,
   };
+}
+
+export function formatToleranceNumber(val: number, forceSign = true): string {
+  if (!Number.isFinite(val)) return '+0.00';
+  const rounded = Math.round(val * 100) / 100;
+  if (Math.abs(rounded) < 1e-6) return '0';
+  const sign = rounded > 0 ? (forceSign ? '+' : '') : '-';
+  const absVal = Math.abs(rounded);
+  return `${sign}${absVal.toFixed(2)}`;
+}
+
+export function formatDimensionLabel(
+  entity: {
+    p1: Point;
+    p2: Point;
+    dimMode?: 'linear' | 'diameter';
+    precision?: 0 | 1 | 2;
+    toleranceMode?: 'none' | 'symmetric' | 'deviation';
+    toleranceUpper?: number;
+    toleranceLower?: number;
+    textOverride?: string;
+  },
+  computedLength?: number
+): {
+  mainText: string;
+  symmetricText: string | null;
+  upperText: string | null;
+  lowerText: string | null;
+  fullText: string;
+} {
+  const len = computedLength ?? dist(entity.p1, entity.p2);
+  const prec: 0 | 1 | 2 =
+    entity.precision === 0 || entity.precision === 1 || entity.precision === 2
+      ? entity.precision
+      : 1;
+  const isDia = entity.dimMode === 'diameter';
+  const baseNum = len.toFixed(prec);
+  const mainText =
+    entity.textOverride && entity.textOverride.trim() !== ''
+      ? entity.textOverride.trim()
+      : isDia
+        ? `Ø${baseNum}`
+        : `${baseNum}`;
+
+  const tolMode = entity.toleranceMode || 'none';
+  if (tolMode === 'symmetric') {
+    const tolVal = Math.max(0.01, Math.abs(entity.toleranceUpper ?? 0.05));
+    const symStr = `±${tolVal.toFixed(2)}`;
+    return {
+      mainText,
+      symmetricText: symStr,
+      upperText: null,
+      lowerText: null,
+      fullText: `${mainText} ${symStr}`,
+    };
+  }
+
+  if (tolMode === 'deviation') {
+    const upVal = entity.toleranceUpper ?? 0.05;
+    const lowVal = entity.toleranceLower ?? -0.05;
+    const upStr = formatToleranceNumber(upVal, true);
+    const lowStr = formatToleranceNumber(lowVal, true);
+    return {
+      mainText,
+      symmetricText: null,
+      upperText: upStr,
+      lowerText: lowStr,
+      fullText: `${mainText} (${upStr}/${lowStr})`,
+    };
+  }
+
+  return {
+    mainText,
+    symmetricText: null,
+    upperText: null,
+    lowerText: null,
+    fullText: mainText,
+  };
+}
+
+export function getSelectionReferencePoint(
+  selectedEntities: CadEntity[]
+): Point {
+  if (selectedEntities.length === 0) return { x: 0, y: 0 };
+  if (selectedEntities.length === 1) {
+    const ent = selectedEntities[0];
+    if (ent.type === 'circle' || ent.type === 'polygon' || ent.type === 'arc') {
+      return { ...ent.center };
+    }
+    if (ent.type === 'line') {
+      return midpoint(ent.p1, ent.p2);
+    }
+    if (ent.type === 'text') {
+      return { ...ent.position };
+    }
+  }
+  const bounds = selectedEntities.map(getEntityBounds);
+  const minX = Math.min(...bounds.map((b) => b.minX));
+  const maxX = Math.max(...bounds.map((b) => b.maxX));
+  const minY = Math.min(...bounds.map((b) => b.minY));
+  const maxY = Math.max(...bounds.map((b) => b.maxY));
+  return { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
 }
 
 export function getEntityBounds(entity: CadEntity): {
@@ -1878,7 +2064,7 @@ export function offsetEntity(
       const d = dist(sidePoint, entity.center);
       const sign = d >= entity.radius ? 1 : -1;
       const nextRadius = entity.radius + sign * offsetDist;
-      if (nextRadius <= 0.5) return null;
+      if (nextRadius < 0.01) return null;
       if (entity.type === 'arc') {
         const [p1, p2, p3] = getArcThreePoints({
           ...entity,
@@ -1899,7 +2085,7 @@ export function offsetEntity(
         sidePoint.y < minY ||
         sidePoint.y > maxY;
       const delta = isOutside ? offsetDist : -offsetDist;
-      if (maxX - minX + 2 * delta <= 1 || maxY - minY + 2 * delta <= 1) {
+      if (maxX - minX + 2 * delta < 0.01 || maxY - minY + 2 * delta < 0.01) {
         return null;
       }
       return {
@@ -2350,7 +2536,7 @@ export function applyGripMove(
       if (gripIndex === 0) return { ...entity, center: newPoint };
       return {
         ...entity,
-        radius: Math.max(1, dist(entity.center, newPoint)),
+        radius: Math.max(0.01, dist(entity.center, newPoint)),
       };
     }
     case 'polyline': {
@@ -2361,6 +2547,28 @@ export function applyGripMove(
       return { ...entity, points: nextPts };
     }
     case 'dimension': {
+      if (entity.dimMode === 'diameter') {
+        const c = midpoint(entity.p1, entity.p2);
+        const r = Math.max(0.01, dist(entity.p1, entity.p2) / 2);
+        if (gripIndex === 2) {
+          const ang = Math.atan2(newPoint.y - c.y, newPoint.x - c.x);
+          return {
+            ...entity,
+            p1: { x: c.x - r * Math.cos(ang), y: c.y - r * Math.sin(ang) },
+            p2: { x: c.x + r * Math.cos(ang), y: c.y + r * Math.sin(ang) },
+            offsetPoint: newPoint,
+          };
+        }
+        if (gripIndex === 0 || gripIndex === 1) {
+          const newR = Math.max(0.01, dist(c, newPoint));
+          const ang = Math.atan2(newPoint.y - c.y, newPoint.x - c.x);
+          return {
+            ...entity,
+            p1: { x: c.x - newR * Math.cos(ang), y: c.y - newR * Math.sin(ang) },
+            p2: { x: c.x + newR * Math.cos(ang), y: c.y + newR * Math.sin(ang) },
+          };
+        }
+      }
       if (gripIndex === 0) return { ...entity, p1: newPoint };
       if (gripIndex === 1) return { ...entity, p2: newPoint };
       return { ...entity, offsetPoint: newPoint };
@@ -2616,6 +2824,7 @@ export function exportToDXF(entities: CadEntity[], layers: CadLayer[]): string {
       );
     } else if (ent.type === 'dimension') {
       const { dimP1, dimP2, mid, length } = getDimensionLinePoints(ent);
+      const { fullText } = formatDimensionLabel(ent, length);
       const fSize = ent.fontSize || 11;
       lines.push(
         '0',
@@ -2647,7 +2856,7 @@ export function exportToDXF(entities: CadEntity[], layers: CadLayer[]): string {
         '40',
         fSize.toFixed(2),
         '1',
-        ent.textOverride || `${length.toFixed(1)}`
+        fullText
       );
     }
   }
@@ -2719,13 +2928,19 @@ export function exportToSVG(entities: CadEntity[], layers: CadLayer[]): string {
         `<text x="${ent.position.x}" y="${sy(ent.position.y)}" fill="${stroke}" font-family="JetBrains Mono, monospace" font-size="${ent.fontSize}">${ent.content}</text>`
       );
     } else if (ent.type === 'dimension') {
-      const { dimP1, dimP2, mid, length } = getDimensionLinePoints(ent);
+      const { dimP1, dimP2, mid, length, isDiameter } =
+        getDimensionLinePoints(ent);
+      const { fullText } = formatDimensionLabel(ent, length);
       const fSize = ent.fontSize || 11;
+      if (!isDiameter) {
+        elements.push(
+          `<line x1="${ent.p1.x}" y1="${sy(ent.p1.y)}" x2="${dimP1.x}" y2="${sy(dimP1.y)}" stroke="${stroke}" stroke-width="1" stroke-opacity="0.6" />`,
+          `<line x1="${ent.p2.x}" y1="${sy(ent.p2.y)}" x2="${dimP2.x}" y2="${sy(dimP2.y)}" stroke="${stroke}" stroke-width="1" stroke-opacity="0.6" />`
+        );
+      }
       elements.push(
-        `<line x1="${ent.p1.x}" y1="${sy(ent.p1.y)}" x2="${dimP1.x}" y2="${sy(dimP1.y)}" stroke="${stroke}" stroke-width="1" stroke-opacity="0.6" />`,
-        `<line x1="${ent.p2.x}" y1="${sy(ent.p2.y)}" x2="${dimP2.x}" y2="${sy(dimP2.y)}" stroke="${stroke}" stroke-width="1" stroke-opacity="0.6" />`,
         `<line x1="${dimP1.x}" y1="${sy(dimP1.y)}" x2="${dimP2.x}" y2="${sy(dimP2.y)}" stroke="${stroke}" stroke-width="1.2" />`,
-        `<text x="${mid.x}" y="${sy(mid.y) - 6}" fill="${stroke}" font-family="JetBrains Mono, monospace" font-size="${fSize}" text-anchor="middle">${ent.textOverride || `${length.toFixed(1)} mm`}</text>`
+        `<text x="${mid.x}" y="${sy(mid.y) - 6}" fill="${stroke}" font-family="JetBrains Mono, monospace" font-size="${fSize}" text-anchor="middle">${fullText}</text>`
       );
     }
   }

@@ -99,6 +99,10 @@ export interface PolygonEntity extends BaseEntity {
   rotation: number; // radians
 }
 
+export type DimensionPrecision = 0 | 1 | 2;
+export type DimensionToleranceMode = 'none' | 'symmetric' | 'deviation';
+export type DimensionMode = 'linear' | 'diameter';
+
 export interface DimensionEntity extends BaseEntity {
   type: 'dimension';
   p1: Point;
@@ -106,6 +110,11 @@ export interface DimensionEntity extends BaseEntity {
   offsetPoint: Point;
   textOverride?: string;
   fontSize?: number; // default 11
+  dimMode?: DimensionMode; // 'linear' | 'diameter' (ISO / CNS international standard circle diameter)
+  precision?: DimensionPrecision; // 0 (第0位), 1 (後第1位), 2 (後第2位)
+  toleranceMode?: DimensionToleranceMode; // 'none' | 'symmetric' (±) | 'deviation' (+ / -)
+  toleranceUpper?: number; // e.g. +0.01 to +99.99
+  toleranceLower?: number; // e.g. -0.01 to -99.99
 }
 
 export interface TextEntity extends BaseEntity {
