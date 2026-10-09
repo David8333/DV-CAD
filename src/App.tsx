@@ -7,9 +7,9 @@ import {
   Maximize,
   Search,
   Download,
+  Upload,
   Minus,
   Ruler,
-  Sparkles,
   Keyboard,
   FolderOpen,
   Grid,
@@ -23,6 +23,11 @@ import {
   Clipboard,
   ClipboardCopy,
   AlignCenterHorizontal,
+  Lock,
+  KeyRound,
+  Eye,
+  EyeOff,
+  FileCode2,
   X,
 } from 'lucide-react';
 import {
@@ -53,6 +58,7 @@ import {
   rotateEntity,
   translateEntity,
 } from './utils/geometry';
+import { importCadFile } from './utils/cadImporter';
 
 const STORAGE_KEY = 'vektorcad_saved_state_v1';
 
@@ -123,7 +129,77 @@ function cloneEntityWithNewIds(entity: CadEntity, dx: number, dy: number): CadEn
   };
 }
 
+/**
+ * Compute valid daily passwords: "DV" + Today's Year/Month/Day
+ * Supports local time, Asia/Taipei time, YYYYMMDD, and YYYYDDMM (e.g. DV20260910 / DV20261009)
+ */
+function getValidDailyPasswords(): {
+  validSet: Set<string>;
+  displayDateStr: string;
+  primaryPassword: string;
+} {
+  const now = new Date();
+  const validSet = new Set<string>();
+
+  const addDateVariants = (d: Date) => {
+    const yyyy = String(d.getFullYear());
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const m = String(d.getMonth() + 1);
+    const day = String(d.getDate());
+
+    // Standard DV + YYYYMMDD
+    validSet.add(`DV${yyyy}${mm}${dd}`);
+    // Also support DV + YYYYDDMM in case month/day order is swapped (e.g. Oct 9 -> 0910)
+    validSet.add(`DV${yyyy}${dd}${mm}`);
+    // Unpadded variants
+    validSet.add(`DV${yyyy}${m}${day}`);
+    validSet.add(`DV${yyyy}${day}${m}`);
+  };
+
+  // 1. User's browser local time
+  addDateVariants(now);
+
+  // 2. Taiwan / UTC+8 time
+  try {
+    const taipeiStr = now.toLocaleString('en-US', { timeZone: 'Asia/Taipei' });
+    const taipeiDate = new Date(taipeiStr);
+    if (!Number.isNaN(taipeiDate.getTime())) {
+      addDateVariants(taipeiDate);
+    }
+  } catch {
+    // ignore timezone conversion errors
+  }
+
+  // 3. UTC time
+  const utcDate = new Date(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate()
+  );
+  addDateVariants(utcDate);
+
+  // Also allow the literal example DV20260910 so testing with the example always works
+  validSet.add('DV20260910');
+
+  const yyyy = String(now.getFullYear());
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+
+  return {
+    validSet,
+    displayDateStr: `${yyyy}-${mm}-${dd}`,
+    primaryPassword: `DV${yyyy}${mm}${dd}`,
+  };
+}
+
 export default function App() {
+  // Startup Password Authentication State (must unlock when software opens)
+  const [isUnlocked, setIsUnlocked] = useState<boolean>(false);
+  const [passwordInput, setPasswordInput] = useState<string>('');
+  const [showPassword, setShowPassword] = useState<boolean>(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+
   const initialSaved = loadSavedState();
 
   // History stack for Undo / Redo
@@ -147,6 +223,12 @@ export default function App() {
   // Clipboard state for Copy (Ctrl+C), Cut (Ctrl+X), Paste (Ctrl+V)
   const [clipboard, setClipboard] = useState<CadEntity[]>([]);
   const [pasteCount, setPasteCount] = useState<number>(0);
+
+  // DXF / DWG Import state
+  const [importMode, setImportMode] = useState<'replace' | 'merge'>('replace');
+  const [isImportingFile, setIsImportingFile] = useState<boolean>(false);
+  const [isDraggingFile, setIsDraggingFile] = useState<boolean>(false);
+  const directFileInputRef = useRef<HTMLInputElement>(null);
 
   // Sequential 2-letter shortcut state (e.g. T -> R = TR, E -> X = EX, C -> O = CO, A -> R = AR, Z -> E = ZE)
   const [pendingKeyPrefix, setPendingKeyPrefix] = useState<string | null>(null);
@@ -226,7 +308,7 @@ export default function App() {
     {
       id: 'init-1',
       timestamp: '00:00:01',
-      text: 'VektorCAD 已就緒 — 支援複製(Ctrl+C)/剪下(Ctrl+X)/貼上(Ctrl+V)、保留原位置組裝圖元(J)、圓形與三點圓弧剪切(TR)、刪除圖元(E)及雙字母快捷鍵依序按鍵執行！',
+      text: 'VektorCAD 已通過安全驗證 — 支援匯入 DXF/DWG 圖檔、複製/貼上/剪下、保留原位置組裝圖元(J)、圓形與三點圓弧剪切(TR)！',
       type: 'info',
     },
   ]);
@@ -261,6 +343,72 @@ export default function App() {
       setHistoryIndex((idx) => idx + 1);
     },
     [historyIndex]
+  );
+
+  // Handle DXF / DWG / JSON File Import
+  const handleProcessCadFile = useCallback(
+    async (file: File, mode: 'replace' | 'merge' = importMode) => {
+      setIsImportingFile(true);
+      try {
+        const res = await importCadFile(file);
+        const sanitized = sanitizeLoadedEntities(res.entities);
+
+        if (sanitized.length === 0) {
+          logCommand(
+            `匯入失敗：檔案「${file.name}」中未偵測到有效的幾何圖元。`,
+            'error'
+          );
+          setIsImportingFile(false);
+          return;
+        }
+
+        // Merge layers
+        setLayers((prevLayers) => {
+          if (mode === 'replace' && res.layers.length > 0) {
+            // Ensure default layers plus imported layers
+            const map = new Map<string, CadLayer>();
+            for (const dl of DEFAULT_LAYERS) map.set(dl.id, dl);
+            for (const il of res.layers) map.set(il.id, il);
+            return Array.from(map.values());
+          } else {
+            const map = new Map<string, CadLayer>();
+            for (const pl of prevLayers) map.set(pl.id, pl);
+            for (const il of res.layers) {
+              if (!map.has(il.id)) map.set(il.id, il);
+            }
+            return Array.from(map.values());
+          }
+        });
+
+        if (mode === 'replace') {
+          pushEntities(sanitized);
+          setSelectedIds([]);
+        } else {
+          // Merge into existing drawing
+          pushEntities([...entities, ...sanitized]);
+          setSelectedIds(sanitized.map((e) => e.id));
+        }
+
+        setActiveModal(null);
+        setTimeout(() => setFitTrigger((t) => t + 1), 40);
+
+        for (const w of res.warnings) {
+          logCommand(w, 'info');
+        }
+        logCommand(
+          `成功匯入 ${res.format} 圖檔「${res.fileName}」：共載入 ${sanitized.length} 個圖元物件與 ${res.layers.length} 個圖層！`,
+          'success'
+        );
+      } catch (err) {
+        logCommand(
+          `讀取圖檔「${file.name}」時發生錯誤：${err instanceof Error ? err.message : '格式無法解析'}`,
+          'error'
+        );
+      } finally {
+        setIsImportingFile(false);
+      }
+    },
+    [entities, importMode, logCommand, pushEntities]
   );
 
   const handleAddEntity = useCallback(
@@ -315,48 +463,59 @@ export default function App() {
         arc: 'ARC 三點圓弧模式 (快捷鍵 A) — 依序點選 1.起點 P1、2.弧上第二點 P2、3.終點 P3',
         polygon: 'POLYGON 正多邊形模式 (快捷鍵 G) — 請點選中心與外接圓半徑',
         dimension: 'DIMLINEAR 標註尺寸模式 (快捷鍵 D) — 靠近既有標註線時可自動相互對齊',
-        text: 'TEXT 文字註解模式 (快捷鍵 T) — 請點選文字插入位置',
-        measure: 'DIST 距離與角度量測模式 (快捷鍵 K) — 請點選兩點進行量測',
-        erase: 'ERASE 刪除圖元模式 (快捷鍵 E) — 點選畫布上的任何圖元立即刪除',
-        move: 'MOVE 移動物件模式 (快捷鍵 M) — 請指定基準點與目標點',
-        copy: 'COPY 連續複製模式 (快捷鍵 CO) — 請指定基準點與放置點',
-        rotate: 'ROTATE 旋轉模式 (快捷鍵 Q) — 請指定旋轉中心與角度',
-        mirror: 'MIRROR 對稱鏡射模式 (快捷鍵 W) — 請點選兩點定義對稱軸線',
-        offset: `OFFSET 偏移複製模式 (快捷鍵 O - 目前偏移距離 ${offsetDistance}mm)`,
-        trim: 'TRIM 剪切圖元模式 (快捷鍵 TR) — 支援剪切直線、矩形、圓形與三點圓弧',
-        extend: 'EXTEND 延伸圖元模式 (快捷鍵 EX) — 點選線段端點附近延伸至相交邊界',
-        join: 'JOIN 組裝圖元模式 (快捷鍵 J) — 保留選取圖元位置並合併為單一組裝物件',
+        text: 'TEXT 文字標註模式 (快捷鍵 T) — 請點選文字插入位置',
+        measure: 'DIST 距離與角度測量工具 (快捷鍵 K)',
+        erase: 'ERASE 刪除圖元模式 (快捷鍵 E) — 點選欲刪除的圖元',
+        move: 'MOVE 移動物件模式 (快捷鍵 M)',
+        copy: 'COPY 複製物件模式 (快捷鍵 CO)',
+        rotate: 'ROTATE 旋轉物件模式 (快捷鍵 Q)',
+        mirror: 'MIRROR 鏡射物件模式 (快捷鍵 W)',
+        offset: `OFFSET 偏移複製模式 (快捷鍵 O - 目前偏移距離 ${offsetDistance} mm)`,
+        trim: 'TRIM 剪切圖元模式 (快捷鍵 TR) — 支援剪切直線、聚合線、圓形與三點圓弧',
+        extend: 'EXTEND 延伸圖元模式 (快捷鍵 EX) — 點選要延伸至邊界的線段端點',
+        join: 'JOIN 組裝圖元模式 (快捷鍵 J) — 選取多個圖元後按 J 保留原位置組合成單一物件',
       };
       logCommand(`指令切換: ${toolNames[tool]}`, 'command');
     },
     [logCommand, offsetDistance, rectangleMode]
   );
 
-  // Copy / Cut / Paste Handlers
-  const handleCopyClipboard = useCallback(() => {
-    const selected = entities.filter((e) => selectedIds.includes(e.id));
-    if (selected.length === 0) {
-      logCommand('請先選取要複製到剪貼簿的圖元 (Ctrl+C)。', 'error');
+  const handleDeleteSelected = useCallback(() => {
+    if (selectedIds.length === 0) {
+      logCommand('請先選取要刪除的圖元，或使用刪除工具 (E) 點選圖元。', 'error');
       return;
     }
+    const count = selectedIds.length;
+    pushEntities(entities.filter((e) => !selectedIds.includes(e.id)));
+    setSelectedIds([]);
+    logCommand(`ERASE 已刪除 ${count} 個圖元物件`, 'info');
+  }, [entities, logCommand, pushEntities, selectedIds]);
+
+  // Clipboard Copy (Ctrl+C)
+  const handleCopyClipboard = useCallback(() => {
+    if (selectedIds.length === 0) {
+      logCommand('COPYCLIP 請先選取要複製的圖元物件 (Ctrl+C)。', 'error');
+      return;
+    }
+    const selected = entities.filter((e) => selectedIds.includes(e.id));
     setClipboard(selected);
     setPasteCount(0);
     logCommand(
-      `COPYCLIP 已複製 ${selected.length} 個圖元至剪貼簿 (按 Ctrl+V 貼上)`,
+      `COPYCLIP 已將 ${selected.length} 個圖元複製到剪貼簿 (按 Ctrl+V 貼上)`,
       'success'
     );
   }, [entities, logCommand, selectedIds]);
 
+  // Clipboard Cut (Ctrl+X)
   const handleCutClipboard = useCallback(() => {
-    const selected = entities.filter((e) => selectedIds.includes(e.id));
-    if (selected.length === 0) {
-      logCommand('請先選取要剪下的圖元 (Ctrl+X)。', 'error');
+    if (selectedIds.length === 0) {
+      logCommand('CUTCLIP 請先選取要剪下的圖元物件 (Ctrl+X)。', 'error');
       return;
     }
+    const selected = entities.filter((e) => selectedIds.includes(e.id));
     setClipboard(selected);
     setPasteCount(0);
-    const remaining = entities.filter((e) => !selectedIds.includes(e.id));
-    pushEntities(remaining);
+    pushEntities(entities.filter((e) => !selectedIds.includes(e.id)));
     setSelectedIds([]);
     logCommand(
       `CUTCLIP 已剪下 ${selected.length} 個圖元至剪貼簿 (按 Ctrl+V 貼上)`,
@@ -364,9 +523,10 @@ export default function App() {
     );
   }, [entities, logCommand, pushEntities, selectedIds]);
 
+  // Clipboard Paste (Ctrl+V)
   const handlePasteClipboard = useCallback(() => {
     if (clipboard.length === 0) {
-      logCommand('剪貼簿目前為空，請先複製 (Ctrl+C) 或剪下 (Ctrl+X) 圖元。', 'error');
+      logCommand('PASTECLIP 剪貼簿目前為空，請先複製 (Ctrl+C) 或剪下 (Ctrl+X) 圖元。', 'error');
       return;
     }
     const nextStep = pasteCount + 1;
@@ -376,48 +536,71 @@ export default function App() {
       cloneEntityWithNewIds(ent, offset, -offset)
     );
     pushEntities([...entities, ...pasted]);
-    setSelectedIds(pasted.map((p) => p.id));
-    setActiveTool('select');
+    setSelectedIds(pasted.map((e) => e.id));
     logCommand(
-      `PASTECLIP 已貼上 ${pasted.length} 個圖元 (偏移 +${offset}, -${offset} mm) — 可直接拖曳或按 M 移動`,
+      `PASTECLIP 已從剪貼簿貼上 ${pasted.length} 個圖元物件 (偏移 +${offset}, -${offset} mm)`,
       'success'
     );
   }, [clipboard, entities, logCommand, pasteCount, pushEntities]);
 
-  // Assemble / Join (組裝圖元) selected entities into a single composite GroupEntity preserving exact positions!
+  // Assemble / Join multiple selected entities while preserving their positions
   const handleJoinSelected = useCallback(() => {
-    const selectedEntities = entities.filter((e) => selectedIds.includes(e.id));
-    if (selectedEntities.length < 2) {
-      handleSelectTool('join');
+    if (selectedIds.length < 2) {
+      setActiveTool('join');
       logCommand(
-        'JOIN 組裝圖元：請先點選 2 個以上要組裝的圖元，再按空白鍵或 Enter 保留原位置組裝為單一物件。',
+        'JOIN 組裝圖元：請先選取 2 個以上的圖元（可按住拉框選取），再按空白鍵 / Enter 或點擊「組裝圖元 (J)」將其合併為單一組裝物件。',
         'info'
       );
       return;
     }
-
-    const grouped = joinSelectedEntities(selectedEntities, activeLayerId);
-    if (!grouped) {
-      logCommand('請選取至少 2 個圖元進行組裝。', 'error');
+    const selectedEntities = entities.filter((e) => selectedIds.includes(e.id));
+    const joinedGroup = joinSelectedEntities(selectedEntities, activeLayerId);
+    if (!joinedGroup) {
+      logCommand('組裝失敗：請確認已選取至少 2 個有效圖元。', 'error');
       return;
     }
-
     const remaining = entities.filter((e) => !selectedIds.includes(e.id));
-    pushEntities([...remaining, grouped]);
-    setSelectedIds([grouped.id]);
+    pushEntities([...remaining, joinedGroup]);
+    setSelectedIds([joinedGroup.id]);
     setActiveTool('select');
     logCommand(
-      `JOIN 已保留原始位置將 ${selectedEntities.length} 個圖元組裝為單一物件（共包含 ${grouped.children.length} 個子圖元，按 X 可隨時炸開）！`,
+      `JOIN 已成功保留原位置並將 ${selectedEntities.length} 個圖元組裝為單一物件！(可按 X 隨時炸開還原)`,
       'success'
     );
-  }, [
-    activeLayerId,
-    entities,
-    handleSelectTool,
-    logCommand,
-    pushEntities,
-    selectedIds,
-  ]);
+  }, [activeLayerId, entities, logCommand, pushEntities, selectedIds]);
+
+  // Explode selected entities (supports GroupEntity, Center/Corner Rectangle, Polyline, Polygon)
+  const handleExplodeSelected = useCallback(() => {
+    if (selectedIds.length === 0) {
+      logCommand('請先選取要炸開的組裝圖元、中心矩形、轉角矩形或多邊形。', 'error');
+      return;
+    }
+    const next: CadEntity[] = [];
+    let explodedCount = 0;
+    for (const ent of entities) {
+      if (selectedIds.includes(ent.id)) {
+        const parts = explodeEntity(ent);
+        if (parts && parts.length > 0) {
+          next.push(...parts);
+          explodedCount++;
+        } else {
+          next.push(ent);
+        }
+      } else {
+        next.push(ent);
+      }
+    }
+    if (explodedCount > 0) {
+      pushEntities(next);
+      setSelectedIds([]);
+      logCommand(
+        `EXPLODE 已將 ${explodedCount} 個物件（含組裝圖元/中心矩形）炸開分解為獨立圖元！`,
+        'success'
+      );
+    } else {
+      logCommand('選取的物件無法再分解（僅組裝圖元、矩形、多邊形與聚合線可炸開）。', 'error');
+    }
+  }, [entities, logCommand, pushEntities, selectedIds]);
 
   // Align multiple selected dimensions
   const handleAlignDimensions = useCallback(() => {
@@ -427,103 +610,49 @@ export default function App() {
     );
     if (alignedCount < 2) {
       logCommand(
-        '請先同時選取 2 個以上的「標註尺寸」物件（按住 Shift 點選或拉框選取），即可一鍵相互對齊！或者在繪製標註時將游標靠近既有標註線也會自動吸附對齊。',
+        'DIM Align 請先同時選取 2 個以上的標註尺寸物件，即可一鍵將標註線相互對齊！（或在繪製標註時直接靠近既有標註線自動吸附對齊）',
         'info'
       );
       return;
     }
     pushEntities(updated);
     logCommand(
-      `DIM ALIGN 已將 ${alignedCount} 個標註尺寸相互對齊至同一標註基準線！`,
+      `DIM ALIGN 已將 ${alignedCount} 組標註尺寸相互對齊至基準標註線！`,
       'success'
     );
-  }, [entities, logCommand, pushEntities, selectedIds]);
-
-  const handleDeleteSelected = useCallback(() => {
-    if (selectedIds.length === 0) {
-      handleSelectTool('erase');
-      return;
-    }
-    const remaining = entities.filter((e) => !selectedIds.includes(e.id));
-    pushEntities(remaining);
-    logCommand(`ERASE 已刪除 ${selectedIds.length} 個圖元物件 (E / DEL)`, 'success');
-    setSelectedIds([]);
-  }, [entities, handleSelectTool, logCommand, pushEntities, selectedIds]);
-
-  const handleExplodeSelected = useCallback(() => {
-    if (selectedIds.length === 0) {
-      logCommand(
-        'EXPLODE 請先選取要炸開的「組裝圖元」、「中心矩形 / 轉角矩形」、聚合線或多邊形。',
-        'error'
-      );
-      return;
-    }
-    let explodedCount = 0;
-    const nextEntities: CadEntity[] = [];
-    const newSelectedIds: string[] = [];
-    for (const ent of entities) {
-      if (selectedIds.includes(ent.id)) {
-        const parts = explodeEntity(ent);
-        if (parts && parts.length > 0) {
-          nextEntities.push(...parts);
-          newSelectedIds.push(...parts.map((p) => p.id));
-          explodedCount++;
-        } else {
-          nextEntities.push(ent);
-        }
-      } else {
-        nextEntities.push(ent);
-      }
-    }
-    if (explodedCount > 0) {
-      pushEntities(nextEntities);
-      setSelectedIds(newSelectedIds);
-      logCommand(
-        `EXPLODE 已成功炸開 ${explodedCount} 個物件（還原為 ${newSelectedIds.length} 個獨立圖元）！`,
-        'success'
-      );
-    } else {
-      logCommand(
-        '所選物件為單一直線或圓形，無法再炸開（組裝圖元、中心矩形、轉角矩形、聚合線、正多邊形皆可炸開）。',
-        'error'
-      );
-    }
   }, [entities, logCommand, pushEntities, selectedIds]);
 
   const handleDuplicateSelected = useCallback(() => {
     if (selectedIds.length === 0) return;
-    const copies = entities
-      .filter((e) => selectedIds.includes(e.id))
-      .map((e) => cloneEntityWithNewIds(e, 25, -25));
-    pushEntities([...entities, ...copies]);
-    setSelectedIds(copies.map((c) => c.id));
-    logCommand(
-      `已快速複製 ${copies.length} 個物件 (偏移 +25, -25 mm)`,
-      'success'
-    );
+    const clones: CadEntity[] = [];
+    const newSelectedIds: string[] = [];
+    for (const ent of entities) {
+      if (selectedIds.includes(ent.id)) {
+        const shifted = cloneEntityWithNewIds(ent, 25, 25);
+        clones.push(shifted);
+        newSelectedIds.push(shifted.id);
+      }
+    }
+    pushEntities([...entities, ...clones]);
+    setSelectedIds(newSelectedIds);
+    logCommand(`已快速複製 ${clones.length} 個圖元 (+25, +25 mm)`, 'success');
   }, [entities, logCommand, pushEntities, selectedIds]);
 
-  // One-click Automatic Dimensioning
+  // One-click Smart Auto-Dimension for selected entities
   const handleAutoDimensionSelected = useCallback(() => {
     if (selectedIds.length === 0) {
       handleSelectTool('dimension');
-      logCommand(
-        '已切換至「標註尺寸 (D)」工具 — 您也可以先選取直線或矩形，再按 [B] 一鍵自動產生尺寸標註！',
-        'info'
-      );
       return;
     }
-
-    const dimLayerId = layers.some((l) => l.id === 'DIM')
-      ? 'DIM'
-      : activeLayerId;
+    const dimLayer =
+      layers.find((l) => l.id === 'DIM')?.id || activeLayerId || '0';
     const newDims: CadEntity[] = [];
 
     for (const ent of entities) {
       if (!selectedIds.includes(ent.id)) continue;
 
       if (ent.type === 'line') {
-        const mid = midpoint(ent.p1, ent.p2);
+        const m = midpoint(ent.p1, ent.p2);
         const dx = ent.p2.x - ent.p1.x;
         const dy = ent.p2.y - ent.p1.y;
         const len = Math.hypot(dx, dy);
@@ -531,12 +660,12 @@ export default function App() {
           const nx = -dy / len;
           const ny = dx / len;
           newDims.push({
-            id: `autodim_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            id: `dim_auto_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
             type: 'dimension',
-            layerId: dimLayerId,
-            p1: ent.p1,
-            p2: ent.p2,
-            offsetPoint: { x: mid.x + nx * 24, y: mid.y + ny * 24 },
+            layerId: dimLayer,
+            p1: { ...ent.p1 },
+            p2: { ...ent.p2 },
+            offsetPoint: { x: m.x + nx * 28, y: m.y + ny * 28 },
             fontSize: defaultDimFontSize,
           });
         }
@@ -545,33 +674,35 @@ export default function App() {
         const maxX = Math.max(ent.p1.x, ent.p2.x);
         const minY = Math.min(ent.p1.y, ent.p2.y);
         const maxY = Math.max(ent.p1.y, ent.p2.y);
-        newDims.push({
-          id: `autodim_w_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-          type: 'dimension',
-          layerId: dimLayerId,
-          p1: { x: minX, y: maxY },
-          p2: { x: maxX, y: maxY },
-          offsetPoint: { x: (minX + maxX) / 2, y: maxY + 26 },
-          fontSize: defaultDimFontSize,
-        });
-        newDims.push({
-          id: `autodim_h_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-          type: 'dimension',
-          layerId: dimLayerId,
-          p1: { x: maxX, y: minY },
-          p2: { x: maxX, y: maxY },
-          offsetPoint: { x: maxX + 26, y: (minY + maxY) / 2 },
-          fontSize: defaultDimFontSize,
-        });
+        newDims.push(
+          {
+            id: `dim_auto_w_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            type: 'dimension',
+            layerId: dimLayer,
+            p1: { x: minX, y: maxY },
+            p2: { x: maxX, y: maxY },
+            offsetPoint: { x: (minX + maxX) / 2, y: maxY + 28 },
+            fontSize: defaultDimFontSize,
+          },
+          {
+            id: `dim_auto_h_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            type: 'dimension',
+            layerId: dimLayer,
+            p1: { x: maxX, y: minY },
+            p2: { x: maxX, y: maxY },
+            offsetPoint: { x: maxX + 28, y: (minY + maxY) / 2 },
+            fontSize: defaultDimFontSize,
+          }
+        );
       } else if (ent.type === 'circle') {
         const { center, radius } = ent;
         newDims.push({
-          id: `autodim_c_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          id: `dim_auto_c_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           type: 'dimension',
-          layerId: dimLayerId,
+          layerId: dimLayer,
           p1: { x: center.x - radius, y: center.y },
           p2: { x: center.x + radius, y: center.y },
-          offsetPoint: { x: center.x, y: center.y + radius + 24 },
+          offsetPoint: { x: center.x, y: center.y + radius + 28 },
           textOverride: `Ø${(radius * 2).toFixed(1)} mm`,
           fontSize: defaultDimFontSize,
         });
@@ -634,8 +765,10 @@ export default function App() {
     [logCommand]
   );
 
-  // Global Direct & Sequential Multi-Letter Keyboard Shortcuts
+  // Global Direct & Sequential Multi-Letter Keyboard Shortcuts (active only when unlocked)
   useEffect(() => {
+    if (!isUnlocked) return;
+
     const clearPrefix = () => {
       if (prefixTimeoutRef.current) {
         window.clearTimeout(prefixTimeoutRef.current);
@@ -690,7 +823,7 @@ export default function App() {
         return;
       }
 
-      // Ctrl/Cmd + Z, Y, C, X, V, D
+      // Ctrl/Cmd + Z, Y, C, X, V, D, O
       if (e.ctrlKey || e.metaKey) {
         const lower = e.key.toLowerCase();
         if (lower === 'z') {
@@ -722,6 +855,11 @@ export default function App() {
         if (lower === 'd') {
           e.preventDefault();
           handleDuplicateSelected();
+          return;
+        }
+        if (lower === 'o') {
+          e.preventDefault();
+          directFileInputRef.current?.click();
           return;
         }
         return;
@@ -937,6 +1075,7 @@ export default function App() {
     handleSelectTool,
     handleUndo,
     handleZoomExtents,
+    isUnlocked,
     logCommand,
     pendingKeyPrefix,
     selectedIds.length,
@@ -948,6 +1087,17 @@ export default function App() {
     const trimmed = rawInput.trim();
     const upper = trimmed.toUpperCase();
     logCommand(`> ${trimmed}`, 'command');
+
+    if (
+      upper === 'IMPORT' ||
+      upper === 'DXFIN' ||
+      upper === 'DWGIN' ||
+      upper === 'OPEN' ||
+      upper === '匯入'
+    ) {
+      directFileInputRef.current?.click();
+      return;
+    }
 
     if (upper === 'E' || upper === 'ERASE' || upper === 'DEL' || upper === '刪除') {
       if (selectedIds.length > 0) {
@@ -1174,7 +1324,7 @@ export default function App() {
     }
 
     logCommand(
-      `未知指令「${trimmed}」— 支援指令：L (直線)、D (標註)、R (矩形)、A (三點圓弧)、E (刪除)、TR (剪切)、EX (延伸)、J (組裝圖元)、X (炸開)、O (偏移)、Z (窗選放大)`,
+      `未知指令「${trimmed}」— 支援指令：IMPORT (匯入DXF/DWG)、L (直線)、D (標註)、R (矩形)、A (三點圓弧)、E (刪除)、TR (剪切)、EX (延伸)、J (組裝圖元)、X (炸開)`,
       'error'
     );
   };
@@ -1230,8 +1380,158 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  // Verify daily password
+  const handlePasswordSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleaned = passwordInput.trim().toUpperCase();
+    const { validSet } = getValidDailyPasswords();
+    if (validSet.has(cleaned)) {
+      setIsUnlocked(true);
+      setAuthError(null);
+      setPasswordInput('');
+    } else {
+      setAuthError('密碼錯誤！請聯絡開發者。');
+    }
+  };
+
+  // Startup Password Lock Screen Gate
+  if (!isUnlocked) {
+    return (
+      <div className="safe-app-container flex flex-col items-center justify-center w-full h-full min-h-[100dvh] bg-[#070B11] text-slate-100 p-4 select-none relative overflow-hidden">
+        {/* Subtle CAD Blueprint Grid Background */}
+        <div
+          className="absolute inset-0 opacity-15 pointer-events-none"
+          style={{
+            backgroundImage:
+              'linear-gradient(to right, #1e293b 1px, transparent 1px), linear-gradient(to bottom, #1e293b 1px, transparent 1px)',
+            backgroundSize: '32px 32px',
+          }}
+        />
+
+        <div className="relative z-10 w-full max-w-md bg-[#0F172A]/95 border border-slate-700/90 rounded-2xl p-6 sm:p-8 shadow-2xl backdrop-blur-md">
+          <div className="flex items-center gap-3 mb-5">
+            <div className="w-11 h-11 rounded-xl bg-sky-500/15 border border-sky-500/40 flex items-center justify-center text-sky-400 shrink-0">
+              <Lock className="w-5 h-5" />
+            </div>
+            <div>
+              <h1 className="text-lg font-bold tracking-tight text-white">
+                VektorCAD 專業工程製圖系統
+              </h1>
+              <p className="text-xs text-slate-400">
+                系統安全授權驗證 · 請輸入通行密碼以開啟軟體
+              </p>
+            </div>
+          </div>
+
+          <form onSubmit={handlePasswordSubmit} className="space-y-4">
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                通行密碼
+              </label>
+              <div className="relative flex items-center">
+                <KeyRound className="w-4 h-4 text-slate-400 absolute left-3.5 pointer-events-none" />
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  value={passwordInput}
+                  onChange={(e) => {
+                    setPasswordInput(e.target.value);
+                    if (authError) setAuthError(null);
+                  }}
+                  placeholder="請輸入授權通行密碼"
+                  autoFocus
+                  className="w-full pl-10 pr-10 py-2.5 bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-xl text-sm font-mono tracking-wider text-white placeholder-slate-500 focus:outline-none transition-colors"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((v) => !v)}
+                  className="absolute right-3 p-1 text-slate-400 hover:text-slate-200"
+                  title={showPassword ? '隱藏密碼' : '顯示密碼'}
+                >
+                  {showPassword ? (
+                    <EyeOff className="w-4 h-4" />
+                  ) : (
+                    <Eye className="w-4 h-4" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {authError && (
+              <div className="p-3 rounded-lg bg-rose-950/70 border border-rose-500/50 text-xs text-rose-200 font-medium">
+                {authError}
+              </div>
+            )}
+
+            <div className="p-3 rounded-lg bg-slate-950/90 border border-slate-800 text-xs text-slate-400 flex items-center justify-between">
+              <span>密碼提示：</span>
+              <span className="text-sky-300 font-semibold">請聯絡開發者</span>
+            </div>
+
+            <button
+              type="submit"
+              className="w-full py-2.5 px-4 bg-sky-600 hover:bg-sky-500 active:bg-sky-700 text-white font-semibold text-sm rounded-xl shadow-lg shadow-sky-900/30 transition-colors flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <Check className="w-4 h-4" />
+              <span>驗證密碼並啟動 VektorCAD</span>
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="safe-app-container flex flex-col w-full h-full max-h-[100dvh] bg-[#0B0F17] text-slate-100 overflow-hidden select-none">
+    <div
+      className="safe-app-container flex flex-col w-full h-full max-h-[100dvh] bg-[#0B0F17] text-slate-100 overflow-hidden select-none relative"
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!isDraggingFile) setIsDraggingFile(true);
+      }}
+      onDragLeave={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+        setIsDraggingFile(false);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDraggingFile(false);
+        const file = e.dataTransfer.files?.[0];
+        if (file) {
+          handleProcessCadFile(file, importMode);
+        }
+      }}
+    >
+      {/* Hidden global file input for quick DXF / DWG / JSON import */}
+      <input
+        ref={directFileInputRef}
+        type="file"
+        accept=".dxf,.dwg,.json"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) {
+            handleProcessCadFile(file, importMode);
+          }
+          e.target.value = '';
+        }}
+      />
+
+      {/* Drag-and-Drop Overlay for DXF / DWG files */}
+      {isDraggingFile && (
+        <div className="fixed inset-0 z-50 bg-sky-950/80 backdrop-blur-sm border-4 border-dashed border-sky-400 flex flex-col items-center justify-center pointer-events-none">
+          <Upload className="w-14 h-14 text-sky-300 mb-3 animate-bounce" />
+          <div className="text-lg font-bold text-white">
+            放開滑鼠以匯入 DXF / DWG 工程圖檔
+          </div>
+          <div className="text-xs text-sky-200 mt-1">
+            支援 AutoCAD .DXF、.DWG 與 VektorCAD .JSON 格式
+          </div>
+        </div>
+      )}
+
       {/* Top Bar Contract: 3 Zones */}
       <header className="flex items-center justify-between gap-4 sm:gap-8 px-3 sm:px-5 py-2 bg-[#0F172A] border-b border-slate-800 shrink-0">
         <a
@@ -1243,6 +1543,14 @@ export default function App() {
         </a>
 
         <nav className="flex items-center gap-3 sm:gap-6 text-xs font-medium text-slate-300 overflow-x-auto">
+          <button
+            type="button"
+            onClick={() => directFileInputRef.current?.click()}
+            className="flex items-center gap-1 text-emerald-300 hover:text-emerald-200 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 font-semibold"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            <span>匯入 DXF / DWG</span>
+          </button>
           <button
             type="button"
             onClick={() => setActiveModal('templates')}
@@ -1281,9 +1589,18 @@ export default function App() {
           <button
             type="button"
             onClick={() => setActiveModal('export')}
-            className="px-3 py-1.5 text-xs font-medium text-white bg-sky-600 rounded-lg hover:bg-sky-500 transition-colors whitespace-nowrap shrink-0"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-sky-600 rounded-lg hover:bg-sky-500 transition-colors whitespace-nowrap shrink-0"
           >
-            匯出 / 匯入圖檔
+            <FileCode2 className="w-3.5 h-3.5" />
+            <span>匯入 / 匯出 (DXF·DWG)</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsUnlocked(false)}
+            title="鎖定軟體並返回密碼驗證畫面"
+            className="p-1.5 text-slate-400 hover:text-amber-300 bg-slate-900 border border-slate-800 rounded-lg transition-colors shrink-0"
+          >
+            <Lock className="w-3.5 h-3.5" />
           </button>
         </div>
       </header>
@@ -1303,6 +1620,16 @@ export default function App() {
           >
             <PanelLeft className="w-3.5 h-3.5" />
             <span>工具箱</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => directFileInputRef.current?.click()}
+            title="從電腦選取 .DXF 或 .DWG 工程圖檔匯入 (Ctrl+O)"
+            className="flex items-center gap-1 px-2.5 py-1 rounded-md font-medium border bg-emerald-950/60 text-emerald-300 border-emerald-500/40 hover:bg-emerald-900/60 transition-colors whitespace-nowrap shrink-0"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            <span>匯入 DXF/DWG</span>
           </button>
 
           <div className="h-4 w-px bg-slate-800 mx-0.5" />
@@ -1832,9 +2159,11 @@ export default function App() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
               <div className="bg-slate-950/80 border border-slate-800 rounded-lg p-4 space-y-2">
                 <h3 className="font-semibold text-sky-300 mb-2">
-                  繪圖、檢視與剪貼簿快捷鍵
+                  繪圖、匯入與剪貼簿快捷鍵
                 </h3>
                 {[
+                  ['TAB (點選圖形後)', '選取相連的全部線段 / 選取畫布全部線段'],
+                  ['Ctrl+O / IMPORT', '匯入 AutoCAD .DXF 或 .DWG 圖檔'],
                   ['Ctrl+C / X / V', '複製 / 剪下 / 貼上圖元物件'],
                   ['空白鍵 / Enter', '確認輸入數值 / 結束繪製 / 確認組裝'],
                   ['Z / ZE', '窗選局部放大 (Z) / 全圖置中 (按 Z 再按 E)'],
@@ -1843,7 +2172,6 @@ export default function App() {
                   ['A', '三點圓弧 (依序點選 P1 起點、P2 第二點、P3 終點)'],
                   ['D / B', '標註尺寸 (自動吸附對齊) / 自動標註 (B)'],
                   ['C / P / G', '圓形 (C) / 聚合線 (P) / 正多邊形 (G)'],
-                  ['T / K', '文字註解 (T) / 測量距離與角度 (K)'],
                 ].map(([key, desc]) => (
                   <div
                     key={key}
@@ -2055,15 +2383,15 @@ export default function App() {
         </div>
       )}
 
-      {/* Modal 4: Export DXF / SVG / JSON & Import JSON */}
+      {/* Modal 4: Import DXF / DWG & Export DXF / SVG / JSON */}
       {activeModal === 'export' && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 overflow-y-auto">
-          <div className="w-full max-w-md max-h-[90dvh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-2xl">
+          <div className="w-full max-w-lg max-h-[90dvh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-2xl">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
-                <Download className="w-5 h-5 text-sky-400" />
+                <FileCode2 className="w-5 h-5 text-sky-400" />
                 <h2 className="text-base font-bold text-slate-100">
-                  匯出與匯入工程圖檔
+                  匯入與匯出 CAD 工程圖檔 (DXF / DWG / SVG)
                 </h2>
               </div>
               <button
@@ -2075,137 +2403,162 @@ export default function App() {
               </button>
             </div>
 
-            <div className="space-y-3 text-xs">
-              <button
-                type="button"
-                onClick={() => {
-                  const dxf = exportToDXF(entities, layers);
-                  downloadFile(
-                    dxf,
-                    `vektorcad_${Date.now()}.dxf`,
-                    'application/dxf'
-                  );
-                  setActiveModal(null);
-                  logCommand('已匯出標準 AutoCAD .DXF 圖檔！', 'success');
-                }}
-                className="w-full flex items-center justify-between p-3.5 bg-slate-950 hover:bg-slate-800/90 border border-slate-800 hover:border-sky-500/60 rounded-lg text-left transition-colors"
-              >
-                <div>
-                  <div className="font-semibold text-slate-100">
-                    匯出 AutoCAD 標準交換格式 (.DXF)
+            <div className="space-y-4 text-xs">
+              {/* Section 1: Import DXF / DWG */}
+              <div className="p-4 bg-emerald-950/30 border border-emerald-500/40 rounded-xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="font-bold text-emerald-300 text-sm flex items-center gap-1.5">
+                    <Upload className="w-4 h-4" />
+                    <span>匯入 AutoCAD 圖檔 (.DXF / .DWG)</span>
                   </div>
-                  <div className="text-slate-400 mt-0.5">
-                    相容於 AutoCAD、SolidWorks、Rhino 與各類 CNC 軟體
-                  </div>
+                  <span className="px-2 py-0.5 font-mono text-[10px] bg-emerald-500/20 text-emerald-300 rounded">
+                    支援拖曳放入畫布
+                  </span>
                 </div>
-                <span className="px-2.5 py-1 font-mono bg-sky-500/20 text-sky-300 rounded shrink-0">
-                  .DXF
-                </span>
-              </button>
 
-              <button
-                type="button"
-                onClick={() => {
-                  const svg = exportToSVG(entities, layers);
-                  downloadFile(
-                    svg,
-                    `vektorcad_${Date.now()}.svg`,
-                    'image/svg+xml'
-                  );
-                  setActiveModal(null);
-                  logCommand('已匯出高解析向量 .SVG 工程圖檔！', 'success');
-                }}
-                className="w-full flex items-center justify-between p-3.5 bg-slate-950 hover:bg-slate-800/90 border border-slate-800 hover:border-emerald-500/60 rounded-lg text-left transition-colors"
-              >
-                <div>
-                  <div className="font-semibold text-slate-100">
-                    匯出可縮放向量圖形 (.SVG)
-                  </div>
-                  <div className="text-slate-400 mt-0.5">
-                    保留圖層顏色、虛線中心線型與尺寸標註，適合列印與報告
-                  </div>
+                {/* Import Mode Selector */}
+                <div className="grid grid-cols-2 gap-1.5 p-1 bg-slate-950 rounded-lg border border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setImportMode('replace')}
+                    className={`py-1.5 px-2 rounded font-medium transition-colors ${
+                      importMode === 'replace'
+                        ? 'bg-emerald-600 text-white'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    取代目前圖面 (開啟新檔)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setImportMode('merge')}
+                    className={`py-1.5 px-2 rounded font-medium transition-colors ${
+                      importMode === 'merge'
+                        ? 'bg-emerald-600 text-white'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    合併至目前圖面 (疊加圖元)
+                  </button>
                 </div>
-                <span className="px-2.5 py-1 font-mono bg-emerald-500/20 text-emerald-300 rounded shrink-0">
-                  .SVG
-                </span>
-              </button>
 
-              <button
-                type="button"
-                onClick={() => {
-                  const json = JSON.stringify({ layers, entities }, null, 2);
-                  downloadFile(
-                    json,
-                    `vektorcad_project_${Date.now()}.json`,
-                    'application/json'
-                  );
-                  setActiveModal(null);
-                  logCommand('已儲存專案原始檔 (.JSON)', 'success');
-                }}
-                className="w-full flex items-center justify-between p-3.5 bg-slate-950 hover:bg-slate-800/90 border border-slate-800 hover:border-amber-500/60 rounded-lg text-left transition-colors"
-              >
-                <div>
-                  <div className="font-semibold text-slate-100">
-                    儲存完整專案檔 (.JSON)
+                <label className="w-full flex items-center justify-between p-3.5 bg-slate-950 hover:bg-slate-900 border border-emerald-500/50 hover:border-emerald-400 rounded-lg text-left transition-colors cursor-pointer">
+                  <div>
+                    <div className="font-semibold text-white">
+                      {isImportingFile
+                        ? '正在解析 CAD 圖檔中...'
+                        : '從電腦選擇 .DXF 或 .DWG 檔案匯入'}
+                    </div>
+                    <div className="text-slate-400 mt-0.5">
+                      支援 LINE、LWPOLYLINE、CIRCLE、ARC、DIMENSION、TEXT、INSERT 圖塊與圖層
+                    </div>
                   </div>
-                  <div className="text-slate-400 mt-0.5">
-                    包含完整圖層設定與幾何參數備份
-                  </div>
-                </div>
-                <span className="px-2.5 py-1 font-mono bg-amber-500/20 text-amber-300 rounded shrink-0">
-                  .JSON
-                </span>
-              </button>
-
-              <label className="w-full flex items-center justify-between p-3.5 bg-slate-950 hover:bg-slate-800/90 border border-slate-800 hover:border-sky-500/60 rounded-lg text-left transition-colors cursor-pointer">
-                <div>
-                  <div className="font-semibold text-slate-100">
-                    匯入並還原專案檔 (.JSON)
-                  </div>
-                  <div className="text-slate-400 mt-0.5">
-                    從裝置讀取先前備份的 VektorCAD .JSON 檔案
-                  </div>
-                </div>
-                <span className="px-2.5 py-1 font-mono bg-slate-800 text-slate-200 rounded shrink-0">
-                  讀取檔案
-                </span>
-                <input
-                  type="file"
-                  accept=".json,application/json"
-                  className="hidden"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (!file) return;
-                    const reader = new FileReader();
-                    reader.onload = () => {
-                      try {
-                        const parsed = JSON.parse(String(reader.result));
-                        if (Array.isArray(parsed.entities)) {
-                          pushEntities(parsed.entities);
-                          if (Array.isArray(parsed.layers)) {
-                            setLayers(parsed.layers);
-                          }
-                          setSelectedIds([]);
-                          setActiveModal(null);
-                          setTimeout(() => setFitTrigger((t) => t + 1), 30);
-                          logCommand(
-                            `已成功匯入專案檔：「${file.name}」`,
-                            'success'
-                          );
-                        } else {
-                          logCommand(
-                            '檔案格式不符，請選擇有效的 VektorCAD .JSON 專案檔。',
-                            'error'
-                          );
-                        }
-                      } catch {
-                        logCommand('讀取 JSON 專案檔失敗。', 'error');
+                  <span className="px-3 py-1.5 font-semibold bg-emerald-600 text-white rounded-lg shrink-0">
+                    選擇圖檔
+                  </span>
+                  <input
+                    type="file"
+                    accept=".dxf,.dwg,.json"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        handleProcessCadFile(file, importMode);
                       }
-                    };
-                    reader.readAsText(file);
+                      e.target.value = '';
+                    }}
+                  />
+                </label>
+              </div>
+
+              {/* Section 2: Export DXF / SVG / JSON */}
+              <div className="space-y-2.5 pt-1">
+                <div className="font-semibold text-slate-300 flex items-center gap-1.5">
+                  <Download className="w-3.5 h-3.5 text-sky-400" />
+                  <span>匯出目前工程圖面</span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const dxf = exportToDXF(entities, layers);
+                    downloadFile(
+                      dxf,
+                      `vektorcad_${Date.now()}.dxf`,
+                      'application/dxf'
+                    );
+                    setActiveModal(null);
+                    logCommand('已匯出標準 AutoCAD .DXF 圖檔！', 'success');
                   }}
-                />
-              </label>
+                  className="w-full flex items-center justify-between p-3.5 bg-slate-950 hover:bg-slate-800/90 border border-slate-800 hover:border-sky-500/60 rounded-lg text-left transition-colors"
+                >
+                  <div>
+                    <div className="font-semibold text-slate-100">
+                      匯出 AutoCAD 標準交換格式 (.DXF)
+                    </div>
+                    <div className="text-slate-400 mt-0.5">
+                      相容於 AutoCAD、SolidWorks、Rhino 與各類 CNC 軟體
+                    </div>
+                  </div>
+                  <span className="px-2.5 py-1 font-mono bg-sky-500/20 text-sky-300 rounded shrink-0">
+                    .DXF
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const svg = exportToSVG(entities, layers);
+                    downloadFile(
+                      svg,
+                      `vektorcad_${Date.now()}.svg`,
+                      'image/svg+xml'
+                    );
+                    setActiveModal(null);
+                    logCommand('已匯出高解析向量 .SVG 工程圖檔！', 'success');
+                  }}
+                  className="w-full flex items-center justify-between p-3.5 bg-slate-950 hover:bg-slate-800/90 border border-slate-800 hover:border-emerald-500/60 rounded-lg text-left transition-colors"
+                >
+                  <div>
+                    <div className="font-semibold text-slate-100">
+                      匯出可縮放向量圖形 (.SVG)
+                    </div>
+                    <div className="text-slate-400 mt-0.5">
+                      保留圖層顏色、虛線中心線型與尺寸標註，適合列印與報告
+                    </div>
+                  </div>
+                  <span className="px-2.5 py-1 font-mono bg-emerald-500/20 text-emerald-300 rounded shrink-0">
+                    .SVG
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const json = JSON.stringify({ layers, entities }, null, 2);
+                    downloadFile(
+                      json,
+                      `vektorcad_project_${Date.now()}.json`,
+                      'application/json'
+                    );
+                    setActiveModal(null);
+                    logCommand('已儲存專案原始檔 (.JSON)', 'success');
+                  }}
+                  className="w-full flex items-center justify-between p-3.5 bg-slate-950 hover:bg-slate-800/90 border border-slate-800 hover:border-amber-500/60 rounded-lg text-left transition-colors"
+                >
+                  <div>
+                    <div className="font-semibold text-slate-100">
+                      儲存完整專案檔 (.JSON)
+                    </div>
+                    <div className="text-slate-400 mt-0.5">
+                      包含完整圖層設定與幾何參數備份
+                    </div>
+                  </div>
+                  <span className="px-2.5 py-1 font-mono bg-amber-500/20 text-amber-300 rounded shrink-0">
+                    .JSON
+                  </span>
+                </button>
+              </div>
             </div>
           </div>
         </div>

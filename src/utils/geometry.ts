@@ -2309,3 +2309,103 @@ export function exportToSVG(entities: CadEntity[], layers: CadLayer[]): string {
   ${elements.join('\n  ')}
 </svg>`;
 }
+
+/**
+ * Extract key connection points (endpoints, vertices, arc endpoints) of an entity for chain-selection
+ */
+function getEntityConnectionPoints(entity: CadEntity): Point[] {
+  switch (entity.type) {
+    case 'line':
+      return [entity.p1, entity.p2];
+    case 'polyline':
+      return entity.points;
+    case 'rectangle':
+    case 'polygon': {
+      const segs = getEntitySegments(entity);
+      return segs.map(([a]) => a);
+    }
+    case 'arc': {
+      const [p1, p2, p3] = getArcThreePoints(entity);
+      return [p1, p2, p3];
+    }
+    case 'circle': {
+      const { center, radius } = entity;
+      return [
+        { x: center.x + radius, y: center.y },
+        { x: center.x - radius, y: center.y },
+        { x: center.x, y: center.y + radius },
+        { x: center.x, y: center.y - radius },
+      ];
+    }
+    case 'group':
+      return entity.children.flatMap(getEntityConnectionPoints);
+    default:
+      return [];
+  }
+}
+
+/**
+ * Find all entities connected (sharing endpoints or intersecting) in a chain starting from seedIds
+ */
+export function findConnectedEntityIds(
+  seedIds: string[],
+  entities: CadEntity[],
+  tolerance = 2.0
+): string[] {
+  const visited = new Set<string>(seedIds);
+  const queue: CadEntity[] = entities.filter((e) => visited.has(e.id));
+
+  while (queue.length > 0) {
+    const curr = queue.shift()!;
+    const currPts = getEntityConnectionPoints(curr);
+    const currSegs = getEntitySegments(curr);
+
+    for (const candidate of entities) {
+      if (visited.has(candidate.id)) continue;
+      if (candidate.type === 'dimension' || candidate.type === 'text') continue;
+
+      let connected = false;
+
+      // 1. Check if any connection point of curr touches candidate
+      for (const pt of currPts) {
+        if (isPointNearEntity(pt, candidate, tolerance)) {
+          connected = true;
+          break;
+        }
+      }
+
+      // 2. Check if any connection point of candidate touches curr
+      if (!connected) {
+        const candPts = getEntityConnectionPoints(candidate);
+        for (const pt of candPts) {
+          if (isPointNearEntity(pt, curr, tolerance)) {
+            connected = true;
+            break;
+          }
+        }
+      }
+
+      // 3. Check if any segments intersect
+      if (!connected && currSegs.length > 0) {
+        const candSegs = getEntitySegments(candidate);
+        for (const [a1, a2] of currSegs) {
+          for (const [b1, b2] of candSegs) {
+            if (segmentIntersection(a1, a2, b1, b2)) {
+              connected = true;
+              break;
+            }
+          }
+          if (connected) break;
+        }
+      }
+
+      if (connected) {
+        visited.add(candidate.id);
+        queue.push(candidate);
+      }
+    }
+  }
+
+  return Array.from(visited);
+}
+

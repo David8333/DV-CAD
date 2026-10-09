@@ -64,12 +64,12 @@ export const ThreePointArcIcon: React.FC<{ className?: string }> = ({
   >
     {/* Arc curve passing through 3 points */}
     <path d="M 4 18 A 11 11 0 0 1 20 18" />
-    {/* Point 1 (Left Start) */}
-    <circle cx="4" cy="18" r="2.3" fill="currentColor" stroke="none" />
-    {/* Point 2 (Top Middle on Arc) */}
-    <circle cx="12" cy="7.5" r="2.3" fill="#FBBF24" stroke="none" />
-    {/* Point 3 (Right End) */}
-    <circle cx="20" cy="18" r="2.3" fill="currentColor" stroke="none" />
+    {/* Point 1 (Left Start) - reduced by half */}
+    <circle cx="4" cy="18" r="1.15" fill="currentColor" stroke="none" />
+    {/* Point 2 (Top Middle on Arc) - reduced by half */}
+    <circle cx="12" cy="7.5" r="1.15" fill="#FBBF24" stroke="none" />
+    {/* Point 3 (Right End) - reduced by half */}
+    <circle cx="20" cy="18" r="1.15" fill="currentColor" stroke="none" />
   </svg>
 );
 
@@ -384,14 +384,14 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
                 stroke="#38BDF8"
                 strokeWidth="2.2"
               />
-              {/* Point 1: 起點 P1 */}
+              {/* Point 1: 起點 P1 (縮小一半 r=2.25) */}
               <circle
                 cx="28"
                 cy="48"
-                r="4.5"
+                r="2.25"
                 fill="#10B981"
                 stroke="#0F172A"
-                strokeWidth="1.5"
+                strokeWidth="1"
               />
               <text
                 x="28"
@@ -404,14 +404,14 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
               >
                 1.起點
               </text>
-              {/* Point 2: 弧上第二點 P2 */}
+              {/* Point 2: 弧上第二點 P2 (縮小一半 r=2.25) */}
               <circle
                 cx="100"
                 cy="14"
-                r="4.5"
+                r="2.25"
                 fill="#FBBF24"
                 stroke="#0F172A"
-                strokeWidth="1.5"
+                strokeWidth="1"
               />
               <text
                 x="134"
@@ -424,14 +424,14 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
               >
                 2.第二點
               </text>
-              {/* Point 3: 終點 P3 */}
+              {/* Point 3: 終點 P3 (縮小一半 r=2.25) */}
               <circle
                 cx="172"
                 cy="48"
-                r="4.5"
+                r="2.25"
                 fill="#F43F5E"
                 stroke="#0F172A"
-                strokeWidth="1.5"
+                strokeWidth="1"
               />
               <text
                 x="172"

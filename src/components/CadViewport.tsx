@@ -30,6 +30,7 @@ import {
   DEG_TO_RAD,
   dist,
   findBestSnapPoint,
+  findConnectedEntityIds,
   getArcThreePoints,
   getDimensionLinePoints,
   getEntityBounds,
@@ -796,6 +797,58 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         }
       }
 
+      // Tab key when not drawing: select all connected segments (or all segments on canvas)
+      if (e.key === 'Tab' && drawingPoints.length === 0 && activeTool !== 'offset') {
+        e.preventDefault();
+        const visibleLayerIds = new Set(
+          layers.filter((l) => l.visible && !l.locked).map((l) => l.id)
+        );
+        const visibleSelectable = entities.filter((ent) =>
+          visibleLayerIds.has(ent.layerId)
+        );
+        if (visibleSelectable.length === 0) return;
+
+        const segmentEntities = visibleSelectable.filter(
+          (ent) => ent.type !== 'dimension' && ent.type !== 'text'
+        );
+        const allTargetEntities =
+          segmentEntities.length > 0 ? segmentEntities : visibleSelectable;
+        const allTargetIds = allTargetEntities.map((ent) => ent.id);
+
+        const seedIds =
+          selectedIds.length > 0
+            ? selectedIds
+            : hoveredEntityId
+              ? [hoveredEntityId]
+              : [];
+
+        if (seedIds.length > 0) {
+          const connectedIds = findConnectedEntityIds(
+            seedIds,
+            visibleSelectable,
+            2.5
+          );
+          const hasUnselectedConnected = connectedIds.some(
+            (id) => !selectedIds.includes(id)
+          );
+          if (connectedIds.length > 1 && hasUnselectedConnected) {
+            onSelectChange(connectedIds);
+            onLogCommand(
+              `TAB 連鎖選取：已選取相連的全部 ${connectedIds.length} 條線段！（再按一次 TAB 可選取畫布全部線段）`,
+              'success'
+            );
+            return;
+          }
+        }
+
+        onSelectChange(allTargetIds);
+        onLogCommand(
+          `TAB 全選線段：已選取畫布上全部 ${allTargetIds.length} 個線段與圖元！`,
+          'success'
+        );
+        return;
+      }
+
       // Spacebar acts identically to Enter!
       if (e.key === 'Enter' || e.code === 'Space') {
         if (activeTool === 'offset' && dynValue.trim() !== '') {
@@ -927,6 +980,9 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     dynAngleValue,
     dynField,
     dynValue,
+    entities,
+    hoveredEntityId,
+    layers,
     onAddEntity,
     onChangeOffsetDistance,
     onJoinSelected,
@@ -934,7 +990,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     onSelectChange,
     onToolComplete,
     rectangleMode,
-    selectedIds.length,
+    selectedIds,
     selectionBoxStart,
     setDrawingPoints,
     settings.dynInput,
@@ -1717,13 +1773,13 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           );
           ctx.stroke();
 
-          // Always render the 3 defining points (P1, P2, P3) on 3-point arcs!
+          // Always render the 3 defining points (P1, P2, P3) on 3-point arcs (shrunk by half)
           const [p1, p2, p3] = getArcThreePoints(ent);
           const sp1 = worldToScreen(p1.x, p1.y);
           const sp2 = worldToScreen(p2.x, p2.y);
           const sp3 = worldToScreen(p3.x, p3.y);
           ctx.setLineDash([]);
-          const dotRadius = isSelected || isHovered ? 3.8 : 2.6;
+          const dotRadius = isSelected || isHovered ? 1.9 : 1.3;
           [
             { pt: sp1, fill: '#10B981', tag: 'P1' },
             { pt: sp2, fill: '#FBBF24', tag: 'P2' },
@@ -1735,7 +1791,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             ctx.fill();
             if (isSelected || isHovered) {
               ctx.font = 'bold 9px "JetBrains Mono", monospace';
-              ctx.fillText(tag, pt.x + 6, pt.y - 5);
+              ctx.fillText(tag, pt.x + 5, pt.y - 4);
             }
           });
           break;
@@ -1939,6 +1995,8 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       for (const ent of entities) {
         if (!selectedIds.includes(ent.id)) continue;
         const grips = getEntityGripHandles(ent);
+        const halfSz = ent.type === 'arc' ? 2 : 4;
+        const fullSz = halfSz * 2;
         for (const g of grips) {
           const sg = worldToScreen(g.point.x, g.point.y);
           ctx.save();
@@ -1951,9 +2009,9 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                 ? '#FBBF24'
                 : '#0284C7';
           ctx.strokeStyle = '#E0F2FE';
-          ctx.lineWidth = 1.2;
-          ctx.fillRect(sg.x - 4, sg.y - 4, 8, 8);
-          ctx.strokeRect(sg.x - 4, sg.y - 4, 8, 8);
+          ctx.lineWidth = 1;
+          ctx.fillRect(sg.x - halfSz, sg.y - halfSz, fullSz, fullSz);
+          ctx.strokeRect(sg.x - halfSz, sg.y - halfSz, fullSz, fullSz);
           ctx.restore();
         }
       }
@@ -2126,7 +2184,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         ctx.lineTo(sCur.x, sCur.y);
         ctx.stroke();
       } else if (activeTool === 'arc') {
-        // 3-Point Arc Preview with clear P1, P2, P3 point badges
+        // 3-Point Arc Preview with P1, P2, P3 point dots shrunk by half (r = 2.25)
         if (drawingPoints.length === 1) {
           ctx.beginPath();
           ctx.moveTo(s0.x, s0.y);
@@ -2136,16 +2194,16 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           ctx.setLineDash([]);
           ctx.fillStyle = '#10B981';
           ctx.beginPath();
-          ctx.arc(s0.x, s0.y, 4.5, 0, Math.PI * 2);
+          ctx.arc(s0.x, s0.y, 2.25, 0, Math.PI * 2);
           ctx.fill();
           ctx.font = 'bold 10px "JetBrains Mono", monospace';
-          ctx.fillText('1.起點 P1', s0.x + 7, s0.y - 6);
+          ctx.fillText('1.起點 P1', s0.x + 6, s0.y - 5);
 
           ctx.fillStyle = '#FBBF24';
           ctx.beginPath();
-          ctx.arc(sCur.x, sCur.y, 4.5, 0, Math.PI * 2);
+          ctx.arc(sCur.x, sCur.y, 2.25, 0, Math.PI * 2);
           ctx.fill();
-          ctx.fillText('2.第二點 P2', sCur.x + 7, sCur.y - 6);
+          ctx.fillText('2.第二點 P2', sCur.x + 6, sCur.y - 5);
         } else if (drawingPoints.length === 2) {
           const p1 = drawingPoints[0];
           const p2 = drawingPoints[1];
@@ -2171,27 +2229,27 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             ctx.stroke();
           }
 
-          // Render the 3 numbered points P1, P2, P3 clearly on the preview!
+          // Render the 3 numbered points P1, P2, P3 with half-size dots (r = 2.25)
           ctx.setLineDash([]);
           ctx.font = 'bold 10px "JetBrains Mono", monospace';
 
           ctx.fillStyle = '#10B981';
           ctx.beginPath();
-          ctx.arc(s0.x, s0.y, 4.5, 0, Math.PI * 2);
+          ctx.arc(s0.x, s0.y, 2.25, 0, Math.PI * 2);
           ctx.fill();
-          ctx.fillText('1.起點 P1', s0.x + 7, s0.y - 6);
+          ctx.fillText('1.起點 P1', s0.x + 6, s0.y - 5);
 
           ctx.fillStyle = '#FBBF24';
           ctx.beginPath();
-          ctx.arc(s2.x, s2.y, 4.5, 0, Math.PI * 2);
+          ctx.arc(s2.x, s2.y, 2.25, 0, Math.PI * 2);
           ctx.fill();
-          ctx.fillText('2.第二點 P2', s2.x + 7, s2.y - 6);
+          ctx.fillText('2.第二點 P2', s2.x + 6, s2.y - 5);
 
           ctx.fillStyle = '#F43F5E';
           ctx.beginPath();
-          ctx.arc(sCur.x, sCur.y, 4.5, 0, Math.PI * 2);
+          ctx.arc(sCur.x, sCur.y, 2.25, 0, Math.PI * 2);
           ctx.fill();
-          ctx.fillText('3.終點 P3', sCur.x + 7, sCur.y - 6);
+          ctx.fillText('3.終點 P3', sCur.x + 6, sCur.y - 5);
         }
       } else if (activeTool === 'polygon') {
         const r = dist(p0, cursorWorld);
