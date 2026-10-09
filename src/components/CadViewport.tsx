@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { EyeOff, Info } from 'lucide-react';
 import {
   CadEntity,
   CadLayer,
@@ -18,6 +19,7 @@ import {
   dist,
   findBestSnapPoint,
   getDimensionLinePoints,
+  getEntityBounds,
   getEntityGripHandles,
   getEntitySegments,
   getPolygonVertices,
@@ -48,10 +50,14 @@ interface CadViewportProps {
   onSelectChange: (ids: string[]) => void;
   onAddEntity: (entity: CadEntity) => void;
   onUpdateEntities: (updated: CadEntity[]) => void;
-  onLogCommand: (text: string, type?: 'command' | 'info' | 'error' | 'success') => void;
+  onLogCommand: (
+    text: string,
+    type?: 'command' | 'info' | 'error' | 'success'
+  ) => void;
   onToolComplete: () => void;
   drawingPoints: Point[];
   setDrawingPoints: React.Dispatch<React.SetStateAction<Point[]>>;
+  fitTrigger: number;
 }
 
 export const CadViewport: React.FC<CadViewportProps> = ({
@@ -74,12 +80,16 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   onToolComplete,
   drawingPoints,
   setDrawingPoints,
+  fitTrigger,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const [canvasSize, setCanvasSize] = useState({ width: 1200, height: 800 });
-  const [mouseScreen, setMouseScreen] = useState<Point>({ x: 600, y: 400 });
+  const [canvasSize, setCanvasSize] = useState({ width: 960, height: 600 });
+  const [hasInitialFit, setHasInitialFit] = useState(false);
+  const [showGuideBanner, setShowGuideBanner] = useState(true);
+
+  const [mouseScreen, setMouseScreen] = useState<Point>({ x: 480, y: 300 });
   const [cursorWorld, setCursorWorld] = useState<Point>({ x: 0, y: 0 });
   const [activeSnap, setActiveSnap] = useState<SnapPoint | null>(null);
   const [guideAngle, setGuideAngle] = useState<number | null>(null);
@@ -90,6 +100,14 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   const [panStartScreen, setPanStartScreen] = useState<Point>({ x: 0, y: 0 });
   const [panStartOffset, setPanStartOffset] = useState<Point>({ x: 0, y: 0 });
   const [spacePressed, setSpacePressed] = useState(false);
+
+  // Touch pinch-zoom state
+  const touchPinchRef = useRef<{
+    initialDist: number;
+    initialZoom: number;
+    initialPan: Point;
+    initialMid: Point;
+  } | null>(null);
 
   // Selection box state
   const [selectionBoxStart, setSelectionBoxStart] = useState<Point | null>(null);
@@ -104,7 +122,8 @@ export const CadViewport: React.FC<CadViewportProps> = ({
 
   // Inline text creation modal state
   const [pendingTextPos, setPendingTextPos] = useState<Point | null>(null);
-  const [pendingTextContent, setPendingTextContent] = useState<string>('技術標註文字');
+  const [pendingTextContent, setPendingTextContent] =
+    useState<string>('技術標註文字');
   const [pendingTextSize, setPendingTextSize] = useState<number>(12);
 
   // Last measurement result overlay
@@ -134,6 +153,39 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     [canvasSize.width, canvasSize.height, pan.x, pan.y, zoom]
   );
 
+  // Fit drawing to actual measured canvas dimensions so it's 100% visible on any device
+  const fitDrawingToViewport = useCallback(
+    (w: number, h: number, currentEntities: CadEntity[]) => {
+      if (w <= 40 || h <= 40) return;
+      if (currentEntities.length === 0) {
+        onPanZoomChange({ x: 0, y: 0 }, 1.0);
+        return;
+      }
+      const bounds = currentEntities.map(getEntityBounds);
+      const minX = Math.min(...bounds.map((b) => b.minX));
+      const maxX = Math.max(...bounds.map((b) => b.maxX));
+      const minY = Math.min(...bounds.map((b) => b.minY));
+      const maxY = Math.max(...bounds.map((b) => b.maxY));
+
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      const drawingW = Math.max(80, maxX - minX);
+      const drawingH = Math.max(80, maxY - minY);
+
+      const paddingFactor = 0.82;
+      const fitZoom = Math.min(
+        10,
+        Math.max(
+          0.18,
+          Math.min((w * paddingFactor) / drawingW, (h * paddingFactor) / drawingH)
+        )
+      );
+
+      onPanZoomChange({ x: -cx * fitZoom, y: cy * fitZoom }, fitZoom);
+    },
+    [onPanZoomChange]
+  );
+
   // Resize observer
   useEffect(() => {
     const el = containerRef.current;
@@ -142,13 +194,37 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
         if (width > 0 && height > 0) {
-          setCanvasSize({ width: Math.floor(width), height: Math.floor(height) });
+          const nw = Math.floor(width);
+          const nh = Math.floor(height);
+          setCanvasSize({ width: nw, height: nh });
         }
       }
     });
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  // Perform initial fit once container has real dimensions, or when fitTrigger increments
+  useEffect(() => {
+    if (canvasSize.width > 100 && canvasSize.height > 100 && !hasInitialFit) {
+      fitDrawingToViewport(canvasSize.width, canvasSize.height, entities);
+      setHasInitialFit(true);
+    }
+  }, [
+    canvasSize.width,
+    canvasSize.height,
+    entities,
+    fitDrawingToViewport,
+    hasInitialFit,
+  ]);
+
+  const lastFitTriggerRef = useRef(fitTrigger);
+  useEffect(() => {
+    if (fitTrigger !== lastFitTriggerRef.current) {
+      lastFitTriggerRef.current = fitTrigger;
+      fitDrawingToViewport(canvasSize.width, canvasSize.height, entities);
+    }
+  }, [fitTrigger, canvasSize.width, canvasSize.height, entities, fitDrawingToViewport]);
 
   // Reset transient states when activeTool changes
   useEffect(() => {
@@ -162,12 +238,15 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     }
   }, [activeTool]);
 
-  // Commit point logic (shared by mouse click and Enter key with Dynamic Input)
+  // Commit point logic (shared by mouse click, touch tap, and Enter key with Dynamic Input)
   const commitPoint = useCallback(
     (pt: Point) => {
       const activeLayer = layers.find((l) => l.id === activeLayerId);
       if (activeLayer?.locked) {
-        onLogCommand(`圖層「${activeLayer.name}」已鎖定，無法編輯或繪製。`, 'error');
+        onLogCommand(
+          `圖層「${activeLayer.name}」已鎖定，無法編輯或繪製。`,
+          'error'
+        );
         return;
       }
 
@@ -177,7 +256,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         case 'line': {
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
-            onLogCommand(`LINE 指定第一點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請指定下一點或輸入長度`, 'info');
+            onLogCommand(
+              `LINE 指定第一點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請指定下一點或輸入長度`,
+              'info'
+            );
           } else {
             const prev = drawingPoints[drawingPoints.length - 1];
             if (dist(prev, pt) > 0.01) {
@@ -188,7 +270,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                 p1: prev,
                 p2: pt,
               });
-              // Continue chain of lines like AutoCAD!
               setDrawingPoints([pt]);
               onLogCommand(
                 `LINE 線段已建立 (長度 ${dist(prev, pt).toFixed(2)} mm) — 繼續指定下一點，或按 Esc/Enter 結束`,
@@ -202,10 +283,16 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         case 'polyline': {
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
-            onLogCommand(`PLINE 指定起點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請指定下一頂點，按 Enter 完成聚合線`, 'info');
+            onLogCommand(
+              `PLINE 指定起點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請指定下一頂點，按 Enter 完成聚合線`,
+              'info'
+            );
           } else {
             setDrawingPoints((prev) => [...prev, pt]);
-            onLogCommand(`PLINE 新增頂點 (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)})`, 'info');
+            onLogCommand(
+              `PLINE 新增頂點 (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)})`,
+              'info'
+            );
           }
           break;
         }
@@ -213,7 +300,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         case 'rectangle': {
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
-            onLogCommand(`RECTANG 指定第一個角點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請指定對角點或輸入寬/高`, 'info');
+            onLogCommand(
+              `RECTANG 指定第一個角點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請指定對角點或輸入寬/高`,
+              'info'
+            );
           } else {
             const p1 = drawingPoints[0];
             if (Math.abs(pt.x - p1.x) > 0.1 && Math.abs(pt.y - p1.y) > 0.1) {
@@ -237,7 +327,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         case 'circle': {
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
-            onLogCommand(`CIRCLE 指定圓心: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請指定半徑或直接輸入數值`, 'info');
+            onLogCommand(
+              `CIRCLE 指定圓心: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請指定半徑或直接輸入數值`,
+              'info'
+            );
           } else {
             const center = drawingPoints[0];
             const r = dist(center, pt);
@@ -250,7 +343,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                 radius: r,
               });
               setDrawingPoints([]);
-              onLogCommand(`CIRCLE 已建立圓形: 半徑 R=${r.toFixed(2)} mm (直徑 Ø=${(r * 2).toFixed(2)} mm)`, 'success');
+              onLogCommand(
+                `CIRCLE 已建立圓形: 半徑 R=${r.toFixed(2)} mm (直徑 Ø=${(r * 2).toFixed(2)} mm)`,
+                'success'
+              );
             }
           }
           break;
@@ -259,10 +355,16 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         case 'arc': {
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
-            onLogCommand(`ARC [圓心-起點-終點] 指定圓弧圓心: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)})`, 'info');
+            onLogCommand(
+              `ARC [圓心-起點-終點] 指定圓弧圓心: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)})`,
+              'info'
+            );
           } else if (drawingPoints.length === 1) {
             setDrawingPoints([drawingPoints[0], pt]);
-            onLogCommand(`ARC 指定圓弧起點 — 請移動滑鼠指定圓弧終點角度`, 'info');
+            onLogCommand(
+              `ARC 指定圓弧起點 — 請移動滑鼠指定圓弧終點角度`,
+              'info'
+            );
           } else {
             const center = drawingPoints[0];
             const startPt = drawingPoints[1];
@@ -289,7 +391,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         case 'ellipse': {
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
-            onLogCommand(`ELLIPSE 指定橢圓中心點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)})`, 'info');
+            onLogCommand(
+              `ELLIPSE 指定橢圓中心點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)})`,
+              'info'
+            );
           } else {
             const center = drawingPoints[0];
             const rx = Math.max(2, Math.abs(pt.x - center.x));
@@ -303,7 +408,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               ry,
             });
             setDrawingPoints([]);
-            onLogCommand(`ELLIPSE 已建立橢圓 (Rx=${rx.toFixed(1)}, Ry=${ry.toFixed(1)} mm)`, 'success');
+            onLogCommand(
+              `ELLIPSE 已建立橢圓 (Rx=${rx.toFixed(1)}, Ry=${ry.toFixed(1)} mm)`,
+              'success'
+            );
           }
           break;
         }
@@ -311,7 +419,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         case 'polygon': {
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
-            onLogCommand(`POLYGON (${polygonSides} 邊形) 指定中心點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)})`, 'info');
+            onLogCommand(
+              `POLYGON (${polygonSides} 邊形) 指定中心點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)})`,
+              'info'
+            );
           } else {
             const center = drawingPoints[0];
             const r = dist(center, pt);
@@ -327,7 +438,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                 rotation: rot,
               });
               setDrawingPoints([]);
-              onLogCommand(`POLYGON 已建立正 ${polygonSides} 邊形 (外接圓 R=${r.toFixed(2)} mm)`, 'success');
+              onLogCommand(
+                `POLYGON 已建立正 ${polygonSides} 邊形 (外接圓 R=${r.toFixed(2)} mm)`,
+                'success'
+              );
             }
           }
           break;
@@ -336,23 +450,34 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         case 'dimension': {
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
-            onLogCommand(`DIMLINEAR 指定第一條延伸線原點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)})`, 'info');
+            onLogCommand(
+              `DIMLINEAR 指定第一條延伸線原點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)})`,
+              'info'
+            );
           } else if (drawingPoints.length === 1) {
             setDrawingPoints([drawingPoints[0], pt]);
-            onLogCommand(`DIMLINEAR 指定第二條延伸線原點 — 請移動滑鼠決定尺寸線偏移位置`, 'info');
+            onLogCommand(
+              `DIMLINEAR 指定第二條延伸線原點 — 請移動決定尺寸線偏移位置`,
+              'info'
+            );
           } else {
             const p1 = drawingPoints[0];
             const p2 = drawingPoints[1];
             onAddEntity({
               id,
               type: 'dimension',
-              layerId: layers.some((l) => l.id === 'DIM') ? 'DIM' : activeLayerId,
+              layerId: layers.some((l) => l.id === 'DIM')
+                ? 'DIM'
+                : activeLayerId,
               p1,
               p2,
               offsetPoint: pt,
             });
             setDrawingPoints([]);
-            onLogCommand(`DIMLINEAR 已標註尺寸: ${dist(p1, p2).toFixed(2)} mm`, 'success');
+            onLogCommand(
+              `DIMLINEAR 已標註尺寸: ${dist(p1, p2).toFixed(2)} mm`,
+              'success'
+            );
           }
           break;
         }
@@ -366,7 +491,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
             setMeasureResult(null);
-            onLogCommand(`DIST 測量起點: (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)}) — 請點選測量終點`, 'info');
+            onLogCommand(
+              `DIST 測量起點: (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)}) — 請點選測量終點`,
+              'info'
+            );
           } else {
             const p1 = drawingPoints[0];
             const d = dist(p1, pt);
@@ -390,7 +518,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           }
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
-            onLogCommand(`MOVE 指定基準點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請指定目標位置點`, 'info');
+            onLogCommand(
+              `MOVE 指定基準點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請指定目標位置點`,
+              'info'
+            );
           } else {
             const base = drawingPoints[0];
             const dx = pt.x - base.x;
@@ -401,7 +532,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             onUpdateEntities(updated);
             setDrawingPoints([]);
             onToolComplete();
-            onLogCommand(`MOVE 已移動 ${selectedIds.length} 個物件 (ΔX=${dx.toFixed(1)}, ΔY=${dy.toFixed(1)})`, 'success');
+            onLogCommand(
+              `MOVE 已移動 ${selectedIds.length} 個物件 (ΔX=${dx.toFixed(1)}, ΔY=${dy.toFixed(1)})`,
+              'success'
+            );
           }
           break;
         }
@@ -413,7 +547,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           }
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
-            onLogCommand(`COPY 指定基準點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 點選目標點可連續複製，按 Esc 結束`, 'info');
+            onLogCommand(
+              `COPY 指定基準點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 點選目標點可連續複製，按 Esc 結束`,
+              'info'
+            );
           } else {
             const base = drawingPoints[0];
             const dx = pt.x - base.x;
@@ -425,7 +562,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                 id: `copy_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 5)}`,
               }));
             onUpdateEntities([...entities, ...copies]);
-            onLogCommand(`COPY 已複製 ${copies.length} 個物件 — 可繼續點選放置下一個副本，或按 Esc 結束`, 'success');
+            onLogCommand(
+              `COPY 已複製 ${copies.length} 個物件 — 可繼續點選放置下一個副本，或按 Esc 結束`,
+              'success'
+            );
           }
           break;
         }
@@ -437,7 +577,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           }
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
-            onLogCommand(`ROTATE 指定旋轉基準點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請指定旋轉角度或拖曳方向`, 'info');
+            onLogCommand(
+              `ROTATE 指定旋轉基準點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請指定旋轉角度或拖曳方向`,
+              'info'
+            );
           } else {
             const pivot = drawingPoints[0];
             const angleRad = angleBetween(pivot, pt);
@@ -447,7 +590,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             onUpdateEntities(updated);
             setDrawingPoints([]);
             onToolComplete();
-            onLogCommand(`ROTATE 已旋轉 ${selectedIds.length} 個物件 (${(angleRad * RAD_TO_DEG).toFixed(1)}°)`, 'success');
+            onLogCommand(
+              `ROTATE 已旋轉 ${selectedIds.length} 個物件 (${(angleRad * RAD_TO_DEG).toFixed(1)}°)`,
+              'success'
+            );
           }
           break;
         }
@@ -459,7 +605,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           }
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
-            onLogCommand(`SCALE 指定縮放基準點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請移動滑鼠或輸入比例因子`, 'info');
+            onLogCommand(
+              `SCALE 指定縮放基準點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請移動或輸入比例因子`,
+              'info'
+            );
           } else {
             const base = drawingPoints[0];
             const factor = Math.max(0.1, dist(base, pt) / 100);
@@ -469,7 +618,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             onUpdateEntities(updated);
             setDrawingPoints([]);
             onToolComplete();
-            onLogCommand(`SCALE 已縮放 ${selectedIds.length} 個物件 (比例 ${factor.toFixed(2)}x)`, 'success');
+            onLogCommand(
+              `SCALE 已縮放 ${selectedIds.length} 個物件 (比例 ${factor.toFixed(2)}x)`,
+              'success'
+            );
           }
           break;
         }
@@ -481,7 +633,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           }
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
-            onLogCommand(`MIRROR 指定鏡射軸第一點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)})`, 'info');
+            onLogCommand(
+              `MIRROR 指定鏡射軸第一點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)})`,
+              'info'
+            );
           } else {
             const axisA = drawingPoints[0];
             if (dist(axisA, pt) > 0.5) {
@@ -494,7 +649,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               onUpdateEntities([...entities, ...mirroredCopies]);
               setDrawingPoints([]);
               onToolComplete();
-              onLogCommand(`MIRROR 已沿鏡射軸建立 ${mirroredCopies.length} 個對稱物件`, 'success');
+              onLogCommand(
+                `MIRROR 已沿鏡射軸建立 ${mirroredCopies.length} 個對稱物件`,
+                'success'
+              );
             }
           }
           break;
@@ -527,7 +685,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   // Keyboard handlers for Spacebar panning, Escape, Enter (finish polyline or commit DYN input), Tab (switch DYN field)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore if typing inside an input/textarea
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
@@ -616,7 +773,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           }
         }
 
-        // Finish polyline or line on Enter when no numeric input
         if (activeTool === 'polyline' && drawingPoints.length >= 2) {
           e.preventDefault();
           onAddEntity({
@@ -627,7 +783,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             closed: false,
           });
           setDrawingPoints([]);
-          onLogCommand(`PLINE 已完成聚合線 (${drawingPoints.length} 個頂點)`, 'success');
+          onLogCommand(
+            `PLINE 已完成聚合線 (${drawingPoints.length} 個頂點)`,
+            'success'
+          );
           return;
         }
 
@@ -639,7 +798,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         }
       }
 
-      // Close polyline with 'C'
       if (
         (e.key === 'c' || e.key === 'C') &&
         activeTool === 'polyline' &&
@@ -654,7 +812,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           closed: true,
         });
         setDrawingPoints([]);
-        onLogCommand(`PLINE 已建立封閉聚合線 (${drawingPoints.length} 個頂點)`, 'success');
+        onLogCommand(
+          `PLINE 已建立封閉聚合線 (${drawingPoints.length} 個頂點)`,
+          'success'
+        );
       }
     };
 
@@ -692,14 +853,64 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     spacePressed,
   ]);
 
+  // Update world cursor & snap from screen coordinates
+  const updateCursorFromScreen = useCallback(
+    (sx: number, sy: number) => {
+      setMouseScreen({ x: sx, y: sy });
+      const rawWorld = screenToWorld(sx, sy);
+      const snap = findBestSnapPoint(
+        rawWorld,
+        entities,
+        layers,
+        settings,
+        zoom
+      );
+      setActiveSnap(snap);
+
+      let effectiveWorld = snap ? snap.point : rawWorld;
+      const anchor =
+        drawingPoints.length > 0
+          ? drawingPoints[drawingPoints.length - 1]
+          : activeGrip
+            ? activeGrip.point
+            : null;
+
+      if (!snap || snap.type === 'grid') {
+        const { point: lockedPt, guideAngle: gAngle } = applyOrthoAndPolar(
+          anchor,
+          effectiveWorld,
+          settings
+        );
+        effectiveWorld = lockedPt;
+        setGuideAngle(gAngle);
+      } else {
+        setGuideAngle(null);
+      }
+
+      setCursorWorld(effectiveWorld);
+      onCursorMove(effectiveWorld, snap);
+      return { rawWorld, effectiveWorld };
+    },
+    [
+      activeGrip,
+      drawingPoints,
+      entities,
+      layers,
+      onCursorMove,
+      screenToWorld,
+      settings,
+      zoom,
+    ]
+  );
+
   // Mouse Move Handler
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
-    setMouseScreen({ x: sx, y: sy });
 
     if (isPanning) {
+      setMouseScreen({ x: sx, y: sy });
       const dx = sx - panStartScreen.x;
       const dy = sy - panStartScreen.y;
       onPanZoomChange(
@@ -709,34 +920,8 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       return;
     }
 
-    const rawWorld = screenToWorld(sx, sy);
-    const snap = findBestSnapPoint(rawWorld, entities, layers, settings, zoom);
-    setActiveSnap(snap);
+    const { rawWorld, effectiveWorld } = updateCursorFromScreen(sx, sy);
 
-    let effectiveWorld = snap ? snap.point : rawWorld;
-    const anchor =
-      drawingPoints.length > 0
-        ? drawingPoints[drawingPoints.length - 1]
-        : activeGrip
-          ? activeGrip.point
-          : null;
-
-    if (!snap || snap.type === 'grid') {
-      const { point: lockedPt, guideAngle: gAngle } = applyOrthoAndPolar(
-        anchor,
-        effectiveWorld,
-        settings
-      );
-      effectiveWorld = lockedPt;
-      setGuideAngle(gAngle);
-    } else {
-      setGuideAngle(null);
-    }
-
-    setCursorWorld(effectiveWorld);
-    onCursorMove(effectiveWorld, snap);
-
-    // If dragging an active grip handle, live-update the entity
     if (activeGrip) {
       const updated = entities.map((ent) =>
         ent.id === activeGrip.entityId
@@ -747,7 +932,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       return;
     }
 
-    // Hover detection in select or offset mode
     if (activeTool === 'select' || activeTool === 'offset') {
       const visibleLayerIds = new Set(
         layers.filter((l) => l.visible && !l.locked).map((l) => l.id)
@@ -772,7 +956,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
 
-    // Middle mouse button (button === 1), or Pan tool, or Spacebar held
     if (e.button === 1 || activeTool === 'pan' || spacePressed) {
       e.preventDefault();
       setIsPanning(true);
@@ -781,7 +964,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       return;
     }
 
-    // Right click acts as Enter / Cancel in AutoCAD
     if (e.button === 2) {
       e.preventDefault();
       if (activeTool === 'polyline' && drawingPoints.length >= 2) {
@@ -793,7 +975,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           closed: false,
         });
         setDrawingPoints([]);
-        onLogCommand(`PLINE 已完成聚合線 (${drawingPoints.length} 個頂點)`, 'success');
+        onLogCommand(
+          `PLINE 已完成聚合線 (${drawingPoints.length} 個頂點)`,
+          'success'
+        );
       } else if (drawingPoints.length > 0) {
         setDrawingPoints([]);
       }
@@ -802,20 +987,21 @@ export const CadViewport: React.FC<CadViewportProps> = ({
 
     if (e.button !== 0) return;
 
-    const rawWorld = screenToWorld(sx, sy);
+    const { rawWorld, effectiveWorld } = updateCursorFromScreen(sx, sy);
 
-    // 1. Check if in SELECT mode
     if (activeTool === 'select') {
-      // Check if clicking a grip handle of a selected entity first
       if (selectedIds.length > 0) {
-        const gripTol = 9 / zoom;
+        const gripTol = 11 / zoom;
         for (const ent of entities) {
           if (!selectedIds.includes(ent.id)) continue;
           const grips = getEntityGripHandles(ent);
           const hitGrip = grips.find((g) => dist(rawWorld, g.point) <= gripTol);
           if (hitGrip) {
             setActiveGrip(hitGrip);
-            onLogCommand(`掣點編輯 (GRIP EDIT): 拖曳控點至新位置後點擊完成`, 'info');
+            onLogCommand(
+              `掣點編輯 (GRIP EDIT): 拖曳控點至新位置後放開完成`,
+              'info'
+            );
             return;
           }
         }
@@ -823,12 +1009,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
 
       if (activeGrip) {
         setActiveGrip(null);
-        onLogCommand('掣點編輯已完成', 'success');
         return;
       }
 
       if (selectionBoxStart) {
-        // Second click finishes selection box
         const isCrossing = rawWorld.x < selectionBoxStart.x;
         const visibleLayerIds = new Set(
           layers.filter((l) => l.visible && !l.locked).map((l) => l.id)
@@ -837,7 +1021,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           .filter(
             (ent) =>
               visibleLayerIds.has(ent.layerId) &&
-              isEntityInSelectionBox(ent, selectionBoxStart, rawWorld, isCrossing)
+              isEntityInSelectionBox(
+                ent,
+                selectionBoxStart,
+                rawWorld,
+                isCrossing
+              )
           )
           .map((ent) => ent.id);
 
@@ -855,11 +1044,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         return;
       }
 
-      // Check direct entity click
       const visibleLayerIds = new Set(
         layers.filter((l) => l.visible && !l.locked).map((l) => l.id)
       );
-      const hitTol = 8 / zoom;
+      const hitTol = 10 / zoom;
       const hit = [...entities]
         .reverse()
         .find(
@@ -879,7 +1067,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           onSelectChange([hit.id]);
         }
       } else {
-        // Start Window/Crossing selection box
         setSelectionBoxStart(rawWorld);
         if (!e.shiftKey) {
           onSelectChange([]);
@@ -888,11 +1075,9 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       return;
     }
 
-    // 2. Check if in OFFSET mode
     if (activeTool === 'offset') {
       if (selectedIds.length === 0) {
-        // First click: select entity to offset
-        const hitTol = 8 / zoom;
+        const hitTol = 10 / zoom;
         const hit = [...entities]
           .reverse()
           .find((ent) => isPointNearEntity(rawWorld, ent, hitTol));
@@ -903,22 +1088,27 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             'info'
           );
         } else {
-          onLogCommand('OFFSET 請點選要偏移複製的線段、圓形、矩形或多邊形', 'info');
+          onLogCommand(
+            'OFFSET 請點選要偏移複製的線段、圓形、矩形或多邊形',
+            'info'
+          );
         }
       } else {
-        // Second click: offset toward clicked side
         const targetEnt = entities.find((ent) => ent.id === selectedIds[0]);
         if (targetEnt) {
           const newEnt = offsetEntity(
             targetEnt,
-            cursorWorld,
+            effectiveWorld,
             offsetDistance,
             `off_${Date.now()}`
           );
           if (newEnt) {
             onAddEntity(newEnt);
             onSelectChange([newEnt.id]);
-            onLogCommand(`OFFSET 已建立偏移物件 (距離 ${offsetDistance} mm)`, 'success');
+            onLogCommand(
+              `OFFSET 已建立偏移物件 (距離 ${offsetDistance} mm)`,
+              'success'
+            );
           } else {
             onLogCommand('OFFSET 偏移距離過大或該物件不支援向內偏移', 'error');
           }
@@ -927,8 +1117,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       return;
     }
 
-    // 3. All other Drawing / Modify tools commit cursorWorld
-    commitPoint(cursorWorld);
+    commitPoint(effectiveWorld);
   };
 
   const handleMouseUp = () => {
@@ -938,6 +1127,120 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     if (activeGrip) {
       setActiveGrip(null);
       onLogCommand('掣點編輯已套用', 'success');
+    }
+  };
+
+  // Touch Handlers for Mobile & Tablet Support
+  const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (e.touches.length === 2) {
+      e.preventDefault();
+      const t1 = e.touches[0];
+      const t2 = e.touches[1];
+      const p1 = { x: t1.clientX - rect.left, y: t1.clientY - rect.top };
+      const p2 = { x: t2.clientX - rect.left, y: t2.clientY - rect.top };
+      touchPinchRef.current = {
+        initialDist: Math.max(10, dist(p1, p2)),
+        initialZoom: zoom,
+        initialPan: { ...pan },
+        initialMid: midpoint(p1, p2),
+      };
+      return;
+    }
+
+    if (e.touches.length === 1) {
+      const t = e.touches[0];
+      const sx = t.clientX - rect.left;
+      const sy = t.clientY - rect.top;
+
+      if (activeTool === 'pan') {
+        setIsPanning(true);
+        setPanStartScreen({ x: sx, y: sy });
+        setPanStartOffset({ ...pan });
+        return;
+      }
+
+      const { rawWorld, effectiveWorld } = updateCursorFromScreen(sx, sy);
+
+      if (activeTool === 'select') {
+        const visibleLayerIds = new Set(
+          layers.filter((l) => l.visible && !l.locked).map((l) => l.id)
+        );
+        const hitTol = 16 / zoom;
+        const hit = [...entities]
+          .reverse()
+          .find(
+            (ent) =>
+              visibleLayerIds.has(ent.layerId) &&
+              isPointNearEntity(rawWorld, ent, hitTol)
+          );
+        if (hit) {
+          onSelectChange([hit.id]);
+        } else {
+          // Single-finger drag on empty canvas in select mode pans on touch devices
+          setIsPanning(true);
+          setPanStartScreen({ x: sx, y: sy });
+          setPanStartOffset({ ...pan });
+        }
+        return;
+      }
+
+      commitPoint(effectiveWorld);
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (e.touches.length === 2 && touchPinchRef.current) {
+      e.preventDefault();
+      const t1 = e.touches[0];
+      const t2 = e.touches[1];
+      const p1 = { x: t1.clientX - rect.left, y: t1.clientY - rect.top };
+      const p2 = { x: t2.clientX - rect.left, y: t2.clientY - rect.top };
+      const curDist = Math.max(10, dist(p1, p2));
+      const curMid = midpoint(p1, p2);
+
+      const scale = curDist / touchPinchRef.current.initialDist;
+      const nextZoom = Math.min(
+        25,
+        Math.max(0.15, touchPinchRef.current.initialZoom * scale)
+      );
+      const dx = curMid.x - touchPinchRef.current.initialMid.x;
+      const dy = curMid.y - touchPinchRef.current.initialMid.y;
+
+      onPanZoomChange(
+        {
+          x: touchPinchRef.current.initialPan.x + dx,
+          y: touchPinchRef.current.initialPan.y + dy,
+        },
+        nextZoom
+      );
+      return;
+    }
+
+    if (e.touches.length === 1) {
+      const t = e.touches[0];
+      const sx = t.clientX - rect.left;
+      const sy = t.clientY - rect.top;
+
+      if (isPanning) {
+        const dx = sx - panStartScreen.x;
+        const dy = sy - panStartScreen.y;
+        onPanZoomChange(
+          { x: panStartOffset.x + dx, y: panStartOffset.y + dy },
+          zoom
+        );
+        return;
+      }
+
+      updateCursorFromScreen(sx, sy);
+    }
+  };
+
+  const handleTouchEnd = () => {
+    touchPinchRef.current = null;
+    if (isPanning) {
+      setIsPanning(false);
     }
   };
 
@@ -951,7 +1254,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     const zoomFactor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
     const nextZoom = Math.min(25, Math.max(0.15, zoom * zoomFactor));
 
-    // Keep world point under cursor stationary
     const wx = (sx - canvasSize.width / 2 - pan.x) / zoom;
     const wy = -(sy - canvasSize.height / 2 - pan.y) / zoom;
 
@@ -977,7 +1279,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     ctx.fillStyle = '#090D14';
     ctx.fillRect(0, 0, canvasSize.width, canvasSize.height);
 
-    // Helper for applying line dash
     const applyDash = (lt: LineType) => {
       switch (lt) {
         case 'dashed':
@@ -1005,7 +1306,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       const majorStep = minorStep * 5;
 
       const topLeftWorld = screenToWorld(0, 0);
-      const bottomRightWorld = screenToWorld(canvasSize.width, canvasSize.height);
+      const bottomRightWorld = screenToWorld(
+        canvasSize.width,
+        canvasSize.height
+      );
 
       const startX = Math.floor(topLeftWorld.x / minorStep) * minorStep;
       const endX = Math.ceil(bottomRightWorld.x / minorStep) * minorStep;
@@ -1037,14 +1341,22 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       ctx.strokeStyle = 'rgba(148, 163, 184, 0.13)';
       ctx.fillStyle = 'rgba(148, 163, 184, 0.42)';
       ctx.font = '10px "JetBrains Mono", monospace';
-      for (let x = Math.floor(topLeftWorld.x / majorStep) * majorStep; x <= endX; x += majorStep) {
+      for (
+        let x = Math.floor(topLeftWorld.x / majorStep) * majorStep;
+        x <= endX;
+        x += majorStep
+      ) {
         if (Math.abs(x) < 1e-4) continue;
         const sx = Math.round(worldToScreen(x, 0).x) + 0.5;
         ctx.moveTo(sx, 0);
         ctx.lineTo(sx, canvasSize.height);
         ctx.fillText(`${x}`, sx + 4, 14);
       }
-      for (let y = Math.floor(bottomRightWorld.y / majorStep) * majorStep; y <= endY; y += majorStep) {
+      for (
+        let y = Math.floor(bottomRightWorld.y / majorStep) * majorStep;
+        y <= endY;
+        y += majorStep
+      ) {
         if (Math.abs(y) < 1e-4) continue;
         const sy = Math.round(worldToScreen(0, y).y) + 0.5;
         ctx.moveTo(0, sy);
@@ -1136,7 +1448,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         }
         case 'arc': {
           const sc = worldToScreen(ent.center.x, ent.center.y);
-          // Because screen Y is inverted, world angle +theta is screen angle -theta
           ctx.beginPath();
           ctx.arc(
             sc.x,
@@ -1172,7 +1483,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           const sd2 = worldToScreen(dimP2.x, dimP2.y);
           const smid = worldToScreen(mid.x, mid.y);
 
-          // Extension lines
           ctx.lineWidth = 1;
           ctx.globalAlpha = 0.75;
           ctx.beginPath();
@@ -1182,7 +1492,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           ctx.lineTo(sd2.x, sd2.y);
           ctx.stroke();
 
-          // Main dimension line
           ctx.globalAlpha = 1;
           ctx.lineWidth = 1.25;
           ctx.beginPath();
@@ -1190,7 +1499,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           ctx.lineTo(sd2.x, sd2.y);
           ctx.stroke();
 
-          // Arrowheads
           const ang = Math.atan2(sd2.y - sd1.y, sd2.x - sd1.x);
           const arrowLen = Math.min(10, Math.max(5, dist(sd1, sd2) * 0.15));
           const drawArrow = (tip: Point, dirAngle: number) => {
@@ -1210,7 +1518,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           drawArrow(sd1, ang + Math.PI);
           drawArrow(sd2, ang);
 
-          // Dimension label badge
           const label = ent.textOverride || `${length.toFixed(1)} mm`;
           ctx.font = '600 11px "JetBrains Mono", monospace';
           const tw = ctx.measureText(label).width;
@@ -1240,7 +1547,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       ctx.restore();
     };
 
-    // Render all existing entities
     for (const ent of entities) {
       const isSelected = selectedIds.includes(ent.id);
       const isHovered = hoveredEntityId === ent.id;
@@ -1328,7 +1634,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         ctx.beginPath();
         ctx.arc(s0.x, s0.y, rPx, 0, Math.PI * 2);
         ctx.stroke();
-        // Radius line
         ctx.beginPath();
         ctx.moveTo(s0.x, s0.y);
         ctx.lineTo(sCur.x, sCur.y);
@@ -1340,7 +1645,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           ctx.lineTo(sCur.x, sCur.y);
           ctx.stroke();
         } else if (drawingPoints.length === 2) {
-          const rPx = dist(s0, worldToScreen(drawingPoints[1].x, drawingPoints[1].y));
+          const rPx = dist(
+            s0,
+            worldToScreen(drawingPoints[1].x, drawingPoints[1].y)
+          );
           const startAng = angleBetween(p0, drawingPoints[1]);
           const endAng = angleBetween(p0, cursorWorld);
           ctx.beginPath();
@@ -1488,7 +1796,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       ctx.restore();
     }
 
-    // 9. Render OSNAP Marker (Square, Triangle, Circle, Diamond, Cross)
+    // 9. Render OSNAP Marker
     if (activeSnap && activeSnap.type !== 'grid') {
       const sp = worldToScreen(activeSnap.point.x, activeSnap.point.y);
       ctx.save();
@@ -1531,24 +1839,23 @@ export const CadViewport: React.FC<CadViewportProps> = ({
 
     // 10. Render Authentic AutoCAD UCS Icon (Bottom-Left)
     ctx.save();
-    const ucsX = 36;
-    const ucsY = canvasSize.height - 36;
+    const ucsX = 28;
+    const ucsY = canvasSize.height - 28;
     ctx.strokeStyle = '#94A3B8';
     ctx.fillStyle = '#94A3B8';
     ctx.lineWidth = 1.5;
     ctx.font = '600 10px "JetBrains Mono", monospace';
-    // X axis arrow
     ctx.beginPath();
     ctx.moveTo(ucsX, ucsY);
-    ctx.lineTo(ucsX + 38, ucsY);
+    ctx.lineTo(ucsX + 32, ucsY);
     ctx.moveTo(ucsX, ucsY);
-    ctx.lineTo(ucsX, ucsY - 38);
+    ctx.lineTo(ucsX, ucsY - 32);
     ctx.stroke();
-    ctx.strokeRect(ucsX - 4, ucsY - 4, 8, 8);
+    ctx.strokeRect(ucsX - 3.5, ucsY - 3.5, 7, 7);
     ctx.fillStyle = '#EF4444';
-    ctx.fillText('X', ucsX + 43, ucsY + 3);
+    ctx.fillText('X', ucsX + 36, ucsY + 3);
     ctx.fillStyle = '#10B981';
-    ctx.fillText('Y', ucsX - 3, ucsY - 43);
+    ctx.fillText('Y', ucsX - 3, ucsY - 36);
     ctx.restore();
 
     // 11. Render Full AutoCAD Crosshair Cursor + Pickbox
@@ -1559,7 +1866,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       ctx.strokeStyle = 'rgba(226, 232, 240, 0.75)';
       ctx.lineWidth = 1;
       ctx.setLineDash([]);
-      const armLen = 36;
+      const armLen = 32;
       ctx.beginPath();
       ctx.moveTo(cx - armLen, cy);
       ctx.lineTo(cx + armLen, cy);
@@ -1600,7 +1907,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     zoom,
   ]);
 
-  // Compute live dynamic input readout values
   const anchorPoint =
     drawingPoints.length > 0 ? drawingPoints[drawingPoints.length - 1] : null;
   const liveDist = anchorPoint ? dist(anchorPoint, cursorWorld) : 0;
@@ -1611,7 +1917,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   return (
     <div
       ref={containerRef}
-      className="relative flex-1 h-full overflow-hidden bg-[#090D14] select-none"
+      className="relative flex-1 min-w-0 min-h-0 h-full overflow-hidden bg-[#090D14] select-none"
       onContextMenu={(e) => e.preventDefault()}
     >
       <canvas
@@ -1619,64 +1925,91 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         onMouseMove={handleMouseMove}
         onMouseDown={handleMouseDown}
         onMouseUp={handleMouseUp}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
         onWheel={handleWheel}
-        className={`block w-full h-full ${
+        className={`block w-full h-full touch-none ${
           isPanning || spacePressed || activeTool === 'pan'
             ? 'cursor-grab active:cursor-grabbing'
             : 'cursor-none'
         }`}
       />
 
-      {/* Active Tool Interactive Step-by-Step Banner (Traditional Chinese) */}
-      <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-3 px-4 py-1.5 bg-slate-900/90 border border-slate-700/80 rounded-lg shadow-lg text-xs">
-        <span className="font-semibold text-sky-300 whitespace-nowrap">
-          {activeTool === 'select' && '目前模式：選取與掣點編輯 (V)'}
-          {activeTool === 'pan' && '目前模式：平移畫布 (H / 空白鍵)'}
-          {activeTool === 'line' && '目前工具：畫直線 (快捷鍵 L)'}
-          {activeTool === 'dimension' && '目前工具：標註尺寸 (快捷鍵 D)'}
-          {activeTool === 'polyline' && '目前工具：聚合線 (快捷鍵 P)'}
-          {activeTool === 'rectangle' && '目前工具：畫矩形 (快捷鍵 R)'}
-          {activeTool === 'circle' && '目前工具：畫圓形 (快捷鍵 C)'}
-          {activeTool === 'arc' && '目前工具：三點圓弧 (快捷鍵 A)'}
-          {activeTool === 'ellipse' && '目前工具：畫橢圓 (快捷鍵 E)'}
-          {activeTool === 'polygon' && `目前工具：正 ${polygonSides} 邊形 (快捷鍵 G)`}
-          {activeTool === 'text' && '目前工具：文字註解 (快捷鍵 T)'}
-          {activeTool === 'measure' && '目前工具：測量距離與角度 (快捷鍵 K)'}
-          {activeTool === 'move' && '目前工具：移動物件 (快捷鍵 M)'}
-          {activeTool === 'copy' && '目前工具：連續複製 (快捷鍵 J)'}
-          {activeTool === 'rotate' && '目前工具：旋轉物件 (快捷鍵 Q)'}
-          {activeTool === 'scale' && '目前工具：比例縮放 (快捷鍵 S)'}
-          {activeTool === 'mirror' && '目前工具：對稱鏡射 (快捷鍵 W)'}
-          {activeTool === 'offset' && `目前工具：偏移複製 (快捷鍵 O，距離 ${offsetDistance}mm)`}
-        </span>
-        <span className="text-slate-600">·</span>
-        <span className="text-slate-300 whitespace-nowrap">
-          {activeTool === 'line' &&
-            (drawingPoints.length === 0
-              ? '步驟 1：請在畫布點選「直線起點」（支援綠框端點/中點自動鎖點）'
-              : '步驟 2：點選「直線終點」或直接用鍵盤輸入長度數值後按 Enter（按 F8 可切換水平/垂直正交鎖定，按 Esc 結束）')}
-          {activeTool === 'dimension' &&
-            (drawingPoints.length === 0
-              ? '步驟 1：請點選要標註的「第一個端點」'
-              : drawingPoints.length === 1
-                ? '步驟 2：請點選要標註的「第二個端點」'
-                : '步驟 3：移動滑鼠拉出標註線高度，點擊左鍵完成尺寸標註！')}
-          {activeTool === 'select' &&
-            '點選圖元可修改屬性與拖曳藍色掣點；按 L 畫直線、按 D 標註尺寸、按 B 自動標註已選取物件'}
-          {activeTool !== 'line' &&
-            activeTool !== 'dimension' &&
-            activeTool !== 'select' &&
-            (drawingPoints.length === 0
-              ? '請在畫布點選第一個基準點（按 Esc 返回選取模式）'
-              : '請移動滑鼠指定下一點，或直接輸入數值後按 Enter 確認')}
-        </span>
-      </div>
+      {/* Responsive Non-Blocking Active Tool Banner (Can be collapsed anytime) */}
+      {showGuideBanner ? (
+        <div className="absolute top-2 left-2 right-2 z-20 flex justify-center pointer-events-none">
+          <div className="pointer-events-auto max-w-full flex items-center gap-2 px-3 py-1 bg-slate-900/90 border border-slate-700/80 rounded-lg shadow-md text-[11px] sm:text-xs">
+            <span className="font-semibold text-sky-300 whitespace-nowrap shrink-0">
+              {activeTool === 'select' && '選取模式 (V)'}
+              {activeTool === 'pan' && '平移畫布 (H)'}
+              {activeTool === 'line' && '畫直線 (L)'}
+              {activeTool === 'dimension' && '標註尺寸 (D)'}
+              {activeTool === 'polyline' && '聚合線 (P)'}
+              {activeTool === 'rectangle' && '畫矩形 (R)'}
+              {activeTool === 'circle' && '畫圓形 (C)'}
+              {activeTool === 'arc' && '三點圓弧 (A)'}
+              {activeTool === 'ellipse' && '畫橢圓 (E)'}
+              {activeTool === 'polygon' && `正 ${polygonSides} 邊形 (G)`}
+              {activeTool === 'text' && '文字註解 (T)'}
+              {activeTool === 'measure' && '測量距離 (K)'}
+              {activeTool === 'move' && '移動物件 (M)'}
+              {activeTool === 'copy' && '連續複製 (J)'}
+              {activeTool === 'rotate' && '旋轉物件 (Q)'}
+              {activeTool === 'scale' && '比例縮放 (S)'}
+              {activeTool === 'mirror' && '對稱鏡射 (W)'}
+              {activeTool === 'offset' && `偏移複製 (O)`}
+            </span>
+            <span className="text-slate-600 shrink-0">·</span>
+            <span className="text-slate-300 truncate">
+              {activeTool === 'line' &&
+                (drawingPoints.length === 0
+                  ? '點選起點（支援自動鎖點）'
+                  : '點選終點或直接輸入長度按 Enter（F8 正交鎖定）')}
+              {activeTool === 'dimension' &&
+                (drawingPoints.length === 0
+                  ? '點選第一個標註端點'
+                  : drawingPoints.length === 1
+                    ? '點選第二個標註端點'
+                    : '移動決定標註線高度並點擊完成')}
+              {activeTool === 'select' &&
+                '點選圖元或拉框選取；按 L 畫直線、D 標註尺寸、B 自動標註'}
+              {activeTool !== 'line' &&
+                activeTool !== 'dimension' &&
+                activeTool !== 'select' &&
+                (drawingPoints.length === 0
+                  ? '點選基準點開始（Esc 返回）'
+                  : '移動指定下一點或輸入數值按 Enter')}
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowGuideBanner(false)}
+              title="隱藏上方操作提示"
+              className="ml-1 p-0.5 text-slate-400 hover:text-slate-200 rounded shrink-0"
+            >
+              <EyeOff className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setShowGuideBanner(true)}
+          title="顯示操作提示"
+          className="absolute top-2 right-2 z-20 p-1.5 bg-slate-900/80 border border-slate-700/80 text-slate-300 hover:text-white rounded-md shadow"
+        >
+          <Info className="w-3.5 h-3.5" />
+        </button>
+      )}
 
       {/* OSNAP Tooltip Badge near cursor */}
       {activeSnap && activeSnap.type !== 'grid' && (
         <div
           style={{
-            transform: `translate(${mouseScreen.x + 16}px, ${mouseScreen.y - 28}px)`,
+            transform: `translate(${Math.min(
+              canvasSize.width - 130,
+              Math.max(8, mouseScreen.x + 14)
+            )}px, ${Math.max(8, mouseScreen.y - 28)}px)`,
           }}
           className="pointer-events-none absolute top-0 left-0 z-20 px-2 py-0.5 text-[11px] font-mono font-medium bg-emerald-950/90 text-emerald-300 border border-emerald-500/50 rounded shadow-sm whitespace-nowrap"
         >
@@ -1689,9 +2022,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         <div
           style={{
             transform: `translate(${Math.min(
-              canvasSize.width - 220,
-              mouseScreen.x + 18
-            )}px, ${Math.min(canvasSize.height - 70, mouseScreen.y + 18)}px)`,
+              Math.max(8, canvasSize.width - 220),
+              Math.max(8, mouseScreen.x + 16)
+            )}px, ${Math.min(
+              Math.max(8, canvasSize.height - 56),
+              Math.max(8, mouseScreen.y + 16)
+            )}px)`,
           }}
           className="pointer-events-none absolute top-0 left-0 z-20 flex items-center gap-1.5 bg-slate-900/95 border border-sky-500/60 rounded px-2 py-1 shadow-lg font-mono text-xs"
         >
@@ -1744,14 +2080,13 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               </span>
             </>
           )}
-          <span className="text-[10px] text-slate-400 ml-1">[Tab/Enter]</span>
         </div>
       )}
 
       {/* Text Annotation Input Popover */}
       {pendingTextPos && (
-        <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/50">
-          <div className="w-96 bg-slate-900 border border-slate-700 rounded-lg p-4 shadow-xl">
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-sm bg-slate-900 border border-slate-700 rounded-lg p-4 shadow-xl">
             <h3 className="text-sm font-semibold text-slate-100 mb-3">
               新增工程文字標註 (TEXT)
             </h3>
@@ -1777,7 +2112,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                         rotation: 0,
                       });
                       setPendingTextPos(null);
-                      onLogCommand(`TEXT 已建立文字標註: "${pendingTextContent.trim()}"`, 'success');
+                      onLogCommand(
+                        `TEXT 已建立文字標註: "${pendingTextContent.trim()}"`,
+                        'success'
+                      );
                     } else if (e.key === 'Escape') {
                       setPendingTextPos(null);
                     }
@@ -1832,7 +2170,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                         rotation: 0,
                       });
                       setPendingTextPos(null);
-                      onLogCommand(`TEXT 已建立文字標註: "${pendingTextContent.trim()}"`, 'success');
+                      onLogCommand(
+                        `TEXT 已建立文字標註: "${pendingTextContent.trim()}"`,
+                        'success'
+                      );
                     }
                   }}
                   className="px-4 py-1.5 text-xs font-medium text-white bg-sky-600 rounded hover:bg-sky-500 transition-colors"

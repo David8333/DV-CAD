@@ -13,6 +13,9 @@ import {
   FolderOpen,
   Grid,
   Check,
+  PanelLeft,
+  PanelRight,
+  X,
 } from 'lucide-react';
 import {
   CadEntity,
@@ -35,7 +38,6 @@ import {
   explodeEntity,
   exportToDXF,
   exportToSVG,
-  getEntityBounds,
   midpoint,
   rotateEntity,
   translateEntity,
@@ -76,6 +78,14 @@ export default function App() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [drawingPoints, setDrawingPoints] = useState<Point[]>([]);
 
+  // Responsive sidebar visibility (Desktop defaults open; Mobile/Tablet defaults closed so canvas is 100% visible)
+  const [showLeftPanel, setShowLeftPanel] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth >= 1024 : true
+  );
+  const [showRightPanel, setShowRightPanel] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth >= 1200 : false
+  );
+
   // Auto-save to localStorage whenever entities or layers change
   useEffect(() => {
     try {
@@ -88,9 +98,10 @@ export default function App() {
     }
   }, [entities, layers]);
 
-  // Viewport Pan & Zoom
-  const [pan, setPan] = useState<Point>({ x: -40, y: 10 });
-  const [zoom, setZoom] = useState<number>(1.35);
+  // Viewport Pan, Zoom & Auto-Fit Trigger
+  const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState<number>(1.0);
+  const [fitTrigger, setFitTrigger] = useState<number>(1);
 
   // Cursor & Snap status
   const [cursorWorld, setCursorWorld] = useState<Point>({ x: 0, y: 0 });
@@ -140,14 +151,8 @@ export default function App() {
     {
       id: 'init-1',
       timestamp: '00:00:01',
-      text: 'VektorCAD 2D 工程製圖核心已啟動 — 支援直接按鍵盤快捷鍵：按 [L] 畫直線、按 [D] 標註尺寸、按 [R] 畫矩形、按 [C] 畫圓、按 [F8] 切換正交鎖定。',
+      text: 'VektorCAD 2D 工程製圖核心已就緒 — 支援鍵盤快捷鍵：按 [L] 畫直線、按 [D] 標註尺寸、按 [B] 自動標註、按 [Z] 全圖置中視角。',
       type: 'info',
-    },
-    {
-      id: 'init-2',
-      timestamp: '00:00:02',
-      text: '已載入預設工程圖範本：「CNC-FLG-240 精密法蘭軸承座」（單位：mm）。',
-      type: 'success',
     },
   ]);
 
@@ -221,6 +226,10 @@ export default function App() {
     (tool: ToolType) => {
       setActiveTool(tool);
       setDrawingPoints([]);
+      // On narrow mobile screens, auto-close left drawer after picking a tool so canvas is unobstructed
+      if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+        setShowLeftPanel(false);
+      }
       const toolNames: Record<ToolType, string> = {
         select: 'SELECT 選取與掣點編輯模式 (快捷鍵 V)',
         pan: 'PAN 平移視景模式 (快捷鍵 H / 空白鍵)',
@@ -280,9 +289,15 @@ export default function App() {
     if (explodedCount > 0) {
       pushEntities(nextEntities);
       setSelectedIds([]);
-      logCommand(`EXPLODE 已將 ${explodedCount} 個複合圖元炸開為獨立直線段`, 'success');
+      logCommand(
+        `EXPLODE 已將 ${explodedCount} 個複合圖元炸開為獨立直線段`,
+        'success'
+      );
     } else {
-      logCommand('所選物件無法再炸開（僅矩形、聚合線、正多邊形支援炸開為直線）。', 'error');
+      logCommand(
+        '所選物件無法再炸開（僅矩形、聚合線、正多邊形支援炸開為直線）。',
+        'error'
+      );
     }
   }, [entities, logCommand, pushEntities, selectedIds]);
 
@@ -296,7 +311,10 @@ export default function App() {
       }));
     pushEntities([...entities, ...copies]);
     setSelectedIds(copies.map((c) => c.id));
-    logCommand(`已快速複製 ${copies.length} 個物件 (偏移 +25, -25 mm)`, 'success');
+    logCommand(
+      `已快速複製 ${copies.length} 個物件 (偏移 +25, -25 mm)`,
+      'success'
+    );
   }, [entities, logCommand, pushEntities, selectedIds]);
 
   // One-click Automatic Dimensioning for selected lines/rectangles/circles
@@ -340,7 +358,6 @@ export default function App() {
         const maxX = Math.max(ent.p1.x, ent.p2.x);
         const minY = Math.min(ent.p1.y, ent.p2.y);
         const maxY = Math.max(ent.p1.y, ent.p2.y);
-        // Top width dimension
         newDims.push({
           id: `autodim_w_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           type: 'dimension',
@@ -349,7 +366,6 @@ export default function App() {
           p2: { x: maxX, y: maxY },
           offsetPoint: { x: (minX + maxX) / 2, y: maxY + 26 },
         });
-        // Right height dimension
         newDims.push({
           id: `autodim_h_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           type: 'dimension',
@@ -374,34 +390,30 @@ export default function App() {
 
     if (newDims.length > 0) {
       pushEntities([...entities, ...newDims]);
-      logCommand(`自動標註完成：已為選取物件產生 ${newDims.length} 組精確尺寸標註！`, 'success');
+      logCommand(
+        `自動標註完成：已為選取物件產生 ${newDims.length} 組精確尺寸標註！`,
+        'success'
+      );
     } else {
-      logCommand('請選取直線、矩形或圓形以執行自動尺寸標註，或按 [D] 手動點選兩點標註。', 'info');
+      logCommand(
+        '請選取直線、矩形或圓形以執行自動尺寸標註，或按 [D] 手動點選兩點標註。',
+        'info'
+      );
     }
-  }, [activeLayerId, entities, handleSelectTool, layers, logCommand, pushEntities, selectedIds]);
+  }, [
+    activeLayerId,
+    entities,
+    handleSelectTool,
+    layers,
+    logCommand,
+    pushEntities,
+    selectedIds,
+  ]);
 
   const handleZoomExtents = useCallback(() => {
-    if (entities.length === 0) {
-      setPan({ x: 0, y: 0 });
-      setZoom(1.2);
-      return;
-    }
-    const bounds = entities.map(getEntityBounds);
-    const minX = Math.min(...bounds.map((b) => b.minX));
-    const maxX = Math.max(...bounds.map((b) => b.maxX));
-    const minY = Math.min(...bounds.map((b) => b.minY));
-    const maxY = Math.max(...bounds.map((b) => b.maxY));
-
-    const cx = (minX + maxX) / 2;
-    const cy = (minY + maxY) / 2;
-    const w = Math.max(100, maxX - minX);
-    const h = Math.max(100, maxY - minY);
-
-    const nextZoom = Math.min(8, Math.max(0.25, Math.min(720 / w, 460 / h)));
-    setZoom(nextZoom);
-    setPan({ x: -cx * nextZoom, y: cy * nextZoom });
-    logCommand('ZOOM EXTENTS 已自動縮放至全圖最佳視角 (快捷鍵 Z)', 'info');
-  }, [entities, logCommand]);
+    setFitTrigger((t) => t + 1);
+    logCommand('ZOOM EXTENTS 已自動縮放並置中顯示完整圖面 (快捷鍵 Z)', 'info');
+  }, [logCommand]);
 
   const toggleSetting = useCallback(
     (
@@ -431,13 +443,12 @@ export default function App() {
     [logCommand]
   );
 
-  // Global Direct Keyboard Shortcuts (L, D, R, C, P, A, E, G, T, K, V, H, M, J, Q, S, W, O, X, B, Z, F3-F12, Ctrl+Z/Y)
+  // Global Direct Keyboard Shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
-      // Function Keys F3, F7, F8, F9, F10, F12
       if (e.key === 'F3') {
         e.preventDefault();
         toggleSetting('osnap');
@@ -469,7 +480,6 @@ export default function App() {
         return;
       }
 
-      // Undo / Redo / Duplicate
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         if (e.shiftKey) handleRedo();
@@ -487,7 +497,6 @@ export default function App() {
         return;
       }
 
-      // Delete selected entities when not mid-drawing
       if (
         (e.key === 'Delete' || e.key === 'Backspace') &&
         drawingPoints.length === 0 &&
@@ -502,7 +511,6 @@ export default function App() {
 
       const k = e.key.toLowerCase();
 
-      // Avoid hijacking 'c' when closing a polyline with >=3 points
       if (k === 'c' && activeTool === 'polyline' && drawingPoints.length >= 3) {
         return;
       }
@@ -620,7 +628,6 @@ export default function App() {
     const upper = trimmed.toUpperCase();
     logCommand(`> ${trimmed}`, 'command');
 
-    // 1. Check standard AutoCAD Command Aliases
     const cmdMap: Record<string, ToolType> = {
       L: 'line',
       LINE: 'line',
@@ -693,7 +700,12 @@ export default function App() {
       handleRedo();
       return;
     }
-    if (upper === 'E' || upper === 'ERASE' || upper === 'DEL' || upper === '刪除') {
+    if (
+      upper === 'E' ||
+      upper === 'ERASE' ||
+      upper === 'DEL' ||
+      upper === '刪除'
+    ) {
       handleDeleteSelected();
       return;
     }
@@ -720,7 +732,6 @@ export default function App() {
       return;
     }
 
-    // 2. Check Coordinate or Distance Input: e.g. "100,50", "@120,40", "@150<30", or "120"
     const anchor =
       drawingPoints.length > 0
         ? drawingPoints[drawingPoints.length - 1]
@@ -728,7 +739,6 @@ export default function App() {
 
     let targetPt: Point | null = null;
 
-    // @distance<angle (Relative Polar)
     const polarMatch = trimmed.match(/^@?(-?\d+(?:\.\d+)?)<(-?\d+(?:\.\d+)?)$/);
     if (polarMatch) {
       const len = parseFloat(polarMatch[1]);
@@ -740,7 +750,6 @@ export default function App() {
       };
     }
 
-    // @dx,dy (Relative Cartesian)
     if (!targetPt && trimmed.startsWith('@')) {
       const parts = trimmed.slice(1).split(',');
       if (parts.length === 2) {
@@ -752,7 +761,6 @@ export default function App() {
       }
     }
 
-    // x,y (Absolute Cartesian)
     if (!targetPt && trimmed.includes(',')) {
       const parts = trimmed.split(',');
       if (parts.length === 2) {
@@ -764,7 +772,6 @@ export default function App() {
       }
     }
 
-    // Single number (Length along current cursor direction or Circle radius)
     if (!targetPt && /^-?\d+(?:\.\d+)?$/.test(trimmed)) {
       const val = parseFloat(trimmed);
       if (!isNaN(val) && val > 0 && drawingPoints.length > 0) {
@@ -781,7 +788,10 @@ export default function App() {
       if (activeTool === 'line') {
         if (drawingPoints.length === 0) {
           setDrawingPoints([targetPt]);
-          logCommand(`已指定直線起點: (${targetPt.x.toFixed(1)}, ${targetPt.y.toFixed(1)})`, 'info');
+          logCommand(
+            `已指定直線起點: (${targetPt.x.toFixed(1)}, ${targetPt.y.toFixed(1)})`,
+            'info'
+          );
         } else {
           const prev = drawingPoints[drawingPoints.length - 1];
           handleAddEntity({
@@ -810,7 +820,10 @@ export default function App() {
         logCommand(`已建立半徑 R=${r.toFixed(2)} mm 之圓形`, 'success');
       } else {
         setDrawingPoints((prev) => [...prev, targetPt!]);
-        logCommand(`已輸入座標點: (${targetPt.x.toFixed(1)}, ${targetPt.y.toFixed(1)})`, 'info');
+        logCommand(
+          `已輸入座標點: (${targetPt.x.toFixed(1)}, ${targetPt.y.toFixed(1)})`,
+          'info'
+        );
       }
       return;
     }
@@ -861,10 +874,12 @@ export default function App() {
 
     pushEntities([...entities, ...generated]);
     setActiveModal(null);
-    logCommand(`ARRAY 已成功產生 ${generated.length} 個陣列複製物件！`, 'success');
+    logCommand(
+      `ARRAY 已成功產生 ${generated.length} 個陣列複製物件！`,
+      'success'
+    );
   };
 
-  // Download file helper
   const downloadFile = (content: string, filename: string, mime: string) => {
     const blob = new Blob([content], { type: mime });
     const url = URL.createObjectURL(blob);
@@ -876,20 +891,20 @@ export default function App() {
   };
 
   return (
-    <div className="flex flex-col w-screen h-screen bg-[#0B0F17] text-slate-100 overflow-hidden select-none">
+    <div className="safe-app-container flex flex-col w-full h-full max-h-[100dvh] bg-[#0B0F17] text-slate-100 overflow-hidden select-none">
       {/* Top Bar Contract: 3 Zones (Brand Wordmark — 4 Concise Nav Links — 1 Primary Action) */}
-      <header className="flex items-center justify-between gap-8 px-5 py-2.5 bg-[#0F172A] border-b border-slate-800 shrink-0">
+      <header className="flex items-center justify-between gap-4 sm:gap-8 px-3 sm:px-5 py-2 bg-[#0F172A] border-b border-slate-800 shrink-0">
         {/* Zone 1: Single text element wordmark */}
         <a
           href="#workspace"
           onClick={(e) => e.preventDefault()}
-          className="text-base font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0"
+          className="text-sm sm:text-base font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0"
         >
           VektorCAD 專業工程製圖
         </a>
 
         {/* Zone 2: 4 single-line navigation links */}
-        <nav className="hidden md:flex items-center gap-6 text-xs font-medium text-slate-300">
+        <nav className="flex items-center gap-3 sm:gap-6 text-xs font-medium text-slate-300 overflow-x-auto">
           <button
             type="button"
             onClick={() => setActiveModal('templates')}
@@ -902,14 +917,14 @@ export default function App() {
             onClick={() => setActiveModal('array')}
             className="hover:text-sky-300 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
           >
-            陣列複製工具
+            陣列複製
           </button>
           <button
             type="button"
             onClick={() => setActiveModal('shortcuts')}
             className="hover:text-sky-300 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
           >
-            鍵盤快捷鍵一覽
+            快捷鍵一覽
           </button>
           <button
             type="button"
@@ -920,30 +935,46 @@ export default function App() {
             }}
             className="hover:text-rose-300 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
           >
-            清空畫布重繪
+            清空畫布
           </button>
         </nav>
 
         {/* Zone 3: 1 primary CTA button */}
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
             onClick={() => setActiveModal('export')}
-            className="px-3.5 py-1.5 text-xs font-medium text-white bg-sky-600 rounded-lg hover:bg-sky-500 transition-colors whitespace-nowrap shrink-0"
+            className="px-3 py-1.5 text-xs font-medium text-white bg-sky-600 rounded-lg hover:bg-sky-500 transition-colors whitespace-nowrap shrink-0"
           >
-            匯出 DXF / SVG 圖檔
+            匯出 / 匯入圖檔
           </button>
         </div>
       </header>
 
-      {/* Secondary Workspace Ribbon Toolbar */}
-      <div className="flex items-center justify-between gap-3 px-4 py-1.5 bg-[#0B0F17] border-b border-slate-800/90 text-xs shrink-0 overflow-x-auto">
-        {/* Left: Core Quick Actions (Line, Dimension, Auto-Dimension, Ortho) */}
+      {/* Secondary Workspace Ribbon Toolbar (Horizontally scrollable on narrow screens so nothing ever wraps or clips) */}
+      <div className="flex items-center justify-between gap-2 px-3 py-1.5 bg-[#0B0F17] border-b border-slate-800/90 text-xs shrink-0 overflow-x-auto">
         <div className="flex items-center gap-1.5 shrink-0">
+          {/* Toggle Left Tool Palette */}
+          <button
+            type="button"
+            onClick={() => setShowLeftPanel((v) => !v)}
+            title="展開 / 收合左側繪圖工具箱"
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-md border font-medium transition-colors whitespace-nowrap shrink-0 ${
+              showLeftPanel
+                ? 'bg-slate-800 text-sky-300 border-slate-700'
+                : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
+            }`}
+          >
+            <PanelLeft className="w-3.5 h-3.5" />
+            <span>工具箱</span>
+          </button>
+
+          <div className="h-4 w-px bg-slate-800 mx-0.5" />
+
           <button
             type="button"
             onClick={() => handleSelectTool('line')}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded-md font-medium border transition-colors whitespace-nowrap shrink-0 ${
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md font-medium border transition-colors whitespace-nowrap shrink-0 ${
               activeTool === 'line'
                 ? 'bg-sky-500 text-white border-sky-400 shadow-sm'
                 : 'bg-slate-900 text-slate-200 border-slate-700 hover:border-sky-500/60'
@@ -956,7 +987,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => handleSelectTool('dimension')}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded-md font-medium border transition-colors whitespace-nowrap shrink-0 ${
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md font-medium border transition-colors whitespace-nowrap shrink-0 ${
               activeTool === 'dimension'
                 ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-sm'
                 : 'bg-slate-900 text-slate-200 border-slate-700 hover:border-amber-500/60'
@@ -969,13 +1000,13 @@ export default function App() {
           <button
             type="button"
             onClick={handleAutoDimensionSelected}
-            className="flex items-center gap-1.5 px-3 py-1 rounded-md font-medium bg-slate-900 text-amber-300 border border-amber-500/40 hover:bg-amber-500/15 transition-colors whitespace-nowrap shrink-0"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md font-medium bg-slate-900 text-amber-300 border border-amber-500/40 hover:bg-amber-500/15 transition-colors whitespace-nowrap shrink-0"
           >
             <Sparkles className="w-3.5 h-3.5" />
-            <span>自動標註選取物件 (B)</span>
+            <span>自動標註 (B)</span>
           </button>
 
-          <div className="h-4 w-px bg-slate-800 mx-1" />
+          <div className="h-4 w-px bg-slate-800 mx-0.5" />
 
           {/* Undo / Redo */}
           <button
@@ -983,30 +1014,28 @@ export default function App() {
             onClick={handleUndo}
             disabled={historyIndex === 0}
             title="復原 (Ctrl+Z)"
-            className="flex items-center gap-1 px-2.5 py-1 rounded bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800 disabled:opacity-40 whitespace-nowrap shrink-0"
+            className="flex items-center gap-1 px-2 py-1 rounded bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800 disabled:opacity-40 whitespace-nowrap shrink-0"
           >
             <Undo2 className="w-3.5 h-3.5" />
-            <span>復原</span>
+            <span className="hidden sm:inline">復原</span>
           </button>
           <button
             type="button"
             onClick={handleRedo}
             disabled={historyIndex >= history.length - 1}
             title="重做 (Ctrl+Y)"
-            className="flex items-center gap-1 px-2.5 py-1 rounded bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800 disabled:opacity-40 whitespace-nowrap shrink-0"
+            className="flex items-center gap-1 px-2 py-1 rounded bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800 disabled:opacity-40 whitespace-nowrap shrink-0"
           >
             <Redo2 className="w-3.5 h-3.5" />
-            <span>重做</span>
+            <span className="hidden sm:inline">重做</span>
           </button>
-
-          <div className="h-4 w-px bg-slate-800 mx-1" />
 
           {/* Zoom Controls */}
           <button
             type="button"
             onClick={() => setZoom((z) => Math.min(25, z * 1.25))}
             title="放大視角"
-            className="p-1.5 rounded bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800"
+            className="p-1.5 rounded bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800 shrink-0"
           >
             <ZoomIn className="w-3.5 h-3.5" />
           </button>
@@ -1014,26 +1043,26 @@ export default function App() {
             type="button"
             onClick={() => setZoom((z) => Math.max(0.15, z / 1.25))}
             title="縮小視角"
-            className="p-1.5 rounded bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800"
+            className="p-1.5 rounded bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800 shrink-0"
           >
             <ZoomOut className="w-3.5 h-3.5" />
           </button>
           <button
             type="button"
             onClick={handleZoomExtents}
-            title="縮放至全圖範圍 (快捷鍵 Z)"
-            className="flex items-center gap-1 px-2.5 py-1 rounded bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800 whitespace-nowrap shrink-0"
+            title="自動縮放並置中顯示完整圖面 (快捷鍵 Z)"
+            className="flex items-center gap-1 px-2.5 py-1 rounded bg-sky-950/60 text-sky-300 border border-sky-500/40 hover:bg-sky-900/60 whitespace-nowrap shrink-0"
           >
             <Maximize className="w-3.5 h-3.5" />
-            <span>全圖視角 (Z)</span>
+            <span>全圖置中 (Z)</span>
           </button>
         </div>
 
-        {/* Right: Active Layer Quick Switcher & Tool Parameters */}
-        <div className="flex items-center gap-3 shrink-0">
+        {/* Right: Active Layer Quick Switcher & Inspector Toggle */}
+        <div className="flex items-center gap-2 shrink-0">
           {activeTool === 'polygon' && (
-            <div className="flex items-center gap-1.5">
-              <span className="text-slate-400">多邊形邊數:</span>
+            <div className="flex items-center gap-1">
+              <span className="text-slate-400">邊數:</span>
               <input
                 type="number"
                 min={3}
@@ -1044,14 +1073,14 @@ export default function App() {
                     Math.max(3, Math.min(24, Number(e.target.value)))
                   )
                 }
-                className="w-14 px-2 py-0.5 font-mono bg-slate-900 border border-slate-700 rounded text-slate-100"
+                className="w-12 px-1.5 py-0.5 font-mono bg-slate-900 border border-slate-700 rounded text-slate-100"
               />
             </div>
           )}
 
           {activeTool === 'offset' && (
-            <div className="flex items-center gap-1.5">
-              <span className="text-slate-400">偏移距離 (mm):</span>
+            <div className="flex items-center gap-1">
+              <span className="text-slate-400">偏移(mm):</span>
               <input
                 type="number"
                 min={1}
@@ -1060,40 +1089,67 @@ export default function App() {
                 onChange={(e) =>
                   setOffsetDistance(Math.max(1, Number(e.target.value)))
                 }
-                className="w-16 px-2 py-0.5 font-mono bg-slate-900 border border-slate-700 rounded text-slate-100"
+                className="w-14 px-1.5 py-0.5 font-mono bg-slate-900 border border-slate-700 rounded text-slate-100"
               />
             </div>
           )}
 
-          <div className="flex items-center gap-2">
-            <span className="text-slate-400 whitespace-nowrap">目前圖層:</span>
-            <select
-              value={activeLayerId}
-              onChange={(e) => setActiveLayerId(e.target.value)}
-              className="bg-slate-900 border border-slate-700 rounded px-2.5 py-1 text-xs text-slate-100 focus:outline-none focus:border-sky-500"
-            >
-              {layers.map((l) => (
-                <option key={l.id} value={l.id}>
-                  {l.name}
-                </option>
-              ))}
-            </select>
-          </div>
+          <select
+            value={activeLayerId}
+            onChange={(e) => setActiveLayerId(e.target.value)}
+            title="切換目前繪圖圖層"
+            className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-100 focus:outline-none focus:border-sky-500 max-w-[150px] truncate"
+          >
+            {layers.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.name}
+              </option>
+            ))}
+          </select>
+
+          {/* Toggle Right Inspector & Layers Panel */}
+          <button
+            type="button"
+            onClick={() => setShowRightPanel((v) => !v)}
+            title="展開 / 收合右側性質與圖層面板"
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-md border font-medium transition-colors whitespace-nowrap shrink-0 ${
+              showRightPanel
+                ? 'bg-slate-800 text-sky-300 border-slate-700'
+                : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
+            }`}
+          >
+            <PanelRight className="w-3.5 h-3.5" />
+            <span>性質/圖層</span>
+          </button>
         </div>
       </div>
 
-      {/* Main 3-Column CAD Workspace: ToolPalette + CadViewport + InspectorSidebar */}
-      <main className="flex-1 flex min-h-0 overflow-hidden">
-        <ToolPalette
-          activeTool={activeTool}
-          onSelectTool={handleSelectTool}
-          selectedCount={selectedIds.length}
-          onOpenArrayModal={() => setActiveModal('array')}
-          onExplodeSelected={handleExplodeSelected}
-          onDeleteSelected={handleDeleteSelected}
-          onAutoDimensionSelected={handleAutoDimensionSelected}
-        />
+      {/* Main Responsive CAD Workspace */}
+      <main className="relative flex-1 flex min-w-0 min-h-0 overflow-hidden">
+        {/* Left Tool Palette (Desktop inline or Mobile overlay drawer) */}
+        {showLeftPanel && (
+          <div className="absolute inset-y-0 left-0 z-30 lg:static lg:z-auto flex h-full shadow-2xl lg:shadow-none">
+            <ToolPalette
+              activeTool={activeTool}
+              onSelectTool={handleSelectTool}
+              selectedCount={selectedIds.length}
+              onOpenArrayModal={() => setActiveModal('array')}
+              onExplodeSelected={handleExplodeSelected}
+              onDeleteSelected={handleDeleteSelected}
+              onAutoDimensionSelected={handleAutoDimensionSelected}
+            />
+            <button
+              type="button"
+              onClick={() => setShowLeftPanel(false)}
+              className="lg:hidden absolute top-2 right-2 p-1 bg-slate-800 text-slate-300 rounded"
+              title="關閉工具面板"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
 
+        {/* Center High-Precision CAD Viewport */}
         <CadViewport
           entities={entities}
           layers={layers}
@@ -1120,49 +1176,55 @@ export default function App() {
           onToolComplete={() => handleSelectTool('select')}
           drawingPoints={drawingPoints}
           setDrawingPoints={setDrawingPoints}
+          fitTrigger={fitTrigger}
         />
 
-        <InspectorSidebar
-          layers={layers}
-          activeLayerId={activeLayerId}
-          onSelectLayer={setActiveLayerId}
-          onUpdateLayer={(updatedLayer) =>
-            setLayers((prev) =>
-              prev.map((l) => (l.id === updatedLayer.id ? updatedLayer : l))
-            )
-          }
-          onAddLayer={(name, color) => {
-            const newId = `L_${Date.now()}`;
-            setLayers((prev) => [
-              ...prev,
-              {
-                id: newId,
-                name,
-                color,
-                visible: true,
-                locked: false,
-                lineType: 'continuous',
-                lineWeight: 0.25,
-              },
-            ]);
-            setActiveLayerId(newId);
-            logCommand(`已建立新圖層：「${name}」`, 'success');
-          }}
-          onDeleteLayer={(id) => {
-            if (id === '0') return;
-            setLayers((prev) => prev.filter((l) => l.id !== id));
-            if (activeLayerId === id) setActiveLayerId('0');
-            logCommand('已刪除圖層', 'info');
-          }}
-          entities={entities}
-          selectedIds={selectedIds}
-          onUpdateEntities={handleUpdateEntities}
-          onDeleteSelected={handleDeleteSelected}
-          onExplodeSelected={handleExplodeSelected}
-          onDuplicateSelected={handleDuplicateSelected}
-          settings={settings}
-          onUpdateSettings={setSettings}
-        />
+        {/* Right Inspector & Layers Sidebar (Desktop inline or Mobile overlay drawer) */}
+        {showRightPanel && (
+          <div className="absolute inset-y-0 right-0 z-30 xl:static xl:z-auto flex h-full shadow-2xl xl:shadow-none">
+            <InspectorSidebar
+              layers={layers}
+              activeLayerId={activeLayerId}
+              onSelectLayer={setActiveLayerId}
+              onUpdateLayer={(updatedLayer) =>
+                setLayers((prev) =>
+                  prev.map((l) => (l.id === updatedLayer.id ? updatedLayer : l))
+                )
+              }
+              onAddLayer={(name, color) => {
+                const newId = `L_${Date.now()}`;
+                setLayers((prev) => [
+                  ...prev,
+                  {
+                    id: newId,
+                    name,
+                    color,
+                    visible: true,
+                    locked: false,
+                    lineType: 'continuous',
+                    lineWeight: 0.25,
+                  },
+                ]);
+                setActiveLayerId(newId);
+                logCommand(`已建立新圖層：「${name}」`, 'success');
+              }}
+              onDeleteLayer={(id) => {
+                if (id === '0') return;
+                setLayers((prev) => prev.filter((l) => l.id !== id));
+                if (activeLayerId === id) setActiveLayerId('0');
+                logCommand('已刪除圖層', 'info');
+              }}
+              entities={entities}
+              selectedIds={selectedIds}
+              onUpdateEntities={handleUpdateEntities}
+              onDeleteSelected={handleDeleteSelected}
+              onExplodeSelected={handleExplodeSelected}
+              onDuplicateSelected={handleDuplicateSelected}
+              settings={settings}
+              onUpdateSettings={setSettings}
+            />
+          </div>
+        )}
       </main>
 
       {/* Bottom AutoCAD Command Line & Precision Status Dock */}
@@ -1179,8 +1241,8 @@ export default function App() {
 
       {/* Modal 1: Blueprint Templates Library */}
       {activeModal === 'templates' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
-          <div className="w-full max-w-xl bg-slate-900 border border-slate-700 rounded-xl p-6 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 overflow-y-auto">
+          <div className="w-full max-w-xl max-h-[90dvh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-2xl">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <FolderOpen className="w-5 h-5 text-sky-400" />
@@ -1200,9 +1262,9 @@ export default function App() {
               {BLUEPRINT_TEMPLATES.map((tpl) => (
                 <div
                   key={tpl.id}
-                  className="flex items-center justify-between p-4 bg-slate-950/80 border border-slate-800 hover:border-sky-500/60 rounded-lg transition-colors"
+                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 bg-slate-950/80 border border-slate-800 hover:border-sky-500/60 rounded-lg transition-colors"
                 >
-                  <div className="space-y-1 pr-4">
+                  <div className="space-y-1">
                     <div className="text-sm font-semibold text-slate-100">
                       {tpl.name}
                     </div>
@@ -1216,7 +1278,8 @@ export default function App() {
                       pushEntities(tpl.entities);
                       setSelectedIds([]);
                       setActiveModal(null);
-                      logCommand(`已載入工程圖範本：「${tpl.name}」`, 'success');
+                      setTimeout(() => setFitTrigger((t) => t + 1), 30);
+                      logCommand(`已載入工程圖範本：「${tpl.name}」並自動縮放至全圖視角`, 'success');
                     }}
                     className="px-4 py-2 text-xs font-medium text-white bg-sky-600 hover:bg-sky-500 rounded-lg whitespace-nowrap shrink-0"
                   >
@@ -1231,8 +1294,8 @@ export default function App() {
 
       {/* Modal 2: Keyboard Shortcuts Cheat Sheet */}
       {activeModal === 'shortcuts' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
-          <div className="w-full max-w-2xl bg-slate-900 border border-slate-700 rounded-xl p-6 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 overflow-y-auto">
+          <div className="w-full max-w-2xl max-h-[90dvh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-2xl">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <Keyboard className="w-5 h-5 text-sky-400" />
@@ -1266,9 +1329,9 @@ export default function App() {
                   ['T', '插入工程文字標註'],
                   ['K', '測量兩點距離、ΔX、ΔY 與角度'],
                 ].map(([key, desc]) => (
-                  <div key={key} className="flex items-center justify-between">
+                  <div key={key} className="flex items-center justify-between gap-2">
                     <span className="text-slate-300">{desc}</span>
-                    <kbd className="px-2 py-0.5 font-mono font-semibold bg-slate-900 text-sky-300 border border-slate-700 rounded">
+                    <kbd className="px-2 py-0.5 font-mono font-semibold bg-slate-900 text-sky-300 border border-slate-700 rounded shrink-0">
                       {key}
                     </kbd>
                   </div>
@@ -1289,11 +1352,11 @@ export default function App() {
                   ['X / DEL', '炸開圖元為直線 (X) / 刪除選取物件 (DEL)'],
                   ['Z', '自動縮放至全圖最佳視角 (Zoom Extents)'],
                   ['Ctrl+Z / Y', '復原上一步 / 重做'],
-                  ['空白鍵 / 中鍵', '按住拖曳平移畫布，滾輪縮放'],
+                  ['空白鍵 / 雙指', '拖曳平移畫布，滾輪或雙指縮放'],
                 ].map(([key, desc]) => (
-                  <div key={key} className="flex items-center justify-between">
+                  <div key={key} className="flex items-center justify-between gap-2">
                     <span className="text-slate-300">{desc}</span>
-                    <kbd className="px-2 py-0.5 font-mono font-semibold bg-slate-900 text-amber-300 border border-slate-700 rounded">
+                    <kbd className="px-2 py-0.5 font-mono font-semibold bg-slate-900 text-amber-300 border border-slate-700 rounded shrink-0">
                       {key}
                     </kbd>
                   </div>
@@ -1306,8 +1369,8 @@ export default function App() {
 
       {/* Modal 3: Rectangular & Polar Array Generator */}
       {activeModal === 'array' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
-          <div className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-xl p-6 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 overflow-y-auto">
+          <div className="w-full max-w-md max-h-[90dvh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-2xl">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <Grid className="w-5 h-5 text-sky-400" />
@@ -1457,15 +1520,15 @@ export default function App() {
         </div>
       )}
 
-      {/* Modal 4: Export DXF / SVG / JSON */}
+      {/* Modal 4: Export DXF / SVG / JSON & Import JSON */}
       {activeModal === 'export' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
-          <div className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-xl p-6 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 overflow-y-auto">
+          <div className="w-full max-w-md max-h-[90dvh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-2xl">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <Download className="w-5 h-5 text-sky-400" />
                 <h2 className="text-base font-bold text-slate-100">
-                  匯出工程圖檔 (DXF / SVG / JSON)
+                  匯出與匯入工程圖檔
                 </h2>
               </div>
               <button
@@ -1482,7 +1545,11 @@ export default function App() {
                 type="button"
                 onClick={() => {
                   const dxf = exportToDXF(entities, layers);
-                  downloadFile(dxf, `vektorcad_${Date.now()}.dxf`, 'application/dxf');
+                  downloadFile(
+                    dxf,
+                    `vektorcad_${Date.now()}.dxf`,
+                    'application/dxf'
+                  );
                   setActiveModal(null);
                   logCommand('已匯出標準 AutoCAD .DXF 圖檔！', 'success');
                 }}
@@ -1496,7 +1563,7 @@ export default function App() {
                     相容於 AutoCAD、SolidWorks、Rhino 與各類 CNC 軟體
                   </div>
                 </div>
-                <span className="px-2.5 py-1 font-mono bg-sky-500/20 text-sky-300 rounded">
+                <span className="px-2.5 py-1 font-mono bg-sky-500/20 text-sky-300 rounded shrink-0">
                   .DXF
                 </span>
               </button>
@@ -1505,7 +1572,11 @@ export default function App() {
                 type="button"
                 onClick={() => {
                   const svg = exportToSVG(entities, layers);
-                  downloadFile(svg, `vektorcad_${Date.now()}.svg`, 'image/svg+xml');
+                  downloadFile(
+                    svg,
+                    `vektorcad_${Date.now()}.svg`,
+                    'image/svg+xml'
+                  );
                   setActiveModal(null);
                   logCommand('已匯出高解析向量 .SVG 工程圖檔！', 'success');
                 }}
@@ -1519,7 +1590,7 @@ export default function App() {
                     保留圖層顏色、虛線中心線型與尺寸標註，適合列印與報告
                   </div>
                 </div>
-                <span className="px-2.5 py-1 font-mono bg-emerald-500/20 text-emerald-300 rounded">
+                <span className="px-2.5 py-1 font-mono bg-emerald-500/20 text-emerald-300 rounded shrink-0">
                   .SVG
                 </span>
               </button>
@@ -1546,7 +1617,7 @@ export default function App() {
                     包含完整圖層設定與幾何參數備份
                   </div>
                 </div>
-                <span className="px-2.5 py-1 font-mono bg-amber-500/20 text-amber-300 rounded">
+                <span className="px-2.5 py-1 font-mono bg-amber-500/20 text-amber-300 rounded shrink-0">
                   .JSON
                 </span>
               </button>
@@ -1557,10 +1628,10 @@ export default function App() {
                     匯入並還原專案檔 (.JSON)
                   </div>
                   <div className="text-slate-400 mt-0.5">
-                    從電腦讀取先前備份的 VektorCAD .JSON 檔案
+                    從裝置讀取先前備份的 VektorCAD .JSON 檔案
                   </div>
                 </div>
-                <span className="px-2.5 py-1 font-mono bg-slate-800 text-slate-200 rounded">
+                <span className="px-2.5 py-1 font-mono bg-slate-800 text-slate-200 rounded shrink-0">
                   讀取檔案
                 </span>
                 <input
@@ -1581,9 +1652,16 @@ export default function App() {
                           }
                           setSelectedIds([]);
                           setActiveModal(null);
-                          logCommand(`已成功匯入專案檔：「${file.name}」`, 'success');
+                          setTimeout(() => setFitTrigger((t) => t + 1), 30);
+                          logCommand(
+                            `已成功匯入專案檔：「${file.name}」`,
+                            'success'
+                          );
                         } else {
-                          logCommand('檔案格式不符，請選擇有效的 VektorCAD .JSON 專案檔。', 'error');
+                          logCommand(
+                            '檔案格式不符，請選擇有效的 VektorCAD .JSON 專案檔。',
+                            'error'
+                          );
                         }
                       } catch {
                         logCommand('讀取 JSON 專案檔失敗。', 'error');
