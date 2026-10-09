@@ -24,10 +24,10 @@ interface CommandDockProps {
 
 const TOOL_PROMPTS: Record<ToolType, string> = {
   select:
-    '就緒 — 點選圖元可即時修改尺寸；支援 Ctrl+C 複製、Ctrl+X 剪下、Ctrl+V 貼上；雙字母快捷鍵如 TR、EX、CO、AR 可依序按鍵執行',
+    '就緒 — 點選圖元可修改尺寸；按 TAB 選取全部線段；按 JO 將鼠標跳至座標原點 X,Y=(0,0)；支援雙字母快捷鍵 TR、EX、CO、AR、JO',
   pan: 'PAN 平移視景 — 拖曳畫布或雙指縮放平移',
   zoomWindow: 'ZOOM WINDOW 請依序點選放大框的第一角點與對角點，立即局部放大',
-  line: 'LINE 指定點或輸入 [長度] 按空白鍵/Enter / [X,Y] / [@距離<角度]',
+  line: 'LINE 指定點或輸入 [長度] 按空白鍵/Enter / 按 JO 跳至原點 (0,0)',
   polyline: 'PLINE 指定下一頂點，輸入 C 封閉，或按空白鍵/Enter 結束',
   rectangle: 'RECTANG 指定角點或中心點，或直接輸入寬度 [Tab] 高度按空白鍵/Enter',
   circle: 'CIRCLE 指定圓心與半徑 R，或輸入半徑數值按空白鍵/Enter',
@@ -41,9 +41,9 @@ const TOOL_PROMPTS: Record<ToolType, string> = {
   copy: 'COPY 指定複製基準點，可連續點選多個目標點放置副本',
   rotate: 'ROTATE 指定旋轉中心基準點，再拖曳或輸入旋轉角度',
   mirror: 'MIRROR 依序點選兩點定義對稱鏡射軸線',
-  offset: 'OFFSET 可輸入偏移距離數值按空白鍵/Enter，點選物件後再點選要偏移的一側',
+  offset: 'OFFSET 支援同時偏移選取的所有圖形！輸入距離按空白鍵/Enter，點選要偏移的一側',
   trim: 'TRIM 剪切模式 (TR) — 支援剪切直線、矩形、圓形與三點圓弧！移至圖元預覽紅虛線後點擊切除',
-  extend: 'EXTEND 延伸模式 (EX) — 將游標移至線段端點預覽綠虛線延伸路徑，點擊左鍵延伸至邊界',
+  extend: 'EXTEND 延伸模式 (EX) — 依序點選兩個線段可互相延伸接合至交點（或點選同一線段延伸至邊界）',
   join: 'JOIN 組裝圖元 (J) — 保留所有選取圖元原始位置並合併成單一物件，按空白鍵或 Enter 完成',
 };
 

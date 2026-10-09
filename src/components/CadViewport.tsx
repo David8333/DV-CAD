@@ -26,6 +26,7 @@ import {
   applyOrthoAndPolar,
   arcFromThreePoints,
   computeExtendResult,
+  computeMutualExtendResult,
   computeTrimResult,
   DEG_TO_RAD,
   dist,
@@ -42,6 +43,7 @@ import {
   midpoint,
   mirrorEntity,
   offsetEntity,
+  offsetSelectedEntities,
   RAD_TO_DEG,
   rotateEntity,
   snapDimensionOffsetToExisting,
@@ -81,6 +83,7 @@ interface CadViewportProps {
   drawingPoints: Point[];
   setDrawingPoints: React.Dispatch<React.SetStateAction<Point[]>>;
   fitTrigger: number;
+  jumpToOriginTrigger: number;
 }
 
 export const CadViewport: React.FC<CadViewportProps> = ({
@@ -113,6 +116,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   drawingPoints,
   setDrawingPoints,
   fitTrigger,
+  jumpToOriginTrigger,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -129,6 +133,17 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     null
   );
   const [hoveredEntityId, setHoveredEntityId] = useState<string | null>(null);
+
+  // Two-line mutual extend state (點選兩個線段互相延伸)
+  const [extendFirstPick, setExtendFirstPick] = useState<{
+    entityId: string;
+    clickPt: Point;
+  } | null>(null);
+
+  // Pinned to Origin (0,0) state when user presses JO
+  const [cursorPinnedToOrigin, setCursorPinnedToOrigin] =
+    useState<boolean>(false);
+  const pinScreenAnchorRef = useRef<Point | null>(null);
 
   // Panning state
   const [isPanning, setIsPanning] = useState(false);
@@ -271,6 +286,50 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     fitDrawingToViewport,
   ]);
 
+  // Handle JO shortcut: Jump cursor directly to Origin (0, 0)
+  const lastJumpOriginRef = useRef(jumpToOriginTrigger);
+  useEffect(() => {
+    if (jumpToOriginTrigger !== lastJumpOriginRef.current) {
+      lastJumpOriginRef.current = jumpToOriginTrigger;
+      const originPt: Point = { x: 0, y: 0 };
+      let originScreen = worldToScreen(0, 0);
+
+      // If (0, 0) is currently outside the visible viewport margin, center viewport on (0, 0)
+      if (
+        originScreen.x < 40 ||
+        originScreen.x > canvasSize.width - 40 ||
+        originScreen.y < 40 ||
+        originScreen.y > canvasSize.height - 40
+      ) {
+        onPanZoomChange({ x: 0, y: 0 }, zoom);
+        originScreen = {
+          x: canvasSize.width / 2,
+          y: canvasSize.height / 2,
+        };
+      }
+
+      const originSnap: SnapPoint = {
+        point: originPt,
+        type: 'endpoint',
+        label: '座標原點 X,Y=(0,0)',
+      };
+      setMouseScreen(originScreen);
+      setCursorWorld(originPt);
+      setActiveSnap(originSnap);
+      setCursorPinnedToOrigin(true);
+      pinScreenAnchorRef.current = null;
+      onCursorMove(originPt, originSnap);
+    }
+  }, [
+    jumpToOriginTrigger,
+    canvasSize.width,
+    canvasSize.height,
+    onCursorMove,
+    onPanZoomChange,
+    worldToScreen,
+    zoom,
+  ]);
+
   // Reset transient states when activeTool changes
   useEffect(() => {
     setDynValue('');
@@ -279,6 +338,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     setSelectionBoxStart(null);
     setActiveGrip(null);
     setDimAlignGuide(null);
+    setExtendFirstPick(null);
     if (activeTool !== 'measure') {
       setMeasureResult(null);
     }
@@ -750,6 +810,13 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
       if (e.key === 'Escape') {
+        setCursorPinnedToOrigin(false);
+        if (extendFirstPick) {
+          setExtendFirstPick(null);
+          onSelectChange([]);
+          onLogCommand('已取消第一條延伸線段選擇 (ESC)', 'info');
+          return;
+        }
         if (drawingPoints.length > 0) {
           setDrawingPoints([]);
           setDynValue('');
@@ -767,38 +834,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         return;
       }
 
-      // Dynamic numeric typing when drawing OR when in offset tool
+      // Tab key when not actively typing a number: select all connected segments (or all segments on canvas)
       if (
-        (drawingPoints.length > 0 && settings.dynInput) ||
-        activeTool === 'offset'
+        e.key === 'Tab' &&
+        drawingPoints.length === 0 &&
+        (activeTool !== 'offset' || dynValue.trim() === '')
       ) {
-        if (e.key === 'Tab') {
-          e.preventDefault();
-          setDynField((prev) => (prev === 'primary' ? 'secondary' : 'primary'));
-          return;
-        }
-        if (/^[0-9.-]$/.test(e.key)) {
-          e.preventDefault();
-          if (dynField === 'primary') {
-            setDynValue((prev) => prev + e.key);
-          } else {
-            setDynAngleValue((prev) => prev + e.key);
-          }
-          return;
-        }
-        if (e.key === 'Backspace') {
-          e.preventDefault();
-          if (dynField === 'primary') {
-            setDynValue((prev) => prev.slice(0, -1));
-          } else {
-            setDynAngleValue((prev) => prev.slice(0, -1));
-          }
-          return;
-        }
-      }
-
-      // Tab key when not drawing: select all connected segments (or all segments on canvas)
-      if (e.key === 'Tab' && drawingPoints.length === 0 && activeTool !== 'offset') {
         e.preventDefault();
         const visibleLayerIds = new Set(
           layers.filter((l) => l.visible && !l.locked).map((l) => l.id)
@@ -849,6 +890,36 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         return;
       }
 
+      // Dynamic numeric typing when drawing OR when in offset tool
+      if (
+        (drawingPoints.length > 0 && settings.dynInput) ||
+        activeTool === 'offset'
+      ) {
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          setDynField((prev) => (prev === 'primary' ? 'secondary' : 'primary'));
+          return;
+        }
+        if (/^[0-9.-]$/.test(e.key)) {
+          e.preventDefault();
+          if (dynField === 'primary') {
+            setDynValue((prev) => prev + e.key);
+          } else {
+            setDynAngleValue((prev) => prev + e.key);
+          }
+          return;
+        }
+        if (e.key === 'Backspace') {
+          e.preventDefault();
+          if (dynField === 'primary') {
+            setDynValue((prev) => prev.slice(0, -1));
+          } else {
+            setDynAngleValue((prev) => prev.slice(0, -1));
+          }
+          return;
+        }
+      }
+
       // Spacebar acts identically to Enter!
       if (e.key === 'Enter' || e.code === 'Space') {
         if (activeTool === 'offset' && dynValue.trim() !== '') {
@@ -857,7 +928,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           if (!isNaN(newDist) && newDist > 0) {
             onChangeOffsetDistance(newDist);
             onLogCommand(
-              `OFFSET 已設定偏移距離 = ${newDist.toFixed(2)} mm — 請點選物件與偏移方向`,
+              `OFFSET 已設定偏移距離 = ${newDist.toFixed(2)} mm — 請點選要偏移的一側（支援同時偏移所有已選取圖形）`,
               'success'
             );
           }
@@ -871,9 +942,44 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           return;
         }
 
+        if (activeTool === 'extend' && extendFirstPick) {
+          e.preventDefault();
+          const firstEnt = entities.find(
+            (ent) => ent.id === extendFirstPick.entityId
+          );
+          if (firstEnt) {
+            const visibleLayerIds = new Set(
+              layers.filter((l) => l.visible && !l.locked).map((l) => l.id)
+            );
+            const visibleEntities = entities.filter((ent) =>
+              visibleLayerIds.has(ent.layerId)
+            );
+            const res = computeExtendResult(
+              extendFirstPick.clickPt,
+              firstEnt,
+              visibleEntities
+            );
+            if (res) {
+              onUpdateEntities(
+                entities.map((ent) =>
+                  ent.id === firstEnt.id ? res.updatedEntity : ent
+                )
+              );
+              setExtendFirstPick(null);
+              onSelectChange([]);
+              onLogCommand(
+                `EXTEND 已延伸線段至交界處 (+${dist(res.extensionSegment[0], res.extensionSegment[1]).toFixed(1)} mm)`,
+                'success'
+              );
+              return;
+            }
+          }
+        }
+
         const anchor = drawingPoints[drawingPoints.length - 1];
         if (anchor && (dynValue.trim() !== '' || dynAngleValue.trim() !== '')) {
           e.preventDefault();
+          setCursorPinnedToOrigin(false);
           const val1 = parseFloat(dynValue);
           const val2 = parseFloat(dynAngleValue);
 
@@ -906,6 +1012,31 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             });
             return;
           }
+        }
+
+        // If cursor was jumped to Origin (0,0) via JO and user presses Spacebar/Enter while in a point-input tool, commit (0,0)!
+        if (
+          cursorPinnedToOrigin &&
+          [
+            'line',
+            'polyline',
+            'rectangle',
+            'circle',
+            'arc',
+            'polygon',
+            'dimension',
+            'measure',
+            'move',
+            'copy',
+            'rotate',
+            'mirror',
+            'zoomWindow',
+          ].includes(activeTool)
+        ) {
+          e.preventDefault();
+          setCursorPinnedToOrigin(false);
+          commitPoint({ x: 0, y: 0 });
+          return;
         }
 
         if (activeTool === 'polyline' && drawingPoints.length >= 2) {
@@ -975,12 +1106,14 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     activeLayerId,
     activeTool,
     commitPoint,
+    cursorPinnedToOrigin,
     cursorWorld,
     drawingPoints,
     dynAngleValue,
     dynField,
     dynValue,
     entities,
+    extendFirstPick,
     hoveredEntityId,
     layers,
     onAddEntity,
@@ -989,6 +1122,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     onLogCommand,
     onSelectChange,
     onToolComplete,
+    onUpdateEntities,
     rectangleMode,
     selectedIds,
     selectionBoxStart,
@@ -998,7 +1132,27 @@ export const CadViewport: React.FC<CadViewportProps> = ({
 
   // Update world cursor & snap from screen coordinates
   const updateCursorFromScreen = useCallback(
-    (sx: number, sy: number) => {
+    (sx: number, sy: number, ignorePin = false) => {
+      if (cursorPinnedToOrigin && !ignorePin) {
+        if (!pinScreenAnchorRef.current) {
+          pinScreenAnchorRef.current = { x: sx, y: sy };
+        }
+        const moveDist = Math.hypot(
+          sx - pinScreenAnchorRef.current.x,
+          sy - pinScreenAnchorRef.current.y
+        );
+        if (moveDist <= 8) {
+          const originPt: Point = { x: 0, y: 0 };
+          const originScreen = worldToScreen(0, 0);
+          setMouseScreen(originScreen);
+          setCursorWorld(originPt);
+          return { rawWorld: originPt, effectiveWorld: originPt };
+        } else {
+          setCursorPinnedToOrigin(false);
+          pinScreenAnchorRef.current = null;
+        }
+      }
+
       setMouseScreen({ x: sx, y: sy });
       const rawWorld = screenToWorld(sx, sy);
       const snap = findBestSnapPoint(
@@ -1078,12 +1232,14 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     [
       activeGrip,
       activeTool,
+      cursorPinnedToOrigin,
       drawingPoints,
       entities,
       layers,
       onCursorMove,
       screenToWorld,
       settings,
+      worldToScreen,
       zoom,
     ]
   );
@@ -1180,6 +1336,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     if (e.button !== 0) return;
 
     const { rawWorld, effectiveWorld } = updateCursorFromScreen(sx, sy);
+    if (cursorPinnedToOrigin) {
+      setCursorPinnedToOrigin(false);
+      pinScreenAnchorRef.current = null;
+    }
 
     const visibleLayerIds = new Set(
       layers.filter((l) => l.visible && !l.locked).map((l) => l.id)
@@ -1310,29 +1470,94 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       return;
     }
 
-    // 4. Check if in EXTEND (延伸 EX) mode
+    // 4. Check if in EXTEND (延伸 EX — 支援點選兩個線段互相延伸，或延伸至既有邊界) mode
     if (activeTool === 'extend') {
       const hitTol = 12 / zoom;
       const hit = [...visibleEntities]
         .reverse()
         .find((ent) => isPointNearEntity(rawWorld, ent, hitTol));
       if (!hit) {
-        onLogCommand('EXTEND 請點選要延伸的直線或開放聚合線端點附近', 'info');
+        if (extendFirstPick) {
+          setExtendFirstPick(null);
+          onSelectChange([]);
+          onLogCommand(
+            'EXTEND 已取消第一條線段選擇 — 請重新點選第一個線段',
+            'info'
+          );
+        } else {
+          onLogCommand(
+            'EXTEND 請依序點選兩個線段以互相延伸至交點（或點選同一線段兩次直接延伸至最近邊界）',
+            'info'
+          );
+        }
         return;
       }
-      const res = computeExtendResult(rawWorld, hit, visibleEntities);
-      if (res) {
-        const nextEntities = entities.map((e) =>
-          e.id === hit.id ? res.updatedEntity : e
-        );
-        onUpdateEntities(nextEntities);
+
+      if (!extendFirstPick) {
+        setExtendFirstPick({ entityId: hit.id, clickPt: rawWorld });
+        onSelectChange([hit.id]);
         onLogCommand(
-          `EXTEND 已成功延伸圖元至交界處 (延伸 +${dist(res.extensionSegment[0], res.extensionSegment[1]).toFixed(1)} mm)`,
-          'success'
+          `EXTEND 已點選第一條線段 (${hit.type.toUpperCase()}) — 請點選第二條線段以互相延伸至交點（或再點一次此線段延伸至最近邊界）`,
+          'info'
         );
-      } else {
-        onLogCommand('EXTEND 在該端點延伸方向上找不到相交的邊界圖元', 'error');
+        return;
       }
+
+      // If user clicked the SAME entity again -> single-line extend to nearest boundary
+      if (hit.id === extendFirstPick.entityId) {
+        const res = computeExtendResult(rawWorld, hit, visibleEntities);
+        if (res) {
+          const nextEntities = entities.map((e) =>
+            e.id === hit.id ? res.updatedEntity : e
+          );
+          onUpdateEntities(nextEntities);
+          setExtendFirstPick(null);
+          onSelectChange([]);
+          onLogCommand(
+            `EXTEND 已成功延伸圖元至交界處 (延伸 +${dist(res.extensionSegment[0], res.extensionSegment[1]).toFixed(1)} mm)`,
+            'success'
+          );
+        } else {
+          onLogCommand(
+            'EXTEND 此線段前方無既有相交邊界，請點選另一條線段以互相延伸接合！',
+            'info'
+          );
+        }
+        return;
+      }
+
+      // User clicked a SECOND line segment -> mutually extend both segments to their intersection!
+      const firstEnt = entities.find((e) => e.id === extendFirstPick.entityId);
+      if (firstEnt) {
+        const mutualRes = computeMutualExtendResult(
+          firstEnt,
+          extendFirstPick.clickPt,
+          hit,
+          rawWorld
+        );
+        if (mutualRes) {
+          const updateMap = new Map(
+            mutualRes.updatedEntities.map((u) => [u.id, u])
+          );
+          const nextEntities = entities.map((e) => updateMap.get(e.id) || e);
+          onUpdateEntities(nextEntities);
+          setExtendFirstPick(null);
+          onSelectChange([]);
+          onLogCommand(
+            `EXTEND 已成功將兩個線段互相延伸接合於交點 (${mutualRes.intersectionPoint.x.toFixed(1)}, ${mutualRes.intersectionPoint.y.toFixed(1)})！`,
+            'success'
+          );
+          return;
+        }
+      }
+
+      // If parallel or cannot intersect, switch first pick to the newly clicked entity
+      setExtendFirstPick({ entityId: hit.id, clickPt: rawWorld });
+      onSelectChange([hit.id]);
+      onLogCommand(
+        'EXTEND 兩線段平行無法相交，已改選目前線段作為第一條線段',
+        'error'
+      );
       return;
     }
 
@@ -1356,27 +1581,56 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       return;
     }
 
-    // 6. Check if in OFFSET mode
+    // 6. Check if in OFFSET mode (支援同時偏移所有選取的圖形!)
     if (activeTool === 'offset') {
-      if (selectedIds.length === 0) {
-        const hitTol = 10 / zoom;
-        const hit = [...visibleEntities]
-          .reverse()
-          .find((ent) => isPointNearEntity(rawWorld, ent, hitTol));
+      if (selectionBoxStart) {
+        const isCrossing = rawWorld.x < selectionBoxStart.x;
+        const boxedIds = visibleEntities
+          .filter((ent) =>
+            isEntityInSelectionBox(
+              ent,
+              selectionBoxStart,
+              rawWorld,
+              isCrossing
+            )
+          )
+          .map((ent) => ent.id);
+        const merged = e.shiftKey
+          ? Array.from(new Set([...selectedIds, ...boxedIds]))
+          : boxedIds;
+        onSelectChange(merged);
+        setSelectionBoxStart(null);
+        onLogCommand(
+          `OFFSET 已框選 ${merged.length} 個圖形 — 請點選要偏移的一側，或輸入距離按空白鍵/Enter`,
+          'info'
+        );
+        return;
+      }
+
+      const hitTol = 10 / zoom;
+      const hit = [...visibleEntities]
+        .reverse()
+        .find((ent) => isPointNearEntity(rawWorld, ent, hitTol));
+
+      if (selectedIds.length === 0 || e.shiftKey) {
         if (hit) {
-          onSelectChange([hit.id]);
+          const nextIds = e.shiftKey
+            ? selectedIds.includes(hit.id)
+              ? selectedIds.filter((id) => id !== hit.id)
+              : [...selectedIds, hit.id]
+            : [hit.id];
+          onSelectChange(nextIds);
           onLogCommand(
-            `OFFSET 已選取物件 (${hit.type.toUpperCase()}) — 請點選要偏移的一側，或直接打字輸入距離按空白鍵/Enter (目前距離 = ${offsetDistance} mm)`,
+            `OFFSET 已選取 ${nextIds.length} 個圖形（可按 TAB 選取相連/全部線段，或按住 Shift 加選）— 請點選要偏移的一側 (目前距離 = ${offsetDistance} mm)`,
             'info'
           );
-        } else {
-          onLogCommand(
-            'OFFSET 請點選要偏移複製的線段、圓形、圓弧、矩形或多邊形',
-            'info'
-          );
+        } else if (!e.shiftKey) {
+          setSelectionBoxStart(rawWorld);
         }
       } else {
-        const targetEnt = entities.find((ent) => ent.id === selectedIds[0]);
+        const selectedEnts = entities.filter((ent) =>
+          selectedIds.includes(ent.id)
+        );
         const effectiveOffset =
           dynValue.trim() !== '' && !isNaN(parseFloat(dynValue))
             ? Math.max(0.5, parseFloat(dynValue))
@@ -1384,24 +1638,22 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         if (effectiveOffset !== offsetDistance) {
           onChangeOffsetDistance(effectiveOffset);
         }
-        if (targetEnt) {
-          const newEnt = offsetEntity(
-            targetEnt,
-            effectiveWorld,
-            effectiveOffset,
-            `off_${Date.now()}`
+        const newEnts = offsetSelectedEntities(
+          selectedEnts,
+          effectiveWorld,
+          effectiveOffset,
+          `off_${Date.now()}`
+        );
+        if (newEnts.length > 0) {
+          onUpdateEntities([...entities, ...newEnts]);
+          onSelectChange(newEnts.map((ent) => ent.id));
+          setDynValue('');
+          onLogCommand(
+            `OFFSET 已同時偏移複製 ${newEnts.length} 個選取圖形 (距離 ${effectiveOffset} mm)`,
+            'success'
           );
-          if (newEnt) {
-            onAddEntity(newEnt);
-            onSelectChange([newEnt.id]);
-            setDynValue('');
-            onLogCommand(
-              `OFFSET 已建立偏移物件 (距離 ${effectiveOffset} mm)`,
-              'success'
-            );
-          } else {
-            onLogCommand('OFFSET 偏移距離過大或該物件不支援向內偏移', 'error');
-          }
+        } else {
+          onLogCommand('OFFSET 偏移距離過大或選取物件不支援向內偏移', 'error');
         }
       }
       return;
@@ -1937,56 +2189,128 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       }
     }
 
-    if (activeTool === 'extend' && hoveredEntityId) {
-      const hoveredEnt = visibleEntities.find((e) => e.id === hoveredEntityId);
-      if (hoveredEnt) {
-        const extRes = computeExtendResult(
-          cursorWorld,
-          hoveredEnt,
-          visibleEntities
+    if (activeTool === 'extend') {
+      if (extendFirstPick && hoveredEntityId) {
+        const firstEnt = visibleEntities.find(
+          (e) => e.id === extendFirstPick.entityId
         );
-        if (extRes) {
-          const s1 = worldToScreen(
-            extRes.extensionSegment[0].x,
-            extRes.extensionSegment[0].y
+        const hoveredEnt = visibleEntities.find(
+          (e) => e.id === hoveredEntityId
+        );
+        if (firstEnt && hoveredEnt && firstEnt.id !== hoveredEnt.id) {
+          const mutualRes = computeMutualExtendResult(
+            firstEnt,
+            extendFirstPick.clickPt,
+            hoveredEnt,
+            cursorWorld
           );
-          const s2 = worldToScreen(
-            extRes.extensionSegment[1].x,
-            extRes.extensionSegment[1].y
+          if (mutualRes) {
+            ctx.save();
+            ctx.strokeStyle = '#10B981';
+            ctx.lineWidth = 2.5;
+            ctx.setLineDash([6, 4]);
+            for (const [pA, pB] of mutualRes.extensionSegments) {
+              const s1 = worldToScreen(pA.x, pA.y);
+              const s2 = worldToScreen(pB.x, pB.y);
+              ctx.beginPath();
+              ctx.moveTo(s1.x, s1.y);
+              ctx.lineTo(s2.x, s2.y);
+              ctx.stroke();
+            }
+            const sInt = worldToScreen(
+              mutualRes.intersectionPoint.x,
+              mutualRes.intersectionPoint.y
+            );
+            ctx.setLineDash([]);
+            ctx.fillStyle = '#10B981';
+            ctx.beginPath();
+            ctx.arc(sInt.x, sInt.y, 4.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.font = 'bold 10px "JetBrains Mono", monospace';
+            ctx.fillText('互相延伸交點', sInt.x + 8, sInt.y - 6);
+            ctx.restore();
+          }
+        } else if (hoveredEnt) {
+          const extRes = computeExtendResult(
+            cursorWorld,
+            hoveredEnt,
+            visibleEntities
           );
-          ctx.save();
-          ctx.strokeStyle = '#10B981';
-          ctx.lineWidth = 2.5;
-          ctx.setLineDash([6, 4]);
-          ctx.beginPath();
-          ctx.moveTo(s1.x, s1.y);
-          ctx.lineTo(s2.x, s2.y);
-          ctx.stroke();
-          ctx.fillStyle = '#10B981';
-          ctx.beginPath();
-          ctx.arc(s2.x, s2.y, 4, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.restore();
+          if (extRes) {
+            const s1 = worldToScreen(
+              extRes.extensionSegment[0].x,
+              extRes.extensionSegment[0].y
+            );
+            const s2 = worldToScreen(
+              extRes.extensionSegment[1].x,
+              extRes.extensionSegment[1].y
+            );
+            ctx.save();
+            ctx.strokeStyle = '#10B981';
+            ctx.lineWidth = 2.5;
+            ctx.setLineDash([6, 4]);
+            ctx.beginPath();
+            ctx.moveTo(s1.x, s1.y);
+            ctx.lineTo(s2.x, s2.y);
+            ctx.stroke();
+            ctx.fillStyle = '#10B981';
+            ctx.beginPath();
+            ctx.arc(s2.x, s2.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          }
+        }
+      } else if (hoveredEntityId) {
+        const hoveredEnt = visibleEntities.find(
+          (e) => e.id === hoveredEntityId
+        );
+        if (hoveredEnt) {
+          const extRes = computeExtendResult(
+            cursorWorld,
+            hoveredEnt,
+            visibleEntities
+          );
+          if (extRes) {
+            const s1 = worldToScreen(
+              extRes.extensionSegment[0].x,
+              extRes.extensionSegment[0].y
+            );
+            const s2 = worldToScreen(
+              extRes.extensionSegment[1].x,
+              extRes.extensionSegment[1].y
+            );
+            ctx.save();
+            ctx.strokeStyle = '#10B981';
+            ctx.lineWidth = 2.5;
+            ctx.setLineDash([6, 4]);
+            ctx.beginPath();
+            ctx.moveTo(s1.x, s1.y);
+            ctx.lineTo(s2.x, s2.y);
+            ctx.stroke();
+            ctx.fillStyle = '#10B981';
+            ctx.beginPath();
+            ctx.arc(s2.x, s2.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          }
         }
       }
     }
 
     if (activeTool === 'offset' && selectedIds.length > 0) {
-      const targetEnt = entities.find((e) => e.id === selectedIds[0]);
+      const selectedEnts = entities.filter((e) => selectedIds.includes(e.id));
       const effectiveOffset =
         dynValue.trim() !== '' && !isNaN(parseFloat(dynValue))
           ? Math.max(0.5, parseFloat(dynValue))
           : offsetDistance;
-      if (targetEnt) {
-        const previewOff = offsetEntity(
-          targetEnt,
-          cursorWorld,
-          effectiveOffset,
-          'preview_off'
-        );
-        if (previewOff) {
-          drawEntity({ ...previewOff, lineType: 'dashed' }, '#FBBF24');
-        }
+      const previewEnts = offsetSelectedEntities(
+        selectedEnts,
+        cursorWorld,
+        effectiveOffset,
+        'preview_off'
+      );
+      for (const previewOff of previewEnts) {
+        drawEntity({ ...previewOff, lineType: 'dashed' }, '#FBBF24');
       }
     }
 
@@ -2471,6 +2795,17 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       ) {
         ctx.strokeRect(cx - 4, cy - 4, 8, 8);
       }
+
+      if (cursorPinnedToOrigin) {
+        ctx.strokeStyle = '#FBBF24';
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.font = 'bold 10px "JetBrains Mono", monospace';
+        ctx.fillStyle = '#FBBF24';
+        ctx.fillText('原點 (0,0)', cx + 12, cy - 10);
+      }
       ctx.restore();
     }
   }, [
@@ -2480,12 +2815,14 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     activeTool,
     canvasSize.height,
     canvasSize.width,
+    cursorPinnedToOrigin,
     cursorWorld,
     defaultDimFontSize,
     dimAlignGuide,
     drawingPoints,
     dynValue,
     entities,
+    extendFirstPick,
     guideAngle,
     hoveredEntityId,
     isPanning,
@@ -2679,9 +3016,11 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               {activeTool === 'trim' &&
                 '支援剪切直線、矩形、圓形與三點圓弧！將游標移至圖元預覽紅虛線後點擊左鍵切除'}
               {activeTool === 'extend' &&
-                '將游標移至線段端點附近預覽綠虛線延伸路徑，點擊左鍵延伸至邊界！'}
+                (extendFirstPick
+                  ? '已選取第一條線段 — 請點選第二條線段以互相延伸接合至交點（或再點一次延伸至最近邊界）'
+                  : '依序點選兩個線段即可互相延伸至交點！（或點選同一線段兩次延伸至既有邊界）')}
               {activeTool === 'offset' &&
-                '可直接打字輸入偏移距離按「空白鍵 / Enter」，點選物件後再點選要偏移的一側'}
+                '支援同時偏移選取的所有圖形（可按 TAB 連鎖選取）！輸入距離按空白鍵/Enter 後點選要偏移的一側'}
               {activeTool === 'join' &&
                 '點選 2 個以上圖元後按「空白鍵 / Enter」，保留原始位置組裝成單一物件'}
               {activeTool === 'select' &&

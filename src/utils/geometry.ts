@@ -895,6 +895,167 @@ export function computeExtendResult(
 }
 
 /**
+ * Compute intersection of two infinite lines (a1-a2) and (b1-b2)
+ */
+export function infiniteLineIntersection(
+  a1: Point,
+  a2: Point,
+  b1: Point,
+  b2: Point
+): Point | null {
+  const dax = a2.x - a1.x;
+  const day = a2.y - a1.y;
+  const dbx = b2.x - b1.x;
+  const dby = b2.y - b1.y;
+  const denom = dax * dby - day * dbx;
+  if (Math.abs(denom) < 1e-7) return null;
+  const t = ((b1.x - a1.x) * dby - (b1.y - a1.y) * dbx) / denom;
+  return {
+    x: a1.x + t * dax,
+    y: a1.y + t * day,
+  };
+}
+
+/**
+ * Helper to extract an extendable end-segment from a LineEntity or open PolylineEntity near clickPt
+ */
+function getExtendableEndSegment(
+  ent: CadEntity,
+  clickPt: Point
+): {
+  fixedPt: Point;
+  movingPt: Point;
+  applyPoint: (newPt: Point) => CadEntity;
+} | null {
+  if (ent.type === 'line') {
+    return {
+      fixedPt: ent.p1,
+      movingPt: ent.p2,
+      applyPoint: (newPt: Point) => {
+        // Move whichever endpoint is closer to newPt (so line lengthens toward intersection)
+        const d1 = dist(ent.p1, newPt);
+        const d2 = dist(ent.p2, newPt);
+        return d1 < d2 ? { ...ent, p1: newPt } : { ...ent, p2: newPt };
+      },
+    };
+  }
+  if (ent.type === 'polyline' && !ent.closed && ent.points.length >= 2) {
+    const pts = ent.points;
+    const dStart = dist(clickPt, pts[0]);
+    const dEnd = dist(clickPt, pts[pts.length - 1]);
+    if (dStart < dEnd) {
+      return {
+        fixedPt: pts[1],
+        movingPt: pts[0],
+        applyPoint: (newPt: Point) => {
+          const nextPts = [...pts];
+          nextPts[0] = newPt;
+          return { ...ent, points: nextPts };
+        },
+      };
+    } else {
+      return {
+        fixedPt: pts[pts.length - 2],
+        movingPt: pts[pts.length - 1],
+        applyPoint: (newPt: Point) => {
+          const nextPts = [...pts];
+          nextPts[nextPts.length - 1] = newPt;
+          return { ...ent, points: nextPts };
+        },
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Compute Mutual Extend (點選兩個線段互相延伸) between two entities (firstEnt and secondEnt).
+ * Both line segments extend to meet at their virtual intersection point!
+ */
+export function computeMutualExtendResult(
+  firstEnt: CadEntity,
+  firstClickPt: Point,
+  secondEnt: CadEntity,
+  secondClickPt: Point
+): {
+  intersectionPoint: Point;
+  extensionSegments: Array<[Point, Point]>;
+  updatedEntities: CadEntity[];
+} | null {
+  if (firstEnt.id === secondEnt.id) return null;
+
+  const seg1 = getExtendableEndSegment(firstEnt, firstClickPt);
+  const seg2 = getExtendableEndSegment(secondEnt, secondClickPt);
+
+  if (seg1 && seg2) {
+    const pInt = infiniteLineIntersection(
+      seg1.fixedPt,
+      seg1.movingPt,
+      seg2.fixedPt,
+      seg2.movingPt
+    );
+    if (!pInt) return null;
+    if (
+      dist(seg1.movingPt, pInt) > 25000 ||
+      dist(seg2.movingPt, pInt) > 25000
+    ) {
+      return null;
+    }
+
+    const extensionSegments: Array<[Point, Point]> = [];
+    const updatedEntities: CadEntity[] = [];
+
+    // Check if firstEnt needs to extend to pInt
+    const onFirst =
+      distToSegment(pInt, seg1.fixedPt, seg1.movingPt) <= 0.05;
+    if (!onFirst) {
+      const startPt1 =
+        firstEnt.type === 'line'
+          ? dist(firstEnt.p1, pInt) < dist(firstEnt.p2, pInt)
+            ? firstEnt.p1
+            : firstEnt.p2
+          : seg1.movingPt;
+      extensionSegments.push([startPt1, pInt]);
+      updatedEntities.push(seg1.applyPoint(pInt));
+    }
+
+    // Check if secondEnt needs to extend to pInt
+    const onSecond =
+      distToSegment(pInt, seg2.fixedPt, seg2.movingPt) <= 0.05;
+    if (!onSecond) {
+      const startPt2 =
+        secondEnt.type === 'line'
+          ? dist(secondEnt.p1, pInt) < dist(secondEnt.p2, pInt)
+            ? secondEnt.p1
+            : secondEnt.p2
+          : seg2.movingPt;
+      extensionSegments.push([startPt2, pInt]);
+      updatedEntities.push(seg2.applyPoint(pInt));
+    }
+
+    if (extensionSegments.length === 0) return null;
+
+    return {
+      intersectionPoint: pInt,
+      extensionSegments,
+      updatedEntities,
+    };
+  }
+
+  // Fallback: if firstEnt is extendable and secondEnt is a boundary (e.g. circle, arc, rectangle)
+  const singleRes = computeExtendResult(firstClickPt, firstEnt, [secondEnt]);
+  if (singleRes) {
+    return {
+      intersectionPoint: singleRes.extensionSegment[1],
+      extensionSegments: [singleRes.extensionSegment],
+      updatedEntities: [singleRes.updatedEntity],
+    };
+  }
+
+  return null;
+}
+
+/**
  * Assemble / Join (組裝圖元) multiple selected entities into a single composite GroupEntity.
  * Preserves the exact position, geometry, curves, and style of all selected entities!
  */
@@ -1748,9 +1909,274 @@ export function offsetEntity(
         p2: { x: maxX + delta, y: maxY + delta },
       };
     }
+    case 'polyline': {
+      if (entity.points.length < 2) return null;
+      const segs = getEntitySegments(entity);
+      if (segs.length === 0) return null;
+
+      // Compute centroid of polyline vertices
+      const cx =
+        entity.points.reduce((s, p) => s + p.x, 0) / entity.points.length;
+      const cy =
+        entity.points.reduce((s, p) => s + p.y, 0) / entity.points.length;
+
+      // Determine outward vs inward relative to sidePoint using closest segment
+      let bestSegDist = Infinity;
+      let sideSign = 1;
+      for (const [a, b] of segs) {
+        const d = distToSegment(sidePoint, a, b);
+        if (d < bestSegDist) {
+          bestSegDist = d;
+          const mid = midpoint(a, b);
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const len = Math.hypot(dx, dy) || 1;
+          let nx = -dy / len;
+          let ny = dx / len;
+          // Orient normal away from centroid
+          if ((mid.x - cx) * nx + (mid.y - cy) * ny < 0) {
+            nx = -nx;
+            ny = -ny;
+          }
+          const dotSide =
+            (sidePoint.x - mid.x) * nx + (sidePoint.y - mid.y) * ny;
+          sideSign = dotSide >= 0 ? 1 : -1;
+        }
+      }
+
+      const offsetSegs: Array<[Point, Point]> = segs.map(([a, b]) => {
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const len = Math.hypot(dx, dy) || 1;
+        let nx = -dy / len;
+        let ny = dx / len;
+        const mid = midpoint(a, b);
+        if ((mid.x - cx) * nx + (mid.y - cy) * ny < 0) {
+          nx = -nx;
+          ny = -ny;
+        }
+        nx *= sideSign;
+        ny *= sideSign;
+        return [
+          { x: a.x + nx * offsetDist, y: a.y + ny * offsetDist },
+          { x: b.x + nx * offsetDist, y: b.y + ny * offsetDist },
+        ];
+      });
+
+      const newPts: Point[] = [];
+      if (entity.closed && offsetSegs.length >= 3) {
+        for (let i = 0; i < offsetSegs.length; i++) {
+          const prevSeg =
+            offsetSegs[(i - 1 + offsetSegs.length) % offsetSegs.length];
+          const currSeg = offsetSegs[i];
+          const hit = infiniteLineIntersection(
+            prevSeg[0],
+            prevSeg[1],
+            currSeg[0],
+            currSeg[1]
+          );
+          if (hit && dist(currSeg[0], hit) <= offsetDist * 6) {
+            newPts.push(hit);
+          } else {
+            newPts.push(currSeg[0]);
+          }
+        }
+      } else {
+        newPts.push(offsetSegs[0][0]);
+        for (let i = 0; i < offsetSegs.length - 1; i++) {
+          const hit = infiniteLineIntersection(
+            offsetSegs[i][0],
+            offsetSegs[i][1],
+            offsetSegs[i + 1][0],
+            offsetSegs[i + 1][1]
+          );
+          if (hit && dist(offsetSegs[i][1], hit) <= offsetDist * 6) {
+            newPts.push(hit);
+          } else {
+            newPts.push(offsetSegs[i][1]);
+          }
+        }
+        newPts.push(offsetSegs[offsetSegs.length - 1][1]);
+      }
+
+      return {
+        ...entity,
+        id: newId,
+        points: newPts,
+      };
+    }
+    case 'group': {
+      const offsetChildren = offsetSelectedEntities(
+        entity.children,
+        sidePoint,
+        offsetDist,
+        `${newId}_child`
+      );
+      if (offsetChildren.length === 0) return null;
+      return {
+        ...entity,
+        id: newId,
+        children: offsetChildren,
+      };
+    }
     default:
       return null;
   }
+}
+
+/**
+ * Offset ALL selected entities at once!
+ * When multiple connected LineEntities are selected (e.g., via Tab or window selection),
+ * offsets them consistently toward sidePoint and automatically trims/extends their shared corners!
+ */
+export function offsetSelectedEntities(
+  selectedEntities: CadEntity[],
+  sidePoint: Point,
+  offsetDist: number,
+  idPrefix = `off_${Date.now()}`
+): CadEntity[] {
+  if (offsetDist <= 0 || selectedEntities.length === 0) return [];
+
+  const lines = selectedEntities.filter(
+    (e): e is LineEntity => e.type === 'line'
+  );
+  const others = selectedEntities.filter((e) => e.type !== 'line');
+
+  const results: CadEntity[] = [];
+
+  // Handle multiple selected lines with smart corner mitering & consistent side orientation
+  if (lines.length >= 2) {
+    const allPts = lines.flatMap((l) => [l.p1, l.p2]);
+    const cx = allPts.reduce((s, p) => s + p.x, 0) / allPts.length;
+    const cy = allPts.reduce((s, p) => s + p.y, 0) / allPts.length;
+
+    // Check if any lines share endpoints
+    let hasSharedCorner = false;
+    for (let i = 0; i < lines.length && !hasSharedCorner; i++) {
+      for (let j = i + 1; j < lines.length; j++) {
+        if (
+          dist(lines[i].p1, lines[j].p1) <= 1.5 ||
+          dist(lines[i].p1, lines[j].p2) <= 1.5 ||
+          dist(lines[i].p2, lines[j].p1) <= 1.5 ||
+          dist(lines[i].p2, lines[j].p2) <= 1.5
+        ) {
+          hasSharedCorner = true;
+          break;
+        }
+      }
+    }
+
+    if (hasSharedCorner) {
+      // Find closest line to sidePoint to determine outward (+1) vs inward (-1) relative to centroid
+      let bestDist = Infinity;
+      let sideSign = 1;
+      for (const l of lines) {
+        const d = distToSegment(sidePoint, l.p1, l.p2);
+        if (d < bestDist) {
+          bestDist = d;
+          const mid = midpoint(l.p1, l.p2);
+          const dx = l.p2.x - l.p1.x;
+          const dy = l.p2.y - l.p1.y;
+          const len = Math.hypot(dx, dy) || 1;
+          let nx = -dy / len;
+          let ny = dx / len;
+          if ((mid.x - cx) * nx + (mid.y - cy) * ny < 0) {
+            nx = -nx;
+            ny = -ny;
+          }
+          const dotSide =
+            (sidePoint.x - mid.x) * nx + (sidePoint.y - mid.y) * ny;
+          sideSign = dotSide >= 0 ? 1 : -1;
+        }
+      }
+
+      const offsetLines: LineEntity[] = lines.map((l, idx) => {
+        const dx = l.p2.x - l.p1.x;
+        const dy = l.p2.y - l.p1.y;
+        const len = Math.hypot(dx, dy) || 1;
+        let nx = -dy / len;
+        let ny = dx / len;
+        const mid = midpoint(l.p1, l.p2);
+        if ((mid.x - cx) * nx + (mid.y - cy) * ny < 0) {
+          nx = -nx;
+          ny = -ny;
+        }
+        nx *= sideSign;
+        ny *= sideSign;
+        return {
+          ...l,
+          id: `${idPrefix}_L_${idx}_${Math.random().toString(36).slice(2, 5)}`,
+          p1: { x: l.p1.x + nx * offsetDist, y: l.p1.y + ny * offsetDist },
+          p2: { x: l.p2.x + nx * offsetDist, y: l.p2.y + ny * offsetDist },
+        };
+      });
+
+      // Miter shared corners between connected lines
+      for (let i = 0; i < lines.length; i++) {
+        for (let j = i + 1; j < lines.length; j++) {
+          const origA = lines[i];
+          const origB = lines[j];
+          const offA = offsetLines[i];
+          const offB = offsetLines[j];
+
+          const pairs: Array<['p1' | 'p2', 'p1' | 'p2']> = [
+            ['p1', 'p1'],
+            ['p1', 'p2'],
+            ['p2', 'p1'],
+            ['p2', 'p2'],
+          ];
+          for (const [endA, endB] of pairs) {
+            if (dist(origA[endA], origB[endB]) <= 1.5) {
+              const hit = infiniteLineIntersection(
+                offA.p1,
+                offA.p2,
+                offB.p1,
+                offB.p2
+              );
+              if (hit && dist(offA[endA], hit) <= offsetDist * 6) {
+                offA[endA] = { ...hit };
+                offB[endB] = { ...hit };
+              }
+            }
+          }
+        }
+      }
+
+      results.push(...offsetLines);
+    } else {
+      // Disconnected lines: offset each line toward sidePoint
+      lines.forEach((l, idx) => {
+        const off = offsetEntity(
+          l,
+          sidePoint,
+          offsetDist,
+          `${idPrefix}_L_${idx}_${Math.random().toString(36).slice(2, 5)}`
+        );
+        if (off) results.push(off);
+      });
+    }
+  } else if (lines.length === 1) {
+    const off = offsetEntity(
+      lines[0],
+      sidePoint,
+      offsetDist,
+      `${idPrefix}_L_0_${Math.random().toString(36).slice(2, 5)}`
+    );
+    if (off) results.push(off);
+  }
+
+  // Offset all other selected entities (rectangles, circles, arcs, polygons, polylines, groups)
+  others.forEach((ent, idx) => {
+    const off = offsetEntity(
+      ent,
+      sidePoint,
+      offsetDist,
+      `${idPrefix}_E_${idx}_${Math.random().toString(36).slice(2, 5)}`
+    );
+    if (off) results.push(off);
+  });
+
+  return results;
 }
 
 export function getEntityGripHandles(entity: CadEntity): GripHandle[] {

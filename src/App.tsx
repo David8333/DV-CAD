@@ -230,10 +230,11 @@ export default function App() {
   const [isDraggingFile, setIsDraggingFile] = useState<boolean>(false);
   const directFileInputRef = useRef<HTMLInputElement>(null);
 
-  // Sequential 2-letter shortcut state (e.g. T -> R = TR, E -> X = EX, C -> O = CO, A -> R = AR, Z -> E = ZE)
+  // Sequential 2-letter shortcut state (e.g. J -> O = JO, T -> R = TR, E -> X = EX, C -> O = CO, A -> R = AR, Z -> E = ZE)
   const [pendingKeyPrefix, setPendingKeyPrefix] = useState<string | null>(null);
   const prefixTimeoutRef = useRef<number | null>(null);
   const eraseDelayTimeoutRef = useRef<number | null>(null);
+  const joinDelayTimeoutRef = useRef<number | null>(null);
 
   // Responsive sidebar visibility
   const [showLeftPanel, setShowLeftPanel] = useState<boolean>(() =>
@@ -259,6 +260,7 @@ export default function App() {
   const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
   const [zoom, setZoom] = useState<number>(1.0);
   const [fitTrigger, setFitTrigger] = useState<number>(1);
+  const [jumpToOriginTrigger, setJumpToOriginTrigger] = useState<number>(0);
 
   // Cursor & Snap status
   const [cursorWorld, setCursorWorld] = useState<Point>({ x: 0, y: 0 });
@@ -470,9 +472,9 @@ export default function App() {
         copy: 'COPY 複製物件模式 (快捷鍵 CO)',
         rotate: 'ROTATE 旋轉物件模式 (快捷鍵 Q)',
         mirror: 'MIRROR 鏡射物件模式 (快捷鍵 W)',
-        offset: `OFFSET 偏移複製模式 (快捷鍵 O - 目前偏移距離 ${offsetDistance} mm)`,
+        offset: `OFFSET 偏移複製模式 (快捷鍵 O - 目前偏移距離 ${offsetDistance} mm，支援同時偏移選取的所有圖形)`,
         trim: 'TRIM 剪切圖元模式 (快捷鍵 TR) — 支援剪切直線、聚合線、圓形與三點圓弧',
-        extend: 'EXTEND 延伸圖元模式 (快捷鍵 EX) — 點選要延伸至邊界的線段端點',
+        extend: 'EXTEND 延伸圖元模式 (快捷鍵 EX) — 點選兩個線段可互相延伸接合至交點（或點選同一線段延伸至邊界）',
         join: 'JOIN 組裝圖元模式 (快捷鍵 J) — 選取多個圖元後按 J 保留原位置組合成單一物件',
       };
       logCommand(`指令切換: ${toolNames[tool]}`, 'command');
@@ -737,6 +739,15 @@ export default function App() {
     logCommand('ZOOM EXTENTS 已自動縮放並置中顯示完整圖面 (ZE)', 'info');
   }, [logCommand]);
 
+  const handleJumpToOrigin = useCallback(() => {
+    setJumpToOriginTrigger((t) => t + 1);
+    setCursorWorld({ x: 0, y: 0 });
+    logCommand(
+      'JO 已將鼠標跳至座標原點 X,Y=(0,0)！（繪圖中可直接按空白鍵/Enter 鎖定原點座標）',
+      'success'
+    );
+  }, [logCommand]);
+
   const toggleSetting = useCallback(
     (
       key: keyof Omit<
@@ -886,7 +897,26 @@ export default function App() {
         return;
       }
 
-      // 1. Check 2-letter sequential shortcut combinations first (when drawingPoints.length === 0)
+      // 1. Check JO (Jump to Origin X,Y=(0,0)) first — works even while actively drawing!
+      if (pendingKeyPrefix === 'J' && k === 'o') {
+        e.preventDefault();
+        if (joinDelayTimeoutRef.current) {
+          window.clearTimeout(joinDelayTimeoutRef.current);
+          joinDelayTimeoutRef.current = null;
+        }
+        clearPrefix();
+        handleJumpToOrigin();
+        return;
+      }
+
+      // If user presses 'j' while drawing (drawingPoints.length > 0), start 'J' prefix so 'JO' works mid-drawing without interrupting the tool
+      if (k === 'j' && drawingPoints.length > 0) {
+        e.preventDefault();
+        startPrefix('J');
+        return;
+      }
+
+      // 2. Check 2-letter sequential shortcut combinations (when drawingPoints.length === 0)
       if (pendingKeyPrefix && drawingPoints.length === 0) {
         const combo = `${pendingKeyPrefix}${k.toUpperCase()}`;
         if (combo === 'TR') {
@@ -934,8 +964,24 @@ export default function App() {
         }
       }
 
-      // 2. Single-key shortcuts (and start prefix if it's T, E, C, A, Z)
+      // 3. Single-key shortcuts (and start prefix if it's J, T, E, C, A, Z)
       switch (k) {
+        case 'j':
+          e.preventDefault();
+          startPrefix('J');
+          if (joinDelayTimeoutRef.current) {
+            window.clearTimeout(joinDelayTimeoutRef.current);
+          }
+          joinDelayTimeoutRef.current = window.setTimeout(() => {
+            joinDelayTimeoutRef.current = null;
+            setPendingKeyPrefix(null);
+            if (selectedIds.length >= 2) {
+              handleJoinSelected();
+            } else {
+              handleSelectTool('join');
+            }
+          }, 300);
+          break;
         case 't':
           e.preventDefault();
           startPrefix('T');
@@ -1023,15 +1069,6 @@ export default function App() {
           clearPrefix();
           handleSelectTool('move');
           break;
-        case 'j':
-          e.preventDefault();
-          clearPrefix();
-          if (selectedIds.length >= 2) {
-            handleJoinSelected();
-          } else {
-            handleSelectTool('join');
-          }
-          break;
         case 'q':
           e.preventDefault();
           clearPrefix();
@@ -1070,6 +1107,7 @@ export default function App() {
     handleDuplicateSelected,
     handleExplodeSelected,
     handleJoinSelected,
+    handleJumpToOrigin,
     handlePasteClipboard,
     handleRedo,
     handleSelectTool,
@@ -1105,6 +1143,11 @@ export default function App() {
       } else {
         handleSelectTool('erase');
       }
+      return;
+    }
+
+    if (upper === 'JO' || upper === 'ORIGIN' || upper === '原點') {
+      handleJumpToOrigin();
       return;
     }
 
@@ -2015,6 +2058,7 @@ export default function App() {
           drawingPoints={drawingPoints}
           setDrawingPoints={setDrawingPoints}
           fitTrigger={fitTrigger}
+          jumpToOriginTrigger={jumpToOriginTrigger}
         />
 
         {/* Right Inspector & Layers Sidebar */}
@@ -2190,14 +2234,15 @@ export default function App() {
                   修改編輯與雙字母順序按鍵快捷鍵
                 </h3>
                 {[
+                  ['J → O (JO)', '依序按 J 與 O：將鼠標跳至座標原點 X,Y=(0,0)'],
                   ['E', '刪除圖元 (刪已選物件，或進入點選刪除模式)'],
                   ['T → R (TR)', '依序按 T 與 R：剪切直線、圓形與三點圓弧'],
-                  ['E → X (EX)', '依序按 E 與 X：延伸圖元至相交邊界'],
+                  ['E → X (EX)', '依序按 E 與 X：延伸圖元（點兩線段互相延伸）'],
                   ['C → O (CO)', '依序按 C 與 O：連續複製物件'],
                   ['A → R (AR)', '依序按 A 與 R：開啟矩形/環形陣列複製'],
                   ['J', '組裝圖元 (保留選取圖形原位置合併成單一物件)'],
                   ['X', '炸開圖元 (可炸開組裝圖元、中心矩形、多邊形)'],
-                  ['O / M / Q / W', '偏移複製 (O) / 移動 (M) / 旋轉 (Q) / 鏡射 (W)'],
+                  ['O / M / Q / W', '偏移複製全部已選圖形 (O) / 移動 (M) / 旋轉 (Q) / 鏡射 (W)'],
                   ['F8 / F3 / F12', '正交鎖定 (F8) / 物件鎖點 (F3) / 動態輸入 (F12)'],
                 ].map(([key, desc]) => (
                   <div
