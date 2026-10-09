@@ -41,20 +41,52 @@ import {
   translateEntity,
 } from './utils/geometry';
 
+const STORAGE_KEY = 'vektorcad_saved_state_v1';
+
+function loadSavedState(): { entities: CadEntity[]; layers: CadLayer[] } | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed.entities) && Array.isArray(parsed.layers)) {
+      return parsed;
+    }
+  } catch {
+    // Ignore storage parse errors
+  }
+  return null;
+}
+
 export default function App() {
+  const initialSaved = loadSavedState();
+
   // History stack for Undo / Redo
   const [history, setHistory] = useState<CadEntity[][]>([
-    BLUEPRINT_TEMPLATES[0].entities,
+    initialSaved ? initialSaved.entities : BLUEPRINT_TEMPLATES[0].entities,
   ]);
   const [historyIndex, setHistoryIndex] = useState<number>(0);
 
   const entities = history[historyIndex];
 
-  const [layers, setLayers] = useState<CadLayer[]>(DEFAULT_LAYERS);
+  const [layers, setLayers] = useState<CadLayer[]>(
+    initialSaved ? initialSaved.layers : DEFAULT_LAYERS
+  );
   const [activeLayerId, setActiveLayerId] = useState<string>('0');
   const [activeTool, setActiveTool] = useState<ToolType>('select');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [drawingPoints, setDrawingPoints] = useState<Point[]>([]);
+
+  // Auto-save to localStorage whenever entities or layers change
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ entities, layers })
+      );
+    } catch {
+      // Ignore quota errors
+    }
+  }, [entities, layers]);
 
   // Viewport Pan & Zoom
   const [pan, setPan] = useState<Point>({ x: -40, y: 10 });
@@ -1518,6 +1550,49 @@ export default function App() {
                   .JSON
                 </span>
               </button>
+
+              <label className="w-full flex items-center justify-between p-3.5 bg-slate-950 hover:bg-slate-800/90 border border-slate-800 hover:border-sky-500/60 rounded-lg text-left transition-colors cursor-pointer">
+                <div>
+                  <div className="font-semibold text-slate-100">
+                    匯入並還原專案檔 (.JSON)
+                  </div>
+                  <div className="text-slate-400 mt-0.5">
+                    從電腦讀取先前備份的 VektorCAD .JSON 檔案
+                  </div>
+                </div>
+                <span className="px-2.5 py-1 font-mono bg-slate-800 text-slate-200 rounded">
+                  讀取檔案
+                </span>
+                <input
+                  type="file"
+                  accept=".json,application/json"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                      try {
+                        const parsed = JSON.parse(String(reader.result));
+                        if (Array.isArray(parsed.entities)) {
+                          pushEntities(parsed.entities);
+                          if (Array.isArray(parsed.layers)) {
+                            setLayers(parsed.layers);
+                          }
+                          setSelectedIds([]);
+                          setActiveModal(null);
+                          logCommand(`已成功匯入專案檔：「${file.name}」`, 'success');
+                        } else {
+                          logCommand('檔案格式不符，請選擇有效的 VektorCAD .JSON 專案檔。', 'error');
+                        }
+                      } catch {
+                        logCommand('讀取 JSON 專案檔失敗。', 'error');
+                      }
+                    };
+                    reader.readAsText(file);
+                  }}
+                />
+              </label>
             </div>
           </div>
         </div>
