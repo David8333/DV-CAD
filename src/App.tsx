@@ -5,6 +5,7 @@ import {
   ZoomIn,
   ZoomOut,
   Maximize,
+  Search,
   Download,
   Minus,
   Ruler,
@@ -15,6 +16,9 @@ import {
   Check,
   PanelLeft,
   PanelRight,
+  Scissors,
+  ArrowUpRight,
+  Combine,
   X,
 } from 'lucide-react';
 import {
@@ -23,6 +27,7 @@ import {
   CommandLogItem,
   DraftingSettings,
   Point,
+  RectangleMode,
   SnapPoint,
   ToolType,
 } from './types/cad';
@@ -38,6 +43,7 @@ import {
   explodeEntity,
   exportToDXF,
   exportToSVG,
+  joinSelectedEntities,
   midpoint,
   rotateEntity,
   translateEntity,
@@ -75,6 +81,7 @@ export default function App() {
   );
   const [activeLayerId, setActiveLayerId] = useState<string>('0');
   const [activeTool, setActiveTool] = useState<ToolType>('select');
+  const [rectangleMode, setRectangleMode] = useState<RectangleMode>('corner');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [drawingPoints, setDrawingPoints] = useState<Point[]>([]);
 
@@ -151,7 +158,7 @@ export default function App() {
     {
       id: 'init-1',
       timestamp: '00:00:01',
-      text: 'VektorCAD 2D 工程製圖核心已就緒 — 支援鍵盤快捷鍵：按 [L] 畫直線、按 [D] 標註尺寸、按 [B] 自動標註、按 [Z] 全圖置中視角。',
+      text: 'VektorCAD 2D 工程製圖核心已就緒 — 空白鍵等同 Enter 確認；支援窗選放大 (Z)、轉角/中心矩形 (R)、三點圓弧 (A)、剪切 (TR)、延伸 (EX) 與組裝圖元 (J)。',
       type: 'info',
     },
   ]);
@@ -232,28 +239,66 @@ export default function App() {
       }
       const toolNames: Record<ToolType, string> = {
         select: 'SELECT 選取與掣點編輯模式 (快捷鍵 V)',
-        pan: 'PAN 平移視景模式 (快捷鍵 H / 空白鍵)',
-        line: 'LINE 畫直線模式 (快捷鍵 L) — 請點選起點與終點，或直接輸入長度數值',
-        polyline: 'PLINE 聚合線模式 (快捷鍵 P) — 連續點選頂點，按 C 封閉或 Enter 完成',
-        rectangle: 'RECTANG 矩形模式 (快捷鍵 R) — 請點選對角兩點',
+        pan: 'PAN 平移視景模式 (快捷鍵 H)',
+        zoomWindow: 'ZOOM WINDOW 窗選局部放大模式 (快捷鍵 Z) — 請點選放大區域的兩個對角點',
+        line: 'LINE 畫直線模式 (快捷鍵 L) — 點選起點與終點，或輸入長度按空白鍵/Enter',
+        polyline: 'PLINE 聚合線模式 (快捷鍵 P) — 連續點選頂點，按 C 封閉或按空白鍵/Enter 完成',
+        rectangle: `RECTANG 矩形模式 (快捷鍵 R - 目前為${rectangleMode === 'center' ? '中心矩形' : '轉角矩形'})`,
         circle: 'CIRCLE 圓形模式 (快捷鍵 C) — 請點選圓心與半徑',
-        arc: 'ARC 三點圓弧模式 (快捷鍵 A) — 請依序指定圓心、起點、終點角度',
+        arc: 'ARC 三點圓弧模式 (快捷鍵 A) — 請依序點選 1.起點、2.弧上第二點、3.終點',
         ellipse: 'ELLIPSE 橢圓形模式 (快捷鍵 E) — 請點選中心與長短軸',
         polygon: 'POLYGON 正多邊形模式 (快捷鍵 G) — 請點選中心與外接圓半徑',
         dimension: 'DIMLINEAR 標註尺寸模式 (快捷鍵 D) — 請依序點選兩個測量端點，再拉出標註線高度點擊完成',
         text: 'TEXT 文字註解模式 (快捷鍵 T) — 請點選文字插入位置',
         measure: 'DIST 距離與角度量測模式 (快捷鍵 K) — 請點選兩點進行量測',
         move: 'MOVE 移動物件模式 (快捷鍵 M) — 請指定基準點與目標點',
-        copy: 'COPY 連續複製模式 (快捷鍵 J) — 請指定基準點與放置點',
+        copy: 'COPY 連續複製模式 (快捷鍵 CO) — 請指定基準點與放置點',
         rotate: 'ROTATE 旋轉模式 (快捷鍵 Q) — 請指定旋轉中心與角度',
-        scale: 'SCALE 比例縮放模式 (快捷鍵 S) — 請指定縮放中心與比例',
         mirror: 'MIRROR 對稱鏡射模式 (快捷鍵 W) — 請點選兩點定義對稱軸線',
-        offset: 'OFFSET 偏移複製模式 (快捷鍵 O) — 請點選物件與偏移方向',
+        offset: `OFFSET 偏移複製模式 (快捷鍵 O - 目前偏移距離 ${offsetDistance}mm) — 可直接輸入數值按空白鍵/Enter`,
+        trim: 'TRIM 剪切圖元模式 (快捷鍵 TR) — 點選相交線段要切除的區段',
+        extend: 'EXTEND 延伸圖元模式 (快捷鍵 EX) — 點選線段端點附近延伸至相交邊界',
+        join: 'JOIN 組裝圖元模式 (快捷鍵 J) — 點選多個圖元後按空白鍵或 Enter 組裝為單一聚合線',
       };
       logCommand(`指令切換: ${toolNames[tool]}`, 'command');
     },
-    [logCommand]
+    [logCommand, offsetDistance, rectangleMode]
   );
+
+  // Assemble / Join (組裝圖元) selected entities into a single PolylineEntity
+  const handleJoinSelected = useCallback(() => {
+    const selectedEntities = entities.filter((e) => selectedIds.includes(e.id));
+    if (selectedEntities.length < 2) {
+      handleSelectTool('join');
+      logCommand(
+        'JOIN 組裝圖元：請先點選 2 個以上要組裝的線段或幾何圖元，再按空白鍵或 Enter 完成組裝。',
+        'info'
+      );
+      return;
+    }
+
+    const joined = joinSelectedEntities(selectedEntities, activeLayerId);
+    if (!joined) {
+      logCommand('所選物件無法組裝（請選取直線、聚合線、矩形或多邊形）。', 'error');
+      return;
+    }
+
+    const remaining = entities.filter((e) => !selectedIds.includes(e.id));
+    pushEntities([...remaining, joined]);
+    setSelectedIds([joined.id]);
+    setActiveTool('select');
+    logCommand(
+      `JOIN 已成功將 ${selectedEntities.length} 個圖元組裝合併為單一聚合線圖元 (${joined.points.length} 個頂點${joined.closed ? '，已封閉' : ''})！`,
+      'success'
+    );
+  }, [
+    activeLayerId,
+    entities,
+    handleSelectTool,
+    logCommand,
+    pushEntities,
+    selectedIds,
+  ]);
 
   const handleDeleteSelected = useCallback(() => {
     if (selectedIds.length === 0) {
@@ -412,7 +457,7 @@ export default function App() {
 
   const handleZoomExtents = useCallback(() => {
     setFitTrigger((t) => t + 1);
-    logCommand('ZOOM EXTENTS 已自動縮放並置中顯示完整圖面 (快捷鍵 Z)', 'info');
+    logCommand('ZOOM EXTENTS 已自動縮放並置中顯示完整圖面', 'info');
   }, [logCommand]);
 
   const toggleSetting = useCallback(
@@ -500,7 +545,8 @@ export default function App() {
       if (
         (e.key === 'Delete' || e.key === 'Backspace') &&
         drawingPoints.length === 0 &&
-        selectedIds.length > 0
+        selectedIds.length > 0 &&
+        activeTool !== 'offset'
       ) {
         e.preventDefault();
         handleDeleteSelected();
@@ -574,15 +620,15 @@ export default function App() {
           break;
         case 'j':
           e.preventDefault();
-          handleSelectTool('copy');
+          if (selectedIds.length >= 2) {
+            handleJoinSelected();
+          } else {
+            handleSelectTool('join');
+          }
           break;
         case 'q':
           e.preventDefault();
           handleSelectTool('rotate');
-          break;
-        case 's':
-          e.preventDefault();
-          handleSelectTool('scale');
           break;
         case 'w':
           e.preventDefault();
@@ -598,7 +644,7 @@ export default function App() {
           break;
         case 'z':
           e.preventDefault();
-          handleZoomExtents();
+          handleSelectTool('zoomWindow');
           break;
         default:
           break;
@@ -614,10 +660,10 @@ export default function App() {
     handleDeleteSelected,
     handleDuplicateSelected,
     handleExplodeSelected,
+    handleJoinSelected,
     handleRedo,
     handleSelectTool,
     handleUndo,
-    handleZoomExtents,
     selectedIds.length,
     toggleSetting,
   ]);
@@ -645,6 +691,7 @@ export default function App() {
       A: 'arc',
       ARC: 'arc',
       圓弧: 'arc',
+      三點圓弧: 'arc',
       EL: 'ellipse',
       ELLIPSE: 'ellipse',
       橢圓: 'ellipse',
@@ -672,20 +719,33 @@ export default function App() {
       RO: 'rotate',
       ROTATE: 'rotate',
       旋轉: 'rotate',
-      SC: 'scale',
-      SCALE: 'scale',
-      縮放: 'scale',
       MI: 'mirror',
       MIRROR: 'mirror',
       鏡射: 'mirror',
       O: 'offset',
       OFFSET: 'offset',
       偏移: 'offset',
+      TR: 'trim',
+      TRIM: 'trim',
+      剪切: 'trim',
+      修剪: 'trim',
+      EX: 'extend',
+      EXTEND: 'extend',
+      延伸: 'extend',
+      Z: 'zoomWindow',
+      ZW: 'zoomWindow',
+      窗選放大: 'zoomWindow',
+      局部放大: 'zoomWindow',
       P: 'pan',
       PAN: 'pan',
       平移: 'pan',
       SELECT: 'select',
     };
+
+    if (upper === 'J' || upper === 'JOIN' || upper === '組裝' || upper === '組裝圖元') {
+      handleJoinSelected();
+      return;
+    }
 
     if (cmdMap[upper]) {
       handleSelectTool(cmdMap[upper]);
@@ -717,7 +777,7 @@ export default function App() {
       handleAutoDimensionSelected();
       return;
     }
-    if (upper === 'Z' || upper === 'ZE' || upper === 'ZOOM') {
+    if (upper === 'ZE' || upper === 'ZOOM' || upper === '全圖置中') {
       handleZoomExtents();
       return;
     }
@@ -730,6 +790,16 @@ export default function App() {
       setSelectedIds([]);
       logCommand('已清空整個圖面所有物件。', 'info');
       return;
+    }
+
+    // If in offset mode and user enters a number in command dock, update offsetDistance
+    if (activeTool === 'offset' && /^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+      const val = parseFloat(trimmed);
+      if (!isNaN(val) && val > 0) {
+        setOffsetDistance(val);
+        logCommand(`OFFSET 已設定偏移距離 = ${val.toFixed(2)} mm`, 'success');
+        return;
+      }
     }
 
     const anchor =
@@ -829,7 +899,7 @@ export default function App() {
     }
 
     logCommand(
-      `未知指令「${trimmed}」— 支援指令：L (直線)、D (標註尺寸)、B (自動標註)、R (矩形)、C (圓)、A (圓弧)、M (移動)、O (偏移) 或座標如 100,50`,
+      `未知指令「${trimmed}」— 支援指令：L (直線)、D (標註)、R (矩形)、A (三點圓弧)、TR (剪切)、EX (延伸)、J (組裝圖元)、O (偏移)、Z (窗選放大) 或座標如 100,50`,
       'error'
     );
   };
@@ -999,11 +1069,41 @@ export default function App() {
 
           <button
             type="button"
-            onClick={handleAutoDimensionSelected}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md font-medium bg-slate-900 text-amber-300 border border-amber-500/40 hover:bg-amber-500/15 transition-colors whitespace-nowrap shrink-0"
+            onClick={() => handleSelectTool('trim')}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-md font-medium border transition-colors whitespace-nowrap shrink-0 ${
+              activeTool === 'trim'
+                ? 'bg-rose-600 text-white border-rose-400 shadow-sm'
+                : 'bg-slate-900 text-slate-200 border-slate-700 hover:border-rose-500/60'
+            }`}
           >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>自動標註 (B)</span>
+            <Scissors className="w-3.5 h-3.5" />
+            <span>剪切 (TR)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleSelectTool('extend')}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-md font-medium border transition-colors whitespace-nowrap shrink-0 ${
+              activeTool === 'extend'
+                ? 'bg-emerald-600 text-white border-emerald-400 shadow-sm'
+                : 'bg-slate-900 text-slate-200 border-slate-700 hover:border-emerald-500/60'
+            }`}
+          >
+            <ArrowUpRight className="w-3.5 h-3.5" />
+            <span>延伸 (EX)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleJoinSelected}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-md font-medium border transition-colors whitespace-nowrap shrink-0 ${
+              activeTool === 'join'
+                ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-sm'
+                : 'bg-slate-900 text-slate-200 border-slate-700 hover:border-amber-500/60'
+            }`}
+          >
+            <Combine className="w-3.5 h-3.5" />
+            <span>組裝圖元 (J)</span>
           </button>
 
           <div className="h-4 w-px bg-slate-800 mx-0.5" />
@@ -1030,7 +1130,20 @@ export default function App() {
             <span className="hidden sm:inline">重做</span>
           </button>
 
-          {/* Zoom Controls */}
+          {/* Zoom Controls including Window Zoom (窗選局部放大) */}
+          <button
+            type="button"
+            onClick={() => handleSelectTool('zoomWindow')}
+            title="窗選局部放大 (快捷鍵 Z)"
+            className={`flex items-center gap-1 px-2.5 py-1 rounded border font-medium transition-colors whitespace-nowrap shrink-0 ${
+              activeTool === 'zoomWindow'
+                ? 'bg-purple-600 text-white border-purple-400 shadow-sm'
+                : 'bg-purple-950/50 text-purple-300 border-purple-500/40 hover:bg-purple-900/50'
+            }`}
+          >
+            <Search className="w-3.5 h-3.5" />
+            <span>窗選放大 (Z)</span>
+          </button>
           <button
             type="button"
             onClick={() => setZoom((z) => Math.min(25, z * 1.25))}
@@ -1050,16 +1163,43 @@ export default function App() {
           <button
             type="button"
             onClick={handleZoomExtents}
-            title="自動縮放並置中顯示完整圖面 (快捷鍵 Z)"
+            title="自動縮放並置中顯示完整圖面 (指令 ZE)"
             className="flex items-center gap-1 px-2.5 py-1 rounded bg-sky-950/60 text-sky-300 border border-sky-500/40 hover:bg-sky-900/60 whitespace-nowrap shrink-0"
           >
             <Maximize className="w-3.5 h-3.5" />
-            <span>全圖置中 (Z)</span>
+            <span>全圖置中</span>
           </button>
         </div>
 
-        {/* Right: Active Layer Quick Switcher & Inspector Toggle */}
+        {/* Right: Active Tool Options, Layer Quick Switcher & Inspector Toggle */}
         <div className="flex items-center gap-2 shrink-0">
+          {activeTool === 'rectangle' && (
+            <div className="flex items-center gap-1 bg-slate-900 px-1.5 py-0.5 rounded border border-slate-700">
+              <button
+                type="button"
+                onClick={() => setRectangleMode('corner')}
+                className={`px-2 py-0.5 rounded text-[11px] font-medium ${
+                  rectangleMode === 'corner'
+                    ? 'bg-sky-600 text-white'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                轉角矩形
+              </button>
+              <button
+                type="button"
+                onClick={() => setRectangleMode('center')}
+                className={`px-2 py-0.5 rounded text-[11px] font-medium ${
+                  rectangleMode === 'center'
+                    ? 'bg-sky-600 text-white'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                中心矩形
+              </button>
+            </div>
+          )}
+
           {activeTool === 'polygon' && (
             <div className="flex items-center gap-1">
               <span className="text-slate-400">邊數:</span>
@@ -1080,16 +1220,17 @@ export default function App() {
 
           {activeTool === 'offset' && (
             <div className="flex items-center gap-1">
-              <span className="text-slate-400">偏移(mm):</span>
+              <span className="text-amber-300 font-medium">偏移距離(mm):</span>
               <input
                 type="number"
-                min={1}
-                max={1000}
+                min={0.5}
+                max={5000}
+                step="1"
                 value={offsetDistance}
                 onChange={(e) =>
-                  setOffsetDistance(Math.max(1, Number(e.target.value)))
+                  setOffsetDistance(Math.max(0.5, Number(e.target.value)))
                 }
-                className="w-14 px-1.5 py-0.5 font-mono bg-slate-900 border border-slate-700 rounded text-slate-100"
+                className="w-16 px-2 py-0.5 font-mono bg-slate-900 border border-amber-500/60 rounded text-amber-200 focus:outline-none focus:border-amber-400"
               />
             </div>
           )}
@@ -1132,9 +1273,14 @@ export default function App() {
             <ToolPalette
               activeTool={activeTool}
               onSelectTool={handleSelectTool}
+              rectangleMode={rectangleMode}
+              onChangeRectangleMode={setRectangleMode}
+              offsetDistance={offsetDistance}
+              onChangeOffsetDistance={setOffsetDistance}
               selectedCount={selectedIds.length}
               onOpenArrayModal={() => setActiveModal('array')}
               onExplodeSelected={handleExplodeSelected}
+              onJoinSelected={handleJoinSelected}
               onDeleteSelected={handleDeleteSelected}
               onAutoDimensionSelected={handleAutoDimensionSelected}
             />
@@ -1155,10 +1301,13 @@ export default function App() {
           layers={layers}
           activeLayerId={activeLayerId}
           activeTool={activeTool}
+          rectangleMode={rectangleMode}
+          onChangeRectangleMode={setRectangleMode}
           selectedIds={selectedIds}
           settings={settings}
           polygonSides={polygonSides}
           offsetDistance={offsetDistance}
+          onChangeOffsetDistance={setOffsetDistance}
           pan={pan}
           zoom={zoom}
           onPanZoomChange={(nextPan, nextZoom) => {
@@ -1172,6 +1321,7 @@ export default function App() {
           onSelectChange={setSelectedIds}
           onAddEntity={handleAddEntity}
           onUpdateEntities={handleUpdateEntities}
+          onJoinSelected={handleJoinSelected}
           onLogCommand={logCommand}
           onToolComplete={() => handleSelectTool('select')}
           drawingPoints={drawingPoints}
@@ -1315,19 +1465,18 @@ export default function App() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
               <div className="bg-slate-950/80 border border-slate-800 rounded-lg p-4 space-y-2">
                 <h3 className="font-semibold text-sky-300 mb-2">
-                  繪圖與標註快捷鍵（直接按鍵即可觸發）
+                  繪圖與檢視快捷鍵
                 </h3>
                 {[
-                  ['L', '畫直線 (可連續繪製，支援直接輸入長度)'],
-                  ['D', '標註尺寸 (點選兩端點後拉出標註線)'],
-                  ['B', '一鍵自動標註目前已選取的直線/矩形/圓形'],
-                  ['P', '聚合線 (按 C 封閉、按 Enter 結束)'],
-                  ['R', '畫矩形 (支援輸入寬度 Tab 高度)'],
-                  ['C', '畫圓形 (指定圓心與半徑 R)'],
-                  ['A', '三點圓弧 (圓心 → 起點 → 終點角度)'],
-                  ['G', '正多邊形 (3 至 24 邊形)'],
-                  ['T', '插入工程文字標註'],
-                  ['K', '測量兩點距離、ΔX、ΔY 與角度'],
+                  ['空白鍵 / Enter', '確認輸入數值 / 結束繪製 / 執行組裝'],
+                  ['Z', '窗選局部放大 (拉框放大指定局部區域)'],
+                  ['L', '畫直線 (即時顯示 ΔX/ΔY 相對距離虛線)'],
+                  ['R', '畫矩形 (可切換「轉角矩形」或「中心矩形」)'],
+                  ['A', '三點圓弧 (依序點選起點、第二點、終點)'],
+                  ['D / B', '標註尺寸 (D) / 一鍵自動標註選取物件 (B)'],
+                  ['P', '聚合線 (按 C 封閉、按空白鍵/Enter 結束)'],
+                  ['C / E / G', '圓形 (C) / 橢圓 (E) / 正多邊形 (G)'],
+                  ['T / K', '文字註解 (T) / 測量兩點距離與角度 (K)'],
                 ].map(([key, desc]) => (
                   <div key={key} className="flex items-center justify-between gap-2">
                     <span className="text-slate-300">{desc}</span>
@@ -1340,19 +1489,18 @@ export default function App() {
 
               <div className="bg-slate-950/80 border border-slate-800 rounded-lg p-4 space-y-2">
                 <h3 className="font-semibold text-amber-300 mb-2">
-                  修改、鎖點與視角控制快捷鍵
+                  修改、修剪與精確鎖點快捷鍵
                 </h3>
                 {[
-                  ['V / ESC', '選取模式 / 取消目前步驟'],
-                  ['F8', '切換「正交鎖定 ORTHO」(畫水平/垂直線必備)'],
-                  ['F3', '切換「物件鎖點 OSNAP」(自動吸附端點/中點/圓心)'],
-                  ['F12', '切換「動態輸入 DYN」(游標旁即時輸入長度/角度)'],
-                  ['M / J / Q', '移動 (M) / 連續複製 (J) / 旋轉 (Q)'],
-                  ['S / W / O', '縮放 (S) / 對稱鏡射 (W) / 偏移複製 (O)'],
+                  ['TR', '剪切圖元 (點選相交線段直接切除區段)'],
+                  ['EX', '延伸圖元 (點選線段端點延伸至邊界)'],
+                  ['O', '偏移複製 (支援直接輸入偏移距離數值)'],
+                  ['J', '組裝圖元 (將多個選取圖元合併為單一聚合線)'],
+                  ['M / CO / Q / W', '移動 (M) / 複製 (CO) / 旋轉 (Q) / 鏡射 (W)'],
                   ['X / DEL', '炸開圖元為直線 (X) / 刪除選取物件 (DEL)'],
-                  ['Z', '自動縮放至全圖最佳視角 (Zoom Extents)'],
+                  ['F8 / F3 / F12', '正交鎖定 (F8) / 物件鎖點 (F3) / 動態輸入 (F12)'],
+                  ['V / ESC', '選取模式 / 取消目前步驟'],
                   ['Ctrl+Z / Y', '復原上一步 / 重做'],
-                  ['空白鍵 / 雙指', '拖曳平移畫布，滾輪或雙指縮放'],
                 ].map(([key, desc]) => (
                   <div key={key} className="flex items-center justify-between gap-2">
                     <span className="text-slate-300">{desc}</span>

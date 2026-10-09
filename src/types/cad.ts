@@ -21,6 +21,8 @@ export interface SnapPoint {
 
 export type LineType = 'continuous' | 'dashed' | 'center' | 'dotted';
 
+export type RectangleMode = 'corner' | 'center';
+
 export interface CadLayer {
   id: string;
   name: string;
@@ -79,8 +81,11 @@ export interface ArcEntity extends BaseEntity {
   type: 'arc';
   center: Point;
   radius: number;
-  startAngle: number; // radians
+  startAngle: number; // radians, CCW from startAngle to endAngle
   endAngle: number; // radians
+  p1?: Point;
+  p2?: Point;
+  p3?: Point;
 }
 
 export interface EllipseEntity extends BaseEntity {
@@ -128,6 +133,7 @@ export type CadEntity =
 export type ToolType =
   | 'select'
   | 'pan'
+  | 'zoomWindow'
   | 'line'
   | 'polyline'
   | 'rectangle'
@@ -141,9 +147,11 @@ export type ToolType =
   | 'move'
   | 'copy'
   | 'rotate'
-  | 'scale'
   | 'mirror'
-  | 'offset';
+  | 'offset'
+  | 'trim'
+  | 'extend'
+  | 'join';
 
 export interface DraftingSettings {
   grid: boolean;

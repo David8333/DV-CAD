@@ -22,13 +22,14 @@ interface CommandDockProps {
 }
 
 const TOOL_PROMPTS: Record<ToolType, string> = {
-  select: '就緒 — 點選圖元、拖曳掣點或拉框選取 (按 L 畫直線、按 D 標註尺寸)',
+  select: '就緒 — 點選圖元、拖曳掣點或拉框選取 (空白鍵=Enter；按 Z 窗選放大、L 直線、R 矩形)',
   pan: 'PAN 平移視景 — 拖曳畫布或雙指縮放平移',
-  line: 'LINE 指定點或輸入 [長度] / [X,Y] / [@距離<角度]',
-  polyline: 'PLINE 指定下一頂點，輸入 C 封閉，或按 Enter 結束',
-  rectangle: 'RECTANG 指定對角兩點，或直接輸入寬度 [Tab] 高度',
-  circle: 'CIRCLE 指定圓心與半徑 R，或輸入半徑數值按 Enter',
-  arc: 'ARC 依序指定 [1.圓心] → [2.圓弧起點] → [3.終點角度]',
+  zoomWindow: 'ZOOM WINDOW 請依序點選放大框的第一角點與對角點，立即局部放大',
+  line: 'LINE 指定點或輸入 [長度] 按空白鍵/Enter / [X,Y] / [@距離<角度]',
+  polyline: 'PLINE 指定下一頂點，輸入 C 封閉，或按空白鍵/Enter 結束',
+  rectangle: 'RECTANG 指定角點或中心點，或直接輸入寬度 [Tab] 高度按空白鍵/Enter',
+  circle: 'CIRCLE 指定圓心與半徑 R，或輸入半徑數值按空白鍵/Enter',
+  arc: 'ARC [三點圓弧] 依序點選 [1.起點] → [2.弧上第二點] → [3.終點]',
   ellipse: 'ELLIPSE 指定橢圓中心點與水平/垂直半軸長',
   polygon: 'POLYGON 指定正多邊形中心點與外接圓半徑方向',
   dimension: 'DIMLINEAR 依序點選兩端測量點，再決定標註線偏移位置',
@@ -37,9 +38,11 @@ const TOOL_PROMPTS: Record<ToolType, string> = {
   move: 'MOVE 指定移動基準點，再點選目標位移點',
   copy: 'COPY 指定複製基準點，可連續點選多個目標點放置副本',
   rotate: 'ROTATE 指定旋轉中心基準點，再拖曳或輸入旋轉角度',
-  scale: 'SCALE 指定縮放基準點，再移動或輸入比例因子',
   mirror: 'MIRROR 依序點選兩點定義對稱鏡射軸線',
-  offset: 'OFFSET 點選要偏移的物件，再點選要偏移的一側',
+  offset: 'OFFSET 可輸入偏移距離數值按空白鍵/Enter，點選物件後再點選要偏移的一側',
+  trim: 'TRIM 剪切模式 — 將游標移至相交線段預覽紅虛線切除區段，點擊左鍵立即剪切',
+  extend: 'EXTEND 延伸模式 — 將游標移至線段端點預覽綠虛線延伸路徑，點擊左鍵延伸至邊界',
+  join: 'JOIN 組裝圖元 — 點選 2 個以上圖元後，按空白鍵或 Enter 組裝合併為單一聚合線',
 };
 
 export const CommandDock: React.FC<CommandDockProps> = ({
