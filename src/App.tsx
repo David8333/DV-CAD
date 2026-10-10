@@ -2591,24 +2591,11 @@ export default function App() {
         <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
-            onClick={() => {
-              setPdfSelectedTabIds((prev) =>
-                prev.length === 0 ? [activeCanvasTabId] : prev
-              );
-              setActiveModal('pdf');
-            }}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-rose-600 rounded-lg hover:bg-rose-500 transition-colors whitespace-nowrap shrink-0 shadow-sm"
-          >
-            <FileText className="w-3.5 h-3.5" />
-            <span>匯出 PDF (分頁/窗選)</span>
-          </button>
-          <button
-            type="button"
             onClick={() => setActiveModal('export')}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-sky-600 rounded-lg hover:bg-sky-500 transition-colors whitespace-nowrap shrink-0"
           >
             <FileCode2 className="w-3.5 h-3.5" />
-            <span>匯入 / 輸出 (DXF·DWG·PDF)</span>
+            <span>匯入 / 匯出</span>
           </button>
           <button
             type="button"
@@ -3159,35 +3146,6 @@ export default function App() {
                     ? ` (${clipboard.length})`
                     : ''}
             </span>
-          </button>
-
-          <div className="h-3.5 w-px bg-slate-800 mx-0.5" />
-
-          <button
-            type="button"
-            onClick={() => {
-              setPdfExportScope('tabs');
-              setPdfSelectedTabIds([activeCanvasTabId]);
-              setActiveModal('pdf');
-            }}
-            title="選擇畫布分頁匯出 PDF"
-            className="flex items-center gap-1 px-2 py-0.5 rounded bg-rose-950/60 text-rose-200 border border-rose-500/40 hover:bg-rose-900/60 text-[11px] font-medium whitespace-nowrap"
-          >
-            <FileText className="w-3 h-3 text-rose-400" />
-            <span>匯出分頁 PDF</span>
-          </button>
-          <button
-            type="button"
-            onClick={handleStartPdfWindowSelection}
-            title="在畫布上窗選局部區域匯出 PDF"
-            className={`flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] font-medium transition-colors whitespace-nowrap ${
-              activeTool === 'pdfWindow'
-                ? 'bg-amber-500 text-slate-950 border-amber-300 font-semibold'
-                : 'bg-amber-950/50 text-amber-200 border-amber-500/40 hover:bg-amber-900/50'
-            }`}
-          >
-            <Crop className="w-3 h-3" />
-            <span>窗選匯出 PDF</span>
           </button>
         </div>
       </div>
@@ -3780,7 +3738,7 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <FileCode2 className="w-5 h-5 text-sky-400" />
                 <h2 className="text-base font-bold text-slate-100">
-                  匯入與匯出 CAD 工程圖檔 (DXF / DWG / SVG)
+                  匯入與匯出 CAD 工程圖檔 (DXF / DWG / SVG / PDF / JSON)
                 </h2>
               </div>
               <button
@@ -3793,12 +3751,12 @@ export default function App() {
             </div>
 
             <div className="space-y-4 text-xs">
-              {/* Section 1: Import DXF / DWG */}
+              {/* Section 1: Import DXF / DWG / JSON */}
               <div className="p-4 bg-emerald-950/30 border border-emerald-500/40 rounded-xl space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="font-bold text-emerald-300 text-sm flex items-center gap-1.5">
                     <Upload className="w-4 h-4" />
-                    <span>匯入 AutoCAD 圖檔 (.DXF / .DWG)</span>
+                    <span>匯入 AutoCAD 圖檔 (.DXF / .DWG / .JSON)</span>
                   </div>
                   <span className="px-2 py-0.5 font-mono text-[10px] bg-emerald-500/20 text-emerald-300 rounded">
                     支援拖曳放入畫布
