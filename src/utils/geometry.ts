@@ -2,6 +2,7 @@ import {
   ArcEntity,
   CadEntity,
   CadLayer,
+  CircleEntity,
   DimensionEntity,
   DraftingSettings,
   GripHandle,
@@ -478,16 +479,71 @@ export function getHatchSegments(entity: HatchEntity): Array<[Point, Point]> {
 }
 
 /**
- * Create a HatchEntity from a target closed entity or a connected loop of lines/polylines.
+ * Sample an ArcEntity into an ordered polyline sequence of points from startAngle to endAngle (CCW).
+ */
+export function sampleArcPoints(arc: ArcEntity, segments = 14): Point[] {
+  const s = normalizeAngle(arc.startAngle);
+  const e = normalizeAngle(arc.endAngle);
+  let sweep = normalizeAngle(e - s);
+  if (sweep < 1e-5) sweep = Math.PI * 2;
+  const pts: Point[] = [];
+  for (let i = 0; i <= segments; i++) {
+    const ang = s + (sweep * i) / segments;
+    pts.push({
+      x: arc.center.x + arc.radius * Math.cos(ang),
+      y: arc.center.y + arc.radius * Math.sin(ang),
+    });
+  }
+  return pts;
+}
+
+/**
+ * Compute signed polygon area (positive for CCW, negative for CW) and absolute area.
+ */
+export function computePolygonArea(pts: Point[]): number {
+  if (pts.length < 3) return 0;
+  let sum = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const p1 = pts[i];
+    const p2 = pts[(i + 1) % pts.length];
+    sum += p1.x * p2.y - p2.x * p1.y;
+  }
+  return Math.abs(sum) / 2;
+}
+
+/**
+ * Standard Ray-Casting Point-in-Polygon test.
+ */
+export function isPointInPolygon(pt: Point, polygon: Point[]): boolean {
+  if (polygon.length < 3) return false;
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x,
+      yi = polygon[i].y;
+    const xj = polygon[j].x,
+      yj = polygon[j].y;
+    const intersect =
+      yi > pt.y !== yj > pt.y &&
+      pt.x < ((xj - xi) * (pt.y - yi)) / (yj - yi + 1e-12) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * Create HatchEntity objects from target closed entities or connected loops of lines, polylines, and fillet arcs!
+ * Also supports creating a polygon boundary from any user-selected range of entities.
  */
 export function createHatchFromEntities(
   targetEntities: CadEntity[],
   pitch: number,
-  layerId = 'WALL'
+  layerId = 'WALL',
+  forceRangePolygon = false
 ): HatchEntity[] {
   const validPitch = Math.max(0.2, pitch || 5);
   const hatches: HatchEntity[] = [];
-  const linePool: Array<[Point, Point]> = [];
+  // Each path item is an ordered array of points (2 for a line segment, N for a sampled arc)
+  const pathPool: Point[][] = [];
 
   for (const ent of targetEntities) {
     if (ent.type === 'circle') {
@@ -537,7 +593,7 @@ export function createHatchFromEntities(
         points: pts,
       });
     } else if (ent.type === 'polyline') {
-      if (ent.points.length >= 3) {
+      if (ent.closed && ent.points.length >= 3) {
         hatches.push({
           id: `hatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           type: 'hatch',
@@ -547,68 +603,264 @@ export function createHatchFromEntities(
           boundaryType: 'polygon',
           points: ent.points.map((p) => ({ ...p })),
         });
-      } else {
-        linePool.push(...getEntitySegments(ent));
+      } else if (ent.points.length >= 2) {
+        pathPool.push(ent.points.map((p) => ({ ...p })));
       }
     } else if (ent.type === 'line') {
-      linePool.push([ent.p1, ent.p2]);
+      pathPool.push([{ ...ent.p1 }, { ...ent.p2 }]);
+    } else if (ent.type === 'arc') {
+      pathPool.push(sampleArcPoints(ent, 14));
     } else if (ent.type === 'group') {
       const childHatches = createHatchFromEntities(
         ent.children,
         validPitch,
-        layerId
+        layerId,
+        forceRangePolygon
       );
       hatches.push(...childHatches);
     }
   }
 
-  // Try to chain any loose Line segments into a closed polygon loop
-  if (linePool.length >= 3) {
-    const used = new Array(linePool.length).fill(false);
-    const chain: Point[] = [{ ...linePool[0][0] }, { ...linePool[0][1] }];
-    used[0] = true;
-    const tol = 2.5;
+  // Try to chain any loose Line / Arc / Polyline segments into one or more closed polygon loops
+  if (pathPool.length >= 1) {
+    const used = new Array(pathPool.length).fill(false);
+    const tol = 3.0;
 
-    let progress = true;
-    while (progress) {
-      progress = false;
-      const tail = chain[chain.length - 1];
-      for (let i = 0; i < linePool.length; i++) {
-        if (used[i]) continue;
-        const [a, b] = linePool[i];
-        if (dist(tail, a) <= tol) {
-          chain.push({ ...b });
-          used[i] = true;
-          progress = true;
-          break;
-        } else if (dist(tail, b) <= tol) {
-          chain.push({ ...a });
-          used[i] = true;
-          progress = true;
-          break;
+    for (let startIdx = 0; startIdx < pathPool.length; startIdx++) {
+      if (used[startIdx]) continue;
+      const chain: Point[] = [...pathPool[startIdx]];
+      used[startIdx] = true;
+
+      let progress = true;
+      while (progress) {
+        progress = false;
+        const tail = chain[chain.length - 1];
+        for (let i = 0; i < pathPool.length; i++) {
+          if (used[i]) continue;
+          const pts = pathPool[i];
+          const headI = pts[0];
+          const tailI = pts[pts.length - 1];
+          if (dist(tail, headI) <= tol) {
+            chain.push(...pts.slice(1));
+            used[i] = true;
+            progress = true;
+            break;
+          } else if (dist(tail, tailI) <= tol) {
+            const rev = [...pts].reverse();
+            chain.push(...rev.slice(1));
+            used[i] = true;
+            progress = true;
+            break;
+          }
+        }
+      }
+
+      if (chain.length >= 3) {
+        const isClosed = dist(chain[0], chain[chain.length - 1]) <= tol * 1.5;
+        if (isClosed) {
+          chain.pop();
+        }
+        if ((isClosed || forceRangePolygon) && chain.length >= 3) {
+          hatches.push({
+            id: `hatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            type: 'hatch',
+            layerId,
+            pitch: validPitch,
+            angle: 45,
+            boundaryType: 'polygon',
+            points: chain,
+          });
         }
       }
     }
 
-    if (chain.length >= 3) {
-      if (dist(chain[0], chain[chain.length - 1]) <= tol) {
-        chain.pop();
-      }
-      if (chain.length >= 3) {
-        hatches.push({
-          id: `hatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-          type: 'hatch',
-          layerId,
-          pitch: validPitch,
-          angle: 45,
-          boundaryType: 'polygon',
-          points: chain,
-        });
+    // If user explicitly selected a set of boundary entities (forceRangePolygon) and they didn't chain into a single closed loop,
+    // construct an angularly-ordered bounding polygon from all vertices in pathPool so selected range execution always works!
+    if (hatches.length === 0 && forceRangePolygon && pathPool.length >= 2) {
+      const allPts = pathPool.flat();
+      if (allPts.length >= 3) {
+        const cx = allPts.reduce((s, p) => s + p.x, 0) / allPts.length;
+        const cy = allPts.reduce((s, p) => s + p.y, 0) / allPts.length;
+        const uniquePts: Point[] = [];
+        for (const p of allPts) {
+          if (!uniquePts.some((u) => dist(u, p) < 0.5)) {
+            uniquePts.push(p);
+          }
+        }
+        if (uniquePts.length >= 3) {
+          uniquePts.sort(
+            (a, b) =>
+              Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx)
+          );
+          hatches.push({
+            id: `hatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            type: 'hatch',
+            layerId,
+            pitch: validPitch,
+            angle: 45,
+            boundaryType: 'polygon',
+            points: uniquePts,
+          });
+        }
       }
     }
   }
 
   return hatches;
+}
+
+/**
+ * Smart Hatch (智慧填充輸入):
+ * Given a point `pt` inside any enclosed shape or closed loop of lines/arcs/rectangles/circles/polygons,
+ * automatically detects the smallest enclosing boundary containing `pt` (or near `pt`) and returns its HatchEntity!
+ */
+export function findSmartHatchBoundaryAtPoint(
+  pt: Point,
+  visibleEntities: CadEntity[],
+  pitch: number,
+  layerId = 'WALL',
+  hitTol = 6
+): HatchEntity | null {
+  const validPitch = Math.max(0.2, pitch || 5);
+  const leaves = flattenEntities(visibleEntities).filter(
+    (e) => e.type !== 'hatch' && e.type !== 'dimension' && e.type !== 'text'
+  );
+
+  // 1. Check if user clicked/hovered directly on a boundary entity
+  const nearEnt = [...leaves]
+    .reverse()
+    .find((ent) => isPointNearEntity(pt, ent, hitTol));
+  if (nearEnt) {
+    const connectedIds = findConnectedEntityIds([nearEnt.id], leaves, 3.0);
+    const sourceEnts =
+      nearEnt.type === 'line' || nearEnt.type === 'arc'
+        ? leaves.filter((e) => connectedIds.includes(e.id))
+        : [nearEnt];
+    const directHatches = createHatchFromEntities(
+      sourceEnts,
+      validPitch,
+      layerId
+    );
+    if (directHatches.length > 0) {
+      return directHatches[0];
+    }
+  }
+
+  // 2. Check all closed regions (single closed shapes AND chained line/arc loops) that contain `pt`,
+  // and pick the smallest-area region containing `pt` (smart inner boundary detection!)
+  const candidates: Array<{ area: number; hatch: HatchEntity }> = [];
+
+  for (const ent of leaves) {
+    if (ent.type === 'circle') {
+      if (dist(pt, ent.center) <= ent.radius) {
+        candidates.push({
+          area: Math.PI * ent.radius * ent.radius,
+          hatch: {
+            id: `hatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            type: 'hatch',
+            layerId,
+            pitch: validPitch,
+            angle: 45,
+            boundaryType: 'circle',
+            center: { ...ent.center },
+            radius: ent.radius,
+          },
+        });
+      }
+    } else if (ent.type === 'rectangle') {
+      const minX = Math.min(ent.p1.x, ent.p2.x);
+      const maxX = Math.max(ent.p1.x, ent.p2.x);
+      const minY = Math.min(ent.p1.y, ent.p2.y);
+      const maxY = Math.max(ent.p1.y, ent.p2.y);
+      if (pt.x >= minX && pt.x <= maxX && pt.y >= minY && pt.y <= maxY) {
+        const w = maxX - minX;
+        const h = maxY - minY;
+        if (w > 0.1 && h > 0.1) {
+          candidates.push({
+            area: w * h,
+            hatch: {
+              id: `hatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+              type: 'hatch',
+              layerId,
+              pitch: validPitch,
+              angle: 45,
+              boundaryType: 'polygon',
+              points: [
+                { x: minX, y: minY },
+                { x: maxX, y: minY },
+                { x: maxX, y: maxY },
+                { x: minX, y: maxY },
+              ],
+            },
+          });
+        }
+      }
+    } else if (ent.type === 'polygon') {
+      const verts = getPolygonVertices(
+        ent.center,
+        ent.radius,
+        ent.sides,
+        ent.rotation
+      );
+      if (isPointInPolygon(pt, verts)) {
+        candidates.push({
+          area: computePolygonArea(verts),
+          hatch: {
+            id: `hatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            type: 'hatch',
+            layerId,
+            pitch: validPitch,
+            angle: 45,
+            boundaryType: 'polygon',
+            points: verts,
+          },
+        });
+      }
+    } else if (ent.type === 'polyline' && ent.points.length >= 3) {
+      if (isPointInPolygon(pt, ent.points)) {
+        candidates.push({
+          area: computePolygonArea(ent.points),
+          hatch: {
+            id: `hatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            type: 'hatch',
+            layerId,
+            pitch: validPitch,
+            angle: 45,
+            boundaryType: 'polygon',
+            points: ent.points.map((p) => ({ ...p })),
+          },
+        });
+      }
+    }
+  }
+
+  // Also check closed loops formed by connected lines / fillet arcs / open polylines
+  const curveEnts = leaves.filter(
+    (e) =>
+      e.type === 'line' ||
+      e.type === 'arc' ||
+      (e.type === 'polyline' && !e.closed)
+  );
+  if (curveEnts.length >= 2) {
+    const loopHatches = createHatchFromEntities(curveEnts, validPitch, layerId);
+    for (const lh of loopHatches) {
+      if (
+        lh.boundaryType === 'polygon' &&
+        lh.points &&
+        lh.points.length >= 3 &&
+        isPointInPolygon(pt, lh.points)
+      ) {
+        candidates.push({
+          area: computePolygonArea(lh.points),
+          hatch: lh,
+        });
+      }
+    }
+  }
+
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => a.area - b.area);
+  return candidates[0].hatch;
 }
 
 function findSegmentIntersectionsT(
@@ -2070,7 +2322,7 @@ export function getDimensionLinePoints(entity: {
   p1: Point;
   p2: Point;
   offsetPoint: Point;
-  dimMode?: 'linear' | 'diameter';
+  dimMode?: 'linear' | 'diameter' | 'radius';
   textOverride?: string;
 }): {
   dimP1: Point;
@@ -2079,6 +2331,7 @@ export function getDimensionLinePoints(entity: {
   angle: number;
   length: number;
   isDiameter: boolean;
+  isRadius: boolean;
   center: Point;
   leaderOutside: boolean;
   leaderElbow?: Point;
@@ -2087,7 +2340,6 @@ export function getDimensionLinePoints(entity: {
   const dx = entity.p2.x - entity.p1.x;
   const dy = entity.p2.y - entity.p1.y;
   const len = Math.hypot(dx, dy);
-  const center = midpoint(entity.p1, entity.p2);
 
   if (len < 1e-5) {
     return {
@@ -2097,12 +2349,78 @@ export function getDimensionLinePoints(entity: {
       angle: 0,
       length: 0,
       isDiameter: false,
+      isRadius: false,
       center: entity.p1,
       leaderOutside: false,
     };
   }
 
   const isDiameter = entity.dimMode === 'diameter';
+  const isRadius = entity.dimMode === 'radius';
+
+  if (isRadius) {
+    // For Radius dimension (R 半徑標註): p1 is the arc/fillet center, p2 is a point on the arc circumference, so radius = len
+    const center = entity.p1;
+    const radius = len;
+    const odx = entity.offsetPoint.x - center.x;
+    const ody = entity.offsetPoint.y - center.y;
+    const distFromCenter = Math.hypot(odx, ody);
+    const defaultAngle = Math.atan2(dy, dx);
+    const dirAngle =
+      distFromCenter > 1e-3 ? Math.atan2(ody, odx) : defaultAngle;
+
+    const dimP1 = { ...center };
+    const dimP2 = {
+      x: center.x + radius * Math.cos(dirAngle),
+      y: center.y + radius * Math.sin(dirAngle),
+    };
+
+    const leaderOutside = distFromCenter > radius * 1.02;
+    if (leaderOutside) {
+      const shelfSign = Math.cos(dirAngle) >= 0 ? 1 : -1;
+      const shelfLen = Math.max(18, radius * 0.4);
+      const leaderElbow = { ...entity.offsetPoint };
+      const leaderLanding = {
+        x: leaderElbow.x + shelfSign * shelfLen,
+        y: leaderElbow.y,
+      };
+      return {
+        dimP1,
+        dimP2,
+        mid: {
+          x: leaderElbow.x + (shelfSign * shelfLen) / 2,
+          y: leaderElbow.y,
+        },
+        angle: dirAngle,
+        length: radius,
+        isDiameter: false,
+        isRadius: true,
+        center,
+        leaderOutside: true,
+        leaderElbow,
+        leaderLanding,
+      };
+    }
+
+    const midPt =
+      distFromCenter > 1e-3 && distFromCenter < radius * 0.85
+        ? entity.offsetPoint
+        : midpoint(dimP1, dimP2);
+
+    return {
+      dimP1,
+      dimP2,
+      mid: midPt,
+      angle: dirAngle,
+      length: radius,
+      isDiameter: false,
+      isRadius: true,
+      center,
+      leaderOutside: false,
+    };
+  }
+
+  const center = midpoint(entity.p1, entity.p2);
 
   if (isDiameter) {
     const radius = len / 2;
@@ -2140,6 +2458,7 @@ export function getDimensionLinePoints(entity: {
         angle: dirAngle,
         length: len,
         isDiameter: true,
+        isRadius: false,
         center,
         leaderOutside: true,
         leaderElbow,
@@ -2159,6 +2478,7 @@ export function getDimensionLinePoints(entity: {
       angle: dirAngle,
       length: len,
       isDiameter: true,
+      isRadius: false,
       center,
       leaderOutside: false,
     };
@@ -2186,8 +2506,63 @@ export function getDimensionLinePoints(entity: {
     angle: Math.atan2(dy, dx),
     length: len,
     isDiameter: false,
+    isRadius: false,
     center,
     leaderOutside: false,
+  };
+}
+
+/**
+ * Create a standard ISO Radius Dimension (R 半徑標註) for a Fillet Arc (導圓角), 3-Point Arc, or Circle.
+ */
+export function createRadiusDimensionForArc(
+  arcOrCircle: ArcEntity | CircleEntity,
+  layerId: string,
+  fontSize = 11,
+  customOffsetPt?: Point
+): DimensionEntity {
+  const center = { ...arcOrCircle.center };
+  const radius = arcOrCircle.radius;
+  let midAng = Math.PI / 4;
+  let arcMidPt: Point = {
+    x: center.x + radius * Math.cos(midAng),
+    y: center.y + radius * Math.sin(midAng),
+  };
+
+  if (arcOrCircle.type === 'arc') {
+    const [, p2] = getArcThreePoints(arcOrCircle);
+    arcMidPt = p2;
+    midAng = Math.atan2(p2.y - center.y, p2.x - center.x);
+  } else if (customOffsetPt) {
+    midAng = Math.atan2(
+      customOffsetPt.y - center.y,
+      customOffsetPt.x - center.x
+    );
+    arcMidPt = {
+      x: center.x + radius * Math.cos(midAng),
+      y: center.y + radius * Math.sin(midAng),
+    };
+  }
+
+  const offsetDist = radius + Math.max(22, radius * 0.55);
+  const offsetPoint = customOffsetPt || {
+    x: center.x + offsetDist * Math.cos(midAng),
+    y: center.y + offsetDist * Math.sin(midAng),
+  };
+
+  return {
+    id: `dim_r_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    type: 'dimension',
+    layerId,
+    dimMode: 'radius',
+    precision: 2,
+    toleranceMode: 'none',
+    toleranceUpper: 0.05,
+    toleranceLower: -0.05,
+    p1: center,
+    p2: arcMidPt,
+    offsetPoint,
+    fontSize,
   };
 }
 
@@ -2204,7 +2579,7 @@ export function formatDimensionLabel(
   entity: {
     p1: Point;
     p2: Point;
-    dimMode?: 'linear' | 'diameter';
+    dimMode?: 'linear' | 'diameter' | 'radius';
     precision?: 0 | 1 | 2;
     toleranceMode?: 'none' | 'symmetric' | 'deviation';
     toleranceUpper?: number;
@@ -2225,13 +2600,16 @@ export function formatDimensionLabel(
       ? entity.precision
       : 1;
   const isDia = entity.dimMode === 'diameter';
+  const isRad = entity.dimMode === 'radius';
   const baseNum = len.toFixed(prec);
   const mainText =
     entity.textOverride && entity.textOverride.trim() !== ''
       ? entity.textOverride.trim()
       : isDia
         ? `Ø${baseNum}`
-        : `${baseNum}`;
+        : isRad
+          ? `R${baseNum}`
+          : `${baseNum}`;
 
   const tolMode = entity.toleranceMode || 'none';
   if (tolMode === 'symmetric') {
@@ -3173,6 +3551,39 @@ export function applyGripMove(
       return { ...entity, points: nextPts };
     }
     case 'dimension': {
+      if (entity.dimMode === 'radius') {
+        const c = entity.p1;
+        const r = Math.max(0.01, dist(entity.p1, entity.p2));
+        if (gripIndex === 2) {
+          const ang = Math.atan2(newPoint.y - c.y, newPoint.x - c.x);
+          return {
+            ...entity,
+            p2: { x: c.x + r * Math.cos(ang), y: c.y + r * Math.sin(ang) },
+            offsetPoint: newPoint,
+          };
+        }
+        if (gripIndex === 1) {
+          const newR = Math.max(0.01, dist(c, newPoint));
+          const ang = Math.atan2(newPoint.y - c.y, newPoint.x - c.x);
+          return {
+            ...entity,
+            p2: { x: c.x + newR * Math.cos(ang), y: c.y + newR * Math.sin(ang) },
+          };
+        }
+        if (gripIndex === 0) {
+          const dx = newPoint.x - c.x;
+          const dy = newPoint.y - c.y;
+          return {
+            ...entity,
+            p1: newPoint,
+            p2: { x: entity.p2.x + dx, y: entity.p2.y + dy },
+            offsetPoint: {
+              x: entity.offsetPoint.x + dx,
+              y: entity.offsetPoint.y + dy,
+            },
+          };
+        }
+      }
       if (entity.dimMode === 'diameter') {
         const c = midpoint(entity.p1, entity.p2);
         const r = Math.max(0.01, dist(entity.p1, entity.p2) / 2);

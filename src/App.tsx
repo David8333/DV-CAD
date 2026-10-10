@@ -32,10 +32,12 @@ import {
   X,
 } from 'lucide-react';
 import {
+  ArcEntity,
   CadEntity,
   CadLayer,
   CommandLogItem,
   DraftingSettings,
+  HatchMode,
   Point,
   RectangleMode,
   SnapPoint,
@@ -50,6 +52,7 @@ import {
   alignSelectedDimensions,
   angleDegrees,
   createHatchFromEntities,
+  createRadiusDimensionForArc,
   DEG_TO_RAD,
   dist,
   explodeEntity,
@@ -234,8 +237,17 @@ export default function App() {
   const [isDraggingFile, setIsDraggingFile] = useState<boolean>(false);
   const directFileInputRef = useRef<HTMLInputElement>(null);
 
-  // Sequential 2-letter shortcut state (e.g. J -> O = JO, T -> R = TR, E -> X = EX, C -> O = CO, A -> R = AR, Z -> E = ZE)
+  // Sequential 1-, 2-, and 3-letter shortcut state & cursor dropdown position
   const [pendingKeyPrefix, setPendingKeyPrefix] = useState<string | null>(null);
+  const [shortcutMenuPos, setShortcutMenuPos] = useState<{
+    x: number;
+    y: number;
+  }>({ x: 320, y: 240 });
+  const mouseScreenPosRef = useRef<{ x: number; y: number }>({
+    x: 320,
+    y: 240,
+  });
+  const shortcutMenuHoveredRef = useRef<boolean>(false);
   const prefixTimeoutRef = useRef<number | null>(null);
   const eraseDelayTimeoutRef = useRef<number | null>(null);
   const joinDelayTimeoutRef = useRef<number | null>(null);
@@ -274,8 +286,10 @@ export default function App() {
   const [polygonSides, setPolygonSides] = useState<number>(6);
   const [offsetDistance, setOffsetDistance] = useState<number>(20);
   const [hatchPitch, setHatchPitch] = useState<number>(5);
+  const [hatchMode, setHatchMode] = useState<HatchMode>('smart');
   const [chamferDistance, setChamferDistance] = useState<number>(10);
   const [filletRadius, setFilletRadius] = useState<number>(10);
+  const [filletAutoDim, setFilletAutoDim] = useState<boolean>(true);
 
   // Drafting settings
   const [settings, setSettings] = useState<DraftingSettings>({
@@ -778,19 +792,58 @@ export default function App() {
           },
           fontSize: defaultDimFontSize,
         });
+      } else if (ent.type === 'arc') {
+        newDims.push(
+          createRadiusDimensionForArc(ent, dimLayer, defaultDimFontSize)
+        );
       }
     }
 
     if (newDims.length > 0) {
       pushEntities([...entities, ...newDims]);
       logCommand(
-        `自動標註完成：已為選取物件產生 ${newDims.length} 組精確尺寸標註！`,
+        `自動標註完成：已為選取物件產生 ${newDims.length} 組精確尺寸標註（含圓角半徑 R / 直徑 Ø）！`,
         'success'
       );
     } else {
       logCommand(
-        '請選取直線、矩形或圓形以執行自動尺寸標註，或按 [D] 手動點選兩點標註。',
+        '請選取直線、矩形、圓形或導圓角(圓弧)以執行自動尺寸標註，或按 [D] 手動點選標註。',
         'info'
+      );
+    }
+  }, [
+    activeLayerId,
+    defaultDimFontSize,
+    entities,
+    handleSelectTool,
+    layers,
+    logCommand,
+    pushEntities,
+    selectedIds,
+  ]);
+
+  // Dedicated Radius Dimension handler for Fillet / Arc entities
+  const handleDimensionRadius = useCallback(() => {
+    const dimLayer =
+      layers.find((l) => l.id === 'DIM')?.id || activeLayerId || '0';
+    const selectedArcs = entities.filter(
+      (e): e is ArcEntity => selectedIds.includes(e.id) && e.type === 'arc'
+    );
+    if (selectedArcs.length > 0) {
+      const newDims = selectedArcs.map((arc) =>
+        createRadiusDimensionForArc(arc, dimLayer, defaultDimFontSize)
+      );
+      pushEntities([...entities, ...newDims]);
+      setSelectedIds(newDims.map((d) => d.id));
+      logCommand(
+        `DIMRADIUS 已為選取的 ${selectedArcs.length} 個導圓角/圓弧建立半徑標註 (R)！`,
+        'success'
+      );
+    } else {
+      handleSelectTool('dimension');
+      logCommand(
+        'DIMRADIUS 導圓角/圓弧半徑標註模式 (DR / DRA)：請直接點選畫布上的導圓角或圓弧，並移動滑鼠放置 R 半徑標註！',
+        'command'
       );
     }
   }, [
@@ -846,32 +899,523 @@ export default function App() {
     [logCommand]
   );
 
-  // Global Direct & Sequential Multi-Letter Keyboard Shortcuts (active only when unlocked)
+  // Complete registry of 1-letter, 2-letter, and 3-letter sequential shortcuts
+  const shortcutRegistry = React.useMemo(
+    () => [
+      // A
+      {
+        keys: 'A',
+        label: '三點圓弧 (Arc)',
+        desc: '依序點選 P1、P2、P3 繪製圓弧',
+        run: () => handleSelectTool('arc'),
+      },
+      {
+        keys: 'AR',
+        label: '陣列複製 (Array)',
+        desc: '開啟矩形 / 環形陣列複製視窗',
+        run: () => {
+          setActiveTool('select');
+          setActiveModal('array');
+          logCommand('指令切換: ARRAY 陣列複製工具 (快捷鍵 AR)', 'command');
+        },
+      },
+      {
+        keys: 'ARC',
+        label: '三點圓弧 (Arc 3P)',
+        desc: '三字母快捷鍵：三點圓弧模式',
+        run: () => handleSelectTool('arc'),
+      },
+      {
+        keys: 'ARR',
+        label: '陣列複製 (Array)',
+        desc: '三字母快捷鍵：陣列複製視窗',
+        run: () => {
+          setActiveTool('select');
+          setActiveModal('array');
+          logCommand('指令切換: ARRAY 陣列複製工具 (快捷鍵 ARR)', 'command');
+        },
+      },
+      // B
+      {
+        keys: 'B',
+        label: '自動標註選取圖元 (AutoDim)',
+        desc: '一鍵標註直線、矩形、圓形與導圓角半徑 R',
+        run: () => handleAutoDimensionSelected(),
+      },
+      {
+        keys: 'BH',
+        label: '45° 剖面填充 (Hatch)',
+        desc: '智慧填充輸入或選取範圍執行 45° 斜線填充',
+        run: () => handleSelectTool('hatch'),
+      },
+      {
+        keys: 'BHA',
+        label: '45° 剖面填充 (BHatch)',
+        desc: '三字母快捷鍵：建築主牆/輪廓 45° 剖面填充',
+        run: () => handleSelectTool('hatch'),
+      },
+      // C
+      {
+        keys: 'C',
+        label: '圓形工具 (Circle)',
+        desc: '點選圓心與半徑繪製圓形',
+        run: () => handleSelectTool('circle'),
+      },
+      {
+        keys: 'CO',
+        label: '複製物件 (Copy)',
+        desc: '點選基準點連續複製已選圖元',
+        run: () => handleSelectTool('copy'),
+      },
+      {
+        keys: 'CP',
+        label: '複製物件 (Copy)',
+        desc: '點選基準點連續複製已選圖元',
+        run: () => handleSelectTool('copy'),
+      },
+      {
+        keys: 'CH',
+        label: '倒角工具 (Chamfer)',
+        desc: '點選兩相交直線或矩形邊建立斜角',
+        run: () => handleSelectTool('chamfer'),
+      },
+      {
+        keys: 'CHA',
+        label: '倒角工具 (Chamfer)',
+        desc: '三字母快捷鍵：依序按 C→H→A 啟動倒角',
+        run: () => handleSelectTool('chamfer'),
+      },
+      {
+        keys: 'CIR',
+        label: '圓形工具 (Circle)',
+        desc: '三字母快捷鍵：依序按 C→I→R 繪製圓形',
+        run: () => handleSelectTool('circle'),
+      },
+      {
+        keys: 'COP',
+        label: '複製物件 (Copy)',
+        desc: '三字母快捷鍵：依序按 C→O→P 複製物件',
+        run: () => handleSelectTool('copy'),
+      },
+      // D
+      {
+        keys: 'D',
+        label: '標註尺寸 (Dimension)',
+        desc: '線性標註 / 圓形 Ø 直徑 / 導圓角 R 半徑標註',
+        run: () => handleSelectTool('dimension'),
+      },
+      {
+        keys: 'DR',
+        label: '導圓角半徑標註 (Radius R)',
+        desc: '標註導圓角或圓弧之半徑 R',
+        run: () => handleDimensionRadius(),
+      },
+      {
+        keys: 'DIM',
+        label: '標註尺寸 (Dimension)',
+        desc: '三字母快捷鍵：依序按 D→I→M 啟動標註',
+        run: () => handleSelectTool('dimension'),
+      },
+      {
+        keys: 'DRA',
+        label: '導圓角半徑標註 (DimRadius)',
+        desc: '三字母快捷鍵：依序按 D→R→A 標註圓角半徑 R',
+        run: () => handleDimensionRadius(),
+      },
+      {
+        keys: 'DDI',
+        label: '圓形直徑標註 (DimDiameter)',
+        desc: '三字母快捷鍵：依序按 D→D→I 標註圓直徑 Ø',
+        run: () => handleSelectTool('dimension'),
+      },
+      {
+        keys: 'DEL',
+        label: '刪除圖元 (Delete)',
+        desc: '三字母快捷鍵：刪除已選圖元或進入刪除模式',
+        run: () => {
+          if (selectedIds.length > 0) handleDeleteSelected();
+          else handleSelectTool('erase');
+        },
+      },
+      // E
+      {
+        keys: 'E',
+        label: '刪除圖元 (Erase)',
+        desc: '刪除已選物件或點選刪除圖元',
+        run: () => {
+          if (selectedIds.length > 0) handleDeleteSelected();
+          else handleSelectTool('erase');
+        },
+      },
+      {
+        keys: 'EX',
+        label: '延伸圖元 (Extend)',
+        desc: '點選兩線段互相延伸接合至交點',
+        run: () => handleSelectTool('extend'),
+      },
+      {
+        keys: 'EXT',
+        label: '延伸圖元 (Extend)',
+        desc: '三字母快捷鍵：依序按 E→X→T 啟動延伸圖元',
+        run: () => handleSelectTool('extend'),
+      },
+      {
+        keys: 'EXP',
+        label: '炸開圖元 (Explode)',
+        desc: '三字母快捷鍵：依序按 E→X→P 炸開組裝圖元/矩形',
+        run: () => handleExplodeSelected(),
+      },
+      {
+        keys: 'ERA',
+        label: '刪除圖元 (Erase)',
+        desc: '三字母快捷鍵：依序按 E→R→A 刪除圖元',
+        run: () => {
+          if (selectedIds.length > 0) handleDeleteSelected();
+          else handleSelectTool('erase');
+        },
+      },
+      // F
+      {
+        keys: 'F',
+        label: '導圓角工具 (Fillet)',
+        desc: '點選兩相交直線建立圓角並支援標註半徑 R',
+        run: () => handleSelectTool('fillet'),
+      },
+      {
+        keys: 'FIL',
+        label: '導圓角工具 (Fillet)',
+        desc: '三字母快捷鍵：依序按 F→I→L 啟動導圓角',
+        run: () => handleSelectTool('fillet'),
+      },
+      // G
+      {
+        keys: 'G',
+        label: '正多邊形 (Polygon)',
+        desc: '點選中心與半徑繪製 3~24 邊正多邊形',
+        run: () => handleSelectTool('polygon'),
+      },
+      {
+        keys: 'GRP',
+        label: '組裝圖元 (Group/Join)',
+        desc: '三字母快捷鍵：依序按 G→R→P 組裝選取圖元',
+        run: () => handleJoinSelected(),
+      },
+      // H
+      {
+        keys: 'H',
+        label: '平移視景 (Pan)',
+        desc: '拖曳畫布平移工程圖視角',
+        run: () => handleSelectTool('pan'),
+      },
+      {
+        keys: 'HAT',
+        label: '45° 剖面填充 (Hatch)',
+        desc: '三字母快捷鍵：依序按 H→A→T 啟動剖面填充',
+        run: () => handleSelectTool('hatch'),
+      },
+      // J
+      {
+        keys: 'J',
+        label: '組裝圖元 (Join)',
+        desc: '保留原位置將選取圖元合併為單一組裝物件',
+        run: () => {
+          if (selectedIds.length >= 2) handleJoinSelected();
+          else handleSelectTool('join');
+        },
+      },
+      {
+        keys: 'JO',
+        label: '跳至座標原點 (0,0)',
+        desc: '將鼠標與視角精確跳至座標原點 X,Y=(0,0)',
+        run: () => handleJumpToOrigin(),
+      },
+      {
+        keys: 'JOI',
+        label: '組裝圖元 (Join)',
+        desc: '三字母快捷鍵：依序按 J→O→I 組裝選取圖元',
+        run: () => {
+          if (selectedIds.length >= 2) handleJoinSelected();
+          else handleSelectTool('join');
+        },
+      },
+      // K
+      {
+        keys: 'K',
+        label: '測量距離與角度 (Measure)',
+        desc: '點選兩點量測直線距離、ΔX、ΔY 與角度',
+        run: () => handleSelectTool('measure'),
+      },
+      // L
+      {
+        keys: 'L',
+        label: '畫直線 (Line)',
+        desc: '點選起點與終點或輸入長度繪製直線',
+        run: () => handleSelectTool('line'),
+      },
+      {
+        keys: 'LIN',
+        label: '畫直線 (Line)',
+        desc: '三字母快捷鍵：依序按 L→I→N 繪製直線',
+        run: () => handleSelectTool('line'),
+      },
+      // M
+      {
+        keys: 'M',
+        label: '移動物件 (Move)',
+        desc: '點選基準點或輸入 X,Y 座標移動物件',
+        run: () => handleSelectTool('move'),
+      },
+      {
+        keys: 'MI',
+        label: '鏡射物件 (Mirror)',
+        desc: '點選兩點定義對稱鏡射軸線',
+        run: () => handleSelectTool('mirror'),
+      },
+      {
+        keys: 'MOV',
+        label: '移動物件 (Move)',
+        desc: '三字母快捷鍵：依序按 M→O→V 移動物件',
+        run: () => handleSelectTool('move'),
+      },
+      {
+        keys: 'MIR',
+        label: '鏡射物件 (Mirror)',
+        desc: '三字母快捷鍵：依序按 M→I→R 鏡射物件',
+        run: () => handleSelectTool('mirror'),
+      },
+      // O
+      {
+        keys: 'O',
+        label: '偏移複製 (Offset)',
+        desc: '支援同時偏移選取的所有圖形',
+        run: () => handleSelectTool('offset'),
+      },
+      {
+        keys: 'OFF',
+        label: '偏移複製 (Offset)',
+        desc: '三字母快捷鍵：依序按 O→F→F 啟動偏移複製',
+        run: () => handleSelectTool('offset'),
+      },
+      // P
+      {
+        keys: 'P',
+        label: '聚合線 (Polyline)',
+        desc: '連續繪製多段頂點聚合線，按 C 可封閉',
+        run: () => handleSelectTool('polyline'),
+      },
+      {
+        keys: 'PL',
+        label: '聚合線 (Polyline)',
+        desc: '雙字母快捷鍵：繪製聚合線',
+        run: () => handleSelectTool('polyline'),
+      },
+      {
+        keys: 'PLI',
+        label: '聚合線 (Polyline)',
+        desc: '三字母快捷鍵：依序按 P→L→I 繪製聚合線',
+        run: () => handleSelectTool('polyline'),
+      },
+      {
+        keys: 'POL',
+        label: '正多邊形 (Polygon)',
+        desc: '三字母快捷鍵：依序按 P→O→L 繪製正多邊形',
+        run: () => handleSelectTool('polygon'),
+      },
+      {
+        keys: 'PAN',
+        label: '平移視景 (Pan)',
+        desc: '三字母快捷鍵：依序按 P→A→N 平移畫布',
+        run: () => handleSelectTool('pan'),
+      },
+      // Q
+      {
+        keys: 'Q',
+        label: '旋轉物件 (Rotate)',
+        desc: '指定中心點與角度旋轉選取物件',
+        run: () => handleSelectTool('rotate'),
+      },
+      // R
+      {
+        keys: 'R',
+        label: '矩形工具 (Rectangle)',
+        desc: '繪製轉角矩形或中心矩形',
+        run: () => handleSelectTool('rectangle'),
+      },
+      {
+        keys: 'RO',
+        label: '旋轉物件 (Rotate)',
+        desc: '指定中心點與角度旋轉選取物件',
+        run: () => handleSelectTool('rotate'),
+      },
+      {
+        keys: 'REC',
+        label: '矩形工具 (Rectangle)',
+        desc: '三字母快捷鍵：依序按 R→E→C 繪製矩形',
+        run: () => handleSelectTool('rectangle'),
+      },
+      {
+        keys: 'ROT',
+        label: '旋轉物件 (Rotate)',
+        desc: '三字母快捷鍵：依序按 R→O→T 旋轉物件',
+        run: () => handleSelectTool('rotate'),
+      },
+      // T
+      {
+        keys: 'T',
+        label: '文字註解 (Text)',
+        desc: '於指定座標插入工程文字標註',
+        run: () => handleSelectTool('text'),
+      },
+      {
+        keys: 'TR',
+        label: '剪切圖元 (Trim)',
+        desc: '剪切直線、聚合線、圓形與三點圓弧',
+        run: () => handleSelectTool('trim'),
+      },
+      {
+        keys: 'TRI',
+        label: '剪切圖元 (Trim)',
+        desc: '三字母快捷鍵：依序按 T→R→I 剪切圖元',
+        run: () => handleSelectTool('trim'),
+      },
+      {
+        keys: 'TXT',
+        label: '文字註解 (Text)',
+        desc: '三字母快捷鍵：依序按 T→X→T 插入文字註解',
+        run: () => handleSelectTool('text'),
+      },
+      // V
+      {
+        keys: 'V',
+        label: '選取與修改模式 (Select)',
+        desc: '點選、框選圖元或拖曳控制點修改尺寸',
+        run: () => handleSelectTool('select'),
+      },
+      // W
+      {
+        keys: 'W',
+        label: '鏡射物件 (Mirror)',
+        desc: '點選兩點定義對稱鏡射軸線',
+        run: () => handleSelectTool('mirror'),
+      },
+      // X
+      {
+        keys: 'X',
+        label: '炸開圖元 (Explode)',
+        desc: '將組裝圖元、矩形或多邊形分解為獨立線段',
+        run: () => handleExplodeSelected(),
+      },
+      // Z
+      {
+        keys: 'Z',
+        label: '窗選局部放大 (Zoom Window)',
+        desc: '點選兩對角點局部放大檢視區域',
+        run: () => handleSelectTool('zoomWindow'),
+      },
+      {
+        keys: 'ZE',
+        label: '全圖置中縮放 (Zoom Extents)',
+        desc: '自動縮放並置中顯示完整圖面',
+        run: () => {
+          setActiveTool('select');
+          handleZoomExtents();
+        },
+      },
+      {
+        keys: 'ZW',
+        label: '窗選局部放大 (Zoom Window)',
+        desc: '點選兩對角點局部放大檢視區域',
+        run: () => handleSelectTool('zoomWindow'),
+      },
+      {
+        keys: 'ZOO',
+        label: '全圖置中縮放 (Zoom Extents)',
+        desc: '三字母快捷鍵：依序按 Z→O→O 全圖置中',
+        run: () => {
+          setActiveTool('select');
+          handleZoomExtents();
+        },
+      },
+    ],
+    [
+      handleAutoDimensionSelected,
+      handleDeleteSelected,
+      handleDimensionRadius,
+      handleExplodeSelected,
+      handleJoinSelected,
+      handleJumpToOrigin,
+      handleSelectTool,
+      handleZoomExtents,
+      logCommand,
+      selectedIds.length,
+    ]
+  );
+
+  // Filter shortcuts matching the current pendingKeyPrefix when the first letter is shared by multiple shortcuts
+  const matchingShortcutsForMenu = React.useMemo(() => {
+    if (!pendingKeyPrefix) return [];
+    const firstChar = pendingKeyPrefix[0];
+    const allWithSameFirstLetter = shortcutRegistry.filter((item) =>
+      item.keys.startsWith(firstChar)
+    );
+    // Only show dropdown if the first letter is shared by 2 or more shortcuts
+    if (allWithSameFirstLetter.length < 2) return [];
+    return allWithSameFirstLetter.filter((item) =>
+      item.keys.startsWith(pendingKeyPrefix)
+    );
+  }, [pendingKeyPrefix, shortcutRegistry]);
+
+  const clearShortcutPrefix = useCallback(() => {
+    if (prefixTimeoutRef.current) {
+      window.clearTimeout(prefixTimeoutRef.current);
+      prefixTimeoutRef.current = null;
+    }
+    if (eraseDelayTimeoutRef.current) {
+      window.clearTimeout(eraseDelayTimeoutRef.current);
+      eraseDelayTimeoutRef.current = null;
+    }
+    if (joinDelayTimeoutRef.current) {
+      window.clearTimeout(joinDelayTimeoutRef.current);
+      joinDelayTimeoutRef.current = null;
+    }
+    setPendingKeyPrefix(null);
+  }, []);
+
+  // Global Direct & Sequential 1-, 2-, and 3-Letter Keyboard Shortcuts (active only when unlocked)
   useEffect(() => {
     if (!isUnlocked) return;
 
-    const clearPrefix = () => {
-      if (prefixTimeoutRef.current) {
-        window.clearTimeout(prefixTimeoutRef.current);
-        prefixTimeoutRef.current = null;
-      }
-      setPendingKeyPrefix(null);
-    };
-
-    const startPrefix = (letter: string) => {
+    const startOrExtendPrefix = (nextPrefix: string) => {
       if (prefixTimeoutRef.current) {
         window.clearTimeout(prefixTimeoutRef.current);
       }
-      setPendingKeyPrefix(letter);
+      setPendingKeyPrefix((prev) => {
+        if (!prev) {
+          setShortcutMenuPos({
+            x: mouseScreenPosRef.current.x,
+            y: mouseScreenPosRef.current.y,
+          });
+        }
+        return nextPrefix;
+      });
       prefixTimeoutRef.current = window.setTimeout(() => {
-        setPendingKeyPrefix(null);
+        if (!shortcutMenuHoveredRef.current) {
+          setPendingKeyPrefix(null);
+        }
         prefixTimeoutRef.current = null;
-      }, 950);
+      }, 3800);
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      if (e.key === 'Escape') {
+        if (pendingKeyPrefix) {
+          clearShortcutPrefix();
+        }
+        return;
+      }
 
       if (e.key === 'F3') {
         e.preventDefault();
@@ -961,6 +1505,7 @@ export default function App() {
 
       const k = e.key.toLowerCase();
       if (!/^[a-z]$/.test(k)) return;
+      const upperKey = k.toUpperCase();
 
       // Allow 'c' to close a polyline if currently drawing a polyline with >= 3 points
       if (k === 'c' && activeTool === 'polyline' && drawingPoints.length >= 3) {
@@ -968,217 +1513,119 @@ export default function App() {
       }
 
       // 1. Check JO (Jump to Origin X,Y=(0,0)) first — works even while actively drawing!
-      if (pendingKeyPrefix === 'J' && k === 'o') {
+      if (pendingKeyPrefix === 'J' && upperKey === 'O') {
         e.preventDefault();
         if (joinDelayTimeoutRef.current) {
           window.clearTimeout(joinDelayTimeoutRef.current);
           joinDelayTimeoutRef.current = null;
         }
-        clearPrefix();
-        handleJumpToOrigin();
-        return;
-      }
-
-      // If user presses 'j' while drawing (drawingPoints.length > 0), start 'J' prefix so 'JO' works mid-drawing without interrupting the tool
-      if (k === 'j' && drawingPoints.length > 0) {
-        e.preventDefault();
-        startPrefix('J');
-        return;
-      }
-
-      // 2. Check 2-letter sequential shortcut combinations (when drawingPoints.length === 0)
-      if (pendingKeyPrefix && drawingPoints.length === 0) {
-        const combo = `${pendingKeyPrefix}${k.toUpperCase()}`;
-        if (combo === 'TR') {
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('trim');
+        if (drawingPoints.length > 0) {
+          clearShortcutPrefix();
+          handleJumpToOrigin();
           return;
         }
-        if (combo === 'EX') {
+      }
+
+      // If user presses 'j' while drawing (drawingPoints.length > 0), start 'J' prefix so 'JO' works mid-drawing
+      if (upperKey === 'J' && drawingPoints.length > 0) {
+        e.preventDefault();
+        startOrExtendPrefix('J');
+        return;
+      }
+
+      if (drawingPoints.length > 0) return;
+
+      // 2. Check multi-letter sequential shortcut continuation (2-letter and 3-letter sequences!)
+      if (pendingKeyPrefix) {
+        const candidateSeq = `${pendingKeyPrefix}${upperKey}`;
+        const exactMatch = shortcutRegistry.find(
+          (s) => s.keys === candidateSeq
+        );
+        const hasLongerContinuations = shortcutRegistry.some(
+          (s) => s.keys.length > candidateSeq.length && s.keys.startsWith(candidateSeq)
+        );
+
+        if (exactMatch || hasLongerContinuations) {
           e.preventDefault();
+          // Cancel any delayed single-key destructive action (like E -> erase or J -> join)
           if (eraseDelayTimeoutRef.current) {
             window.clearTimeout(eraseDelayTimeoutRef.current);
             eraseDelayTimeoutRef.current = null;
           }
-          clearPrefix();
-          handleSelectTool('extend');
-          return;
-        }
-        if (combo === 'CO' || combo === 'CP') {
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('copy');
-          return;
-        }
-        if (combo === 'AR') {
-          e.preventDefault();
-          clearPrefix();
-          setActiveTool('select');
-          setActiveModal('array');
-          logCommand('指令切換: ARRAY 陣列複製工具 (快捷鍵 AR)', 'command');
-          return;
-        }
-        if (combo === 'ZE') {
-          e.preventDefault();
-          clearPrefix();
-          setActiveTool('select');
-          handleZoomExtents();
-          return;
-        }
-        if (combo === 'ZW') {
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('zoomWindow');
-          return;
-        }
-        if (combo === 'BH') {
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('hatch');
-          return;
-        }
-        if (combo === 'CH') {
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('chamfer');
+          if (joinDelayTimeoutRef.current) {
+            window.clearTimeout(joinDelayTimeoutRef.current);
+            joinDelayTimeoutRef.current = null;
+          }
+
+          if (exactMatch) {
+            exactMatch.run();
+          }
+
+          if (hasLongerContinuations) {
+            startOrExtendPrefix(candidateSeq);
+          } else {
+            clearShortcutPrefix();
+          }
           return;
         }
       }
 
-      // 3. Single-key shortcuts (and start prefix if it's J, T, E, C, A, Z, B)
-      switch (k) {
-        case 'j':
-          e.preventDefault();
-          startPrefix('J');
-          if (joinDelayTimeoutRef.current) {
-            window.clearTimeout(joinDelayTimeoutRef.current);
-          }
-          joinDelayTimeoutRef.current = window.setTimeout(() => {
-            joinDelayTimeoutRef.current = null;
+      // 3. Starting a new 1-letter shortcut or multi-letter prefix
+      const exactSingle = shortcutRegistry.find((s) => s.keys === upperKey);
+      const hasMultiContinuations = shortcutRegistry.some(
+        (s) => s.keys.length > 1 && s.keys.startsWith(upperKey)
+      );
+
+      if (!exactSingle && !hasMultiContinuations) {
+        clearShortcutPrefix();
+        return;
+      }
+
+      e.preventDefault();
+      if (eraseDelayTimeoutRef.current) {
+        window.clearTimeout(eraseDelayTimeoutRef.current);
+        eraseDelayTimeoutRef.current = null;
+      }
+      if (joinDelayTimeoutRef.current) {
+        window.clearTimeout(joinDelayTimeoutRef.current);
+        joinDelayTimeoutRef.current = null;
+      }
+
+      if (hasMultiContinuations) {
+        setShortcutMenuPos({
+          x: mouseScreenPosRef.current.x,
+          y: mouseScreenPosRef.current.y,
+        });
+        startOrExtendPrefix(upperKey);
+      } else {
+        clearShortcutPrefix();
+      }
+
+      // Special care for E and J when entities are selected so typing EX/EXT/EXP or JO/JOI doesn't prematurely delete/join
+      if (upperKey === 'E' && selectedIds.length > 0) {
+        eraseDelayTimeoutRef.current = window.setTimeout(() => {
+          eraseDelayTimeoutRef.current = null;
+          if (!shortcutMenuHoveredRef.current) {
+            handleDeleteSelected();
             setPendingKeyPrefix(null);
-            if (selectedIds.length >= 2) {
-              handleJoinSelected();
-            } else {
-              handleSelectTool('join');
-            }
-          }, 300);
-          break;
-        case 't':
-          e.preventDefault();
-          startPrefix('T');
-          handleSelectTool('text');
-          break;
-        case 'e':
-          e.preventDefault();
-          startPrefix('E');
-          if (selectedIds.length > 0) {
-            // Delay 300ms in case the user is typing E -> X for Extend (EX)
-            if (eraseDelayTimeoutRef.current) {
-              window.clearTimeout(eraseDelayTimeoutRef.current);
-            }
-            eraseDelayTimeoutRef.current = window.setTimeout(() => {
-              eraseDelayTimeoutRef.current = null;
-              setPendingKeyPrefix(null);
-              handleDeleteSelected();
-            }, 300);
-          } else {
-            handleSelectTool('erase');
           }
-          break;
-        case 'c':
-          e.preventDefault();
-          startPrefix('C');
-          handleSelectTool('circle');
-          break;
-        case 'a':
-          e.preventDefault();
-          startPrefix('A');
-          handleSelectTool('arc');
-          break;
-        case 'z':
-          e.preventDefault();
-          startPrefix('Z');
-          handleSelectTool('zoomWindow');
-          break;
-        case 'l':
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('line');
-          break;
-        case 'd':
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('dimension');
-          break;
-        case 'b':
-          e.preventDefault();
-          startPrefix('B');
-          handleAutoDimensionSelected();
-          break;
-        case 'p':
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('polyline');
-          break;
-        case 'r':
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('rectangle');
-          break;
-        case 'g':
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('polygon');
-          break;
-        case 'k':
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('measure');
-          break;
-        case 'v':
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('select');
-          break;
-        case 'h':
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('pan');
-          break;
-        case 'm':
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('move');
-          break;
-        case 'q':
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('rotate');
-          break;
-        case 'w':
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('mirror');
-          break;
-        case 'o':
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('offset');
-          break;
-        case 'x':
-          e.preventDefault();
-          clearPrefix();
-          handleExplodeSelected();
-          break;
-        case 'f':
-          e.preventDefault();
-          clearPrefix();
-          handleSelectTool('fillet');
-          break;
-        default:
-          clearPrefix();
-          break;
+        }, 650);
+        return;
+      }
+
+      if (upperKey === 'J' && selectedIds.length >= 2) {
+        joinDelayTimeoutRef.current = window.setTimeout(() => {
+          joinDelayTimeoutRef.current = null;
+          if (!shortcutMenuHoveredRef.current) {
+            handleJoinSelected();
+            setPendingKeyPrefix(null);
+          }
+        }, 650);
+        return;
+      }
+
+      if (exactSingle) {
+        exactSingle.run();
       }
     };
 
@@ -1186,24 +1633,21 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
     activeTool,
+    clearShortcutPrefix,
     drawingPoints.length,
-    handleAutoDimensionSelected,
     handleCopyClipboard,
     handleCutClipboard,
     handleDeleteSelected,
     handleDuplicateSelected,
-    handleExplodeSelected,
     handleJoinSelected,
     handleJumpToOrigin,
     handlePasteClipboard,
     handleRedo,
-    handleSelectTool,
     handleUndo,
-    handleZoomExtents,
     isUnlocked,
-    logCommand,
     pendingKeyPrefix,
     selectedIds.length,
+    shortcutRegistry,
     toggleSetting,
   ]);
 
@@ -1347,12 +1791,32 @@ export default function App() {
       handleAlignDimensions();
       return;
     }
-    if (upper === 'ZE' || upper === 'ZOOM' || upper === '全圖置中') {
+    if (upper === 'ZE' || upper === 'ZOO' || upper === 'ZOOM' || upper === '全圖置中') {
       handleZoomExtents();
       return;
     }
-    if (upper === 'AR' || upper === 'ARRAY' || upper === '陣列') {
+    if (upper === 'AR' || upper === 'ARR' || upper === 'ARRAY' || upper === '陣列') {
       setActiveModal('array');
+      return;
+    }
+    if (upper === 'DR' || upper === 'DRA' || upper === 'DIMRADIUS' || upper === '半徑標註') {
+      handleDimensionRadius();
+      return;
+    }
+    if (upper === 'EXP') {
+      handleExplodeSelected();
+      return;
+    }
+    if (upper === 'EXT') {
+      handleSelectTool('extend');
+      return;
+    }
+    if (upper === 'FIL') {
+      handleSelectTool('fillet');
+      return;
+    }
+    if (upper === 'HAT' || upper === 'BHA') {
+      handleSelectTool('hatch');
       return;
     }
     if (upper === 'CLEAR' || upper === '清空') {
@@ -1367,6 +1831,34 @@ export default function App() {
       if (!isNaN(val) && val >= 0.01) {
         setOffsetDistance(val);
         logCommand(`OFFSET 已設定偏移距離 = ${val.toFixed(2)} mm`, 'success');
+        return;
+      }
+    }
+
+    if (activeTool === 'hatch' && /^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+      const val = parseFloat(trimmed);
+      if (!isNaN(val) && val >= 0.5) {
+        setHatchPitch(val);
+        logCommand(`HATCH 已設定 45° 斜線間距 PITCH = ${val.toFixed(1)} mm`, 'success');
+        if (selectedIds.length > 0) {
+          const wallLayerId =
+            layers.find(
+              (l) =>
+                l.id === 'WALL' ||
+                l.name.includes('建築主牆') ||
+                l.name.includes('輪廓')
+            )?.id || 'WALL';
+          const selectedEnts = entities.filter((e) => selectedIds.includes(e.id));
+          const createdHatches = createHatchFromEntities(
+            selectedEnts,
+            val,
+            wallLayerId
+          );
+          if (createdHatches.length > 0) {
+            pushEntities([...entities, ...createdHatches]);
+            setSelectedIds(createdHatches.map((h) => h.id));
+          }
+        }
         return;
       }
     }
@@ -1654,6 +2146,9 @@ export default function App() {
   return (
     <div
       className="safe-app-container flex flex-col w-full h-full max-h-[100dvh] bg-[#0B0F17] text-slate-100 overflow-hidden select-none relative"
+      onMouseMove={(e) => {
+        mouseScreenPosRef.current = { x: e.clientX, y: e.clientY };
+      }}
       onDragOver={(e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -2081,10 +2576,34 @@ export default function App() {
           )}
 
           {activeTool === 'hatch' && (
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1 bg-slate-900 px-1.5 py-0.5 rounded border border-emerald-500/40">
+                <button
+                  type="button"
+                  onClick={() => setHatchMode('smart')}
+                  className={`px-2 py-0.5 rounded text-[11px] font-medium ${
+                    hatchMode === 'smart'
+                      ? 'bg-emerald-600 text-white'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  智慧填充輸入
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setHatchMode('selectRange')}
+                  className={`px-2 py-0.5 rounded text-[11px] font-medium ${
+                    hatchMode === 'selectRange'
+                      ? 'bg-emerald-600 text-white'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  選取範圍執行
+                </button>
+              </div>
               <HatchIcon className="w-3.5 h-3.5 text-emerald-400" />
               <span className="text-emerald-300 font-medium">
-                45°斜線PITCH(mm):
+                PITCH(mm):
               </span>
               <input
                 type="number"
@@ -2097,6 +2616,50 @@ export default function App() {
                 }
                 className="w-14 px-2 py-0.5 font-mono bg-slate-900 border border-emerald-500/60 rounded text-emerald-200 focus:outline-none focus:border-emerald-400"
               />
+              {selectedIds.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleHatchSelected}
+                  className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded text-[11px]"
+                >
+                  執行填充 ({selectedIds.length})
+                </button>
+              )}
+            </div>
+          )}
+
+          {activeTool === 'fillet' && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-sky-300 font-medium">圓角R(mm):</span>
+              <input
+                type="number"
+                min={0.1}
+                max={5000}
+                step="0.5"
+                value={filletRadius}
+                onChange={(e) =>
+                  setFilletRadius(Math.max(0.1, Number(e.target.value)))
+                }
+                className="w-14 px-1.5 py-0.5 font-mono bg-slate-900 border border-sky-500/50 rounded text-sky-200"
+              />
+              <button
+                type="button"
+                onClick={() => setFilletAutoDim((v) => !v)}
+                className={`px-2 py-0.5 rounded text-[11px] font-medium border ${
+                  filletAutoDim
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
+                    : 'bg-slate-900 text-slate-400 border-slate-700'
+                }`}
+              >
+                {filletAutoDim ? '自動標註半徑 R: 開' : '自動標註半徑 R: 關'}
+              </button>
+              <button
+                type="button"
+                onClick={handleDimensionRadius}
+                className="px-2 py-0.5 bg-amber-600 hover:bg-amber-500 text-slate-950 font-semibold rounded text-[11px]"
+              >
+                標註圓角半徑 (R)
+              </button>
             </div>
           )}
 
@@ -2143,10 +2706,15 @@ export default function App() {
               onChangeOffsetDistance={setOffsetDistance}
               hatchPitch={hatchPitch}
               onChangeHatchPitch={setHatchPitch}
+              hatchMode={hatchMode}
+              onChangeHatchMode={setHatchMode}
               chamferDistance={chamferDistance}
               onChangeChamferDistance={setChamferDistance}
               filletRadius={filletRadius}
               onChangeFilletRadius={setFilletRadius}
+              filletAutoDim={filletAutoDim}
+              onChangeFilletAutoDim={setFilletAutoDim}
+              onDimensionRadius={handleDimensionRadius}
               selectedCount={selectedIds.length}
               hasClipboard={clipboard.length > 0}
               onCopyClipboard={handleCopyClipboard}
@@ -2188,10 +2756,15 @@ export default function App() {
           onChangeOffsetDistance={setOffsetDistance}
           hatchPitch={hatchPitch}
           onChangeHatchPitch={setHatchPitch}
+          hatchMode={hatchMode}
+          onChangeHatchMode={setHatchMode}
+          onHatchSelected={handleHatchSelected}
           chamferDistance={chamferDistance}
           onChangeChamferDistance={setChamferDistance}
           filletRadius={filletRadius}
           onChangeFilletRadius={setFilletRadius}
+          filletAutoDim={filletAutoDim}
+          onChangeFilletAutoDim={setFilletAutoDim}
           pan={pan}
           zoom={zoom}
           onPanZoomChange={(nextPan, nextZoom) => {
@@ -2286,6 +2859,97 @@ export default function App() {
         onToggleSetting={toggleSetting}
         onExecuteCommand={handleExecuteCommand}
       />
+
+      {/* Cursor-Positioned Quick Shortcut Dropdown Menu when multiple shortcuts share the first letter */}
+      {pendingKeyPrefix && matchingShortcutsForMenu.length > 0 && (
+        <div
+          onMouseEnter={() => {
+            shortcutMenuHoveredRef.current = true;
+            if (eraseDelayTimeoutRef.current) {
+              window.clearTimeout(eraseDelayTimeoutRef.current);
+              eraseDelayTimeoutRef.current = null;
+            }
+            if (joinDelayTimeoutRef.current) {
+              window.clearTimeout(joinDelayTimeoutRef.current);
+              joinDelayTimeoutRef.current = null;
+            }
+          }}
+          onMouseLeave={() => {
+            shortcutMenuHoveredRef.current = false;
+          }}
+          style={{
+            left: Math.max(
+              12,
+              Math.min(
+                (typeof window !== 'undefined' ? window.innerWidth : 1200) - 275,
+                shortcutMenuPos.x + 14
+              )
+            ),
+            top: Math.max(
+              12,
+              Math.min(
+                (typeof window !== 'undefined' ? window.innerHeight : 800) - 310,
+                shortcutMenuPos.y + 14
+              )
+            ),
+          }}
+          className="fixed z-50 w-64 bg-slate-950/95 backdrop-blur-md border border-sky-500/70 rounded-xl shadow-2xl overflow-hidden animate-in fade-in duration-100"
+        >
+          <div className="flex items-center justify-between px-3 py-1.5 bg-slate-900 border-b border-slate-800">
+            <div className="flex items-center gap-1.5">
+              <Keyboard className="w-3.5 h-3.5 text-amber-400" />
+              <span className="text-[11px] font-bold text-slate-200">
+                快捷鍵選單
+              </span>
+              <span className="px-1.5 py-0.5 text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-400/50 rounded">
+                {pendingKeyPrefix}_
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={clearShortcutPrefix}
+              className="text-[10px] text-slate-400 hover:text-white px-1"
+              title="關閉選單 (ESC)"
+            >
+              ESC
+            </button>
+          </div>
+          <div className="px-2.5 py-1 bg-sky-950/30 border-b border-slate-800/80 text-[10px] text-sky-300">
+            可繼續按順序輸入字母（支援三字母如 CHA）或直接點擊：
+          </div>
+          <div className="max-h-60 overflow-y-auto p-1.5 space-y-1">
+            {matchingShortcutsForMenu.map((item) => {
+              const matchedPart = item.keys.slice(0, pendingKeyPrefix.length);
+              const restPart = item.keys.slice(pendingKeyPrefix.length);
+              return (
+                <button
+                  key={item.keys}
+                  type="button"
+                  onClick={() => {
+                    shortcutMenuHoveredRef.current = false;
+                    clearShortcutPrefix();
+                    item.run();
+                  }}
+                  className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-slate-900/80 hover:bg-sky-600/25 border border-slate-800 hover:border-sky-500/60 text-left transition-colors group"
+                >
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-slate-100 group-hover:text-sky-200 truncate">
+                      {item.label}
+                    </div>
+                    <div className="text-[10px] text-slate-400 truncate">
+                      {item.desc}
+                    </div>
+                  </div>
+                  <kbd className="px-2 py-0.5 font-mono text-xs font-bold bg-slate-950 border border-slate-700 group-hover:border-amber-400/70 rounded shrink-0">
+                    <span className="text-amber-400">{matchedPart}</span>
+                    <span className="text-sky-300">{restPart}</span>
+                  </kbd>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Modal 1: Blueprint Templates Library */}
       {activeModal === 'templates' && (

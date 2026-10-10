@@ -8,11 +8,14 @@ import {
   AlignCenterHorizontal,
 } from 'lucide-react';
 import {
+  ArcEntity,
   CadEntity,
   CadLayer,
+  CircleEntity,
   DimensionEntity,
   DraftingSettings,
   GripHandle,
+  HatchMode,
   LineType,
   Point,
   RectangleMode,
@@ -31,10 +34,12 @@ import {
   computeMutualExtendResult,
   computeTrimResult,
   createHatchFromEntities,
+  createRadiusDimensionForArc,
   DEG_TO_RAD,
   dist,
   findBestSnapPoint,
   findConnectedEntityIds,
+  findSmartHatchBoundaryAtPoint,
   formatDimensionLabel,
   getArcThreePoints,
   getDimensionLinePoints,
@@ -72,10 +77,14 @@ interface CadViewportProps {
   onChangeOffsetDistance: (dist: number) => void;
   hatchPitch: number;
   onChangeHatchPitch: (pitch: number) => void;
+  hatchMode: HatchMode;
+  onChangeHatchMode: (mode: HatchMode) => void;
   chamferDistance: number;
   onChangeChamferDistance: (dist: number) => void;
   filletRadius: number;
   onChangeFilletRadius: (radius: number) => void;
+  filletAutoDim: boolean;
+  onChangeFilletAutoDim: (autoDim: boolean) => void;
   pan: Point;
   zoom: number;
   onPanZoomChange: (pan: Point, zoom: number) => void;
@@ -87,6 +96,7 @@ interface CadViewportProps {
   onExplodeSelected: () => void;
   onDeleteSelected: () => void;
   onAlignDimensions: () => void;
+  onHatchSelected: () => void;
   onLogCommand: (
     text: string,
     type?: 'command' | 'info' | 'error' | 'success'
@@ -114,10 +124,14 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   onChangeOffsetDistance,
   hatchPitch,
   onChangeHatchPitch,
+  hatchMode,
+  onChangeHatchMode,
   chamferDistance,
   onChangeChamferDistance,
   filletRadius,
   onChangeFilletRadius,
+  filletAutoDim,
+  onChangeFilletAutoDim,
   pan,
   zoom,
   onPanZoomChange,
@@ -129,6 +143,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   onExplodeSelected,
   onDeleteSelected,
   onAlignDimensions,
+  onHatchSelected,
   onLogCommand,
   onToolComplete,
   drawingPoints,
@@ -163,6 +178,11 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     entityId: string;
     clickPt: Point;
   } | null>(null);
+
+  // Interactive Radius Dimension placement state when clicking an Arc / Fillet Arc
+  const [pendingRadiusDimArc, setPendingRadiusDimArc] = useState<
+    ArcEntity | CircleEntity | null
+  >(null);
 
   // Resolve A-WALL (建築主牆/輪廓) layer ID for section hatches
   const wallLayerId =
@@ -688,7 +708,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
             onLogCommand(
-              `HATCH 指定 45° 斜線填充區域第一角點: (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)}) — 請點選對角點完成填充（自動採用 A-WALL 建築主牆/輪廓層）`,
+              `HATCH 指定自訂填充範圍第一角點: (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)}) — 請點選對角點或繼續點選多邊形頂點後按 Enter 執行填充（採用 A-WALL 建築主牆/輪廓層）`,
               'info'
             );
           } else {
@@ -697,12 +717,19 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             const maxX = Math.max(p0.x, pt.x);
             const minY = Math.min(p0.y, pt.y);
             const maxY = Math.max(p0.y, pt.y);
+            const effectivePitch =
+              dynValue.trim() !== '' && !isNaN(parseFloat(dynValue))
+                ? Math.max(0.5, parseFloat(dynValue))
+                : Math.max(0.5, hatchPitch);
+            if (effectivePitch !== hatchPitch) {
+              onChangeHatchPitch(effectivePitch);
+            }
             if (maxX - minX >= 0.1 && maxY - minY >= 0.1) {
-              onAddEntity({
+              const newHatch: CadEntity = {
                 id: `hatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
                 type: 'hatch',
                 layerId: wallLayerId,
-                pitch: Math.max(0.5, hatchPitch),
+                pitch: effectivePitch,
                 angle: 45,
                 boundaryType: 'polygon',
                 points: [
@@ -711,10 +738,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                   { x: maxX, y: maxY },
                   { x: minX, y: maxY },
                 ],
-              });
+              };
+              onAddEntity(newHatch);
+              onSelectChange([newHatch.id]);
               setDrawingPoints([]);
               onLogCommand(
-                `HATCH 已於「建築主牆/輪廓」圖層建立 45° 斜線剖面填充 (PITCH = ${hatchPitch} mm，範圍 ${(maxX - minX).toFixed(1)} × ${(maxY - minY).toFixed(1)} mm)`,
+                `HATCH 已於「建築主牆/輪廓」圖層建立自訂範圍 45° 斜線剖面填充 (PITCH = ${effectivePitch} mm，範圍 ${(maxX - minX).toFixed(1)} × ${(maxY - minY).toFixed(1)} mm)`,
                 'success'
               );
             }
@@ -723,10 +752,30 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         }
 
         case 'dimension': {
+          if (pendingRadiusDimArc) {
+            const dimLayer = layers.some((l) => l.id === 'DIM')
+              ? 'DIM'
+              : activeLayerId;
+            const rDim = createRadiusDimensionForArc(
+              pendingRadiusDimArc,
+              dimLayer,
+              defaultDimFontSize,
+              pt
+            );
+            onAddEntity(rDim);
+            setPendingRadiusDimArc(null);
+            setDrawingPoints([]);
+            onSelectChange([rDim.id]);
+            onLogCommand(
+              `DIMRADIUS 已完成導圓角/圓弧半徑標註: R${pendingRadiusDimArc.radius.toFixed(2)} (可於下方或右側屬性設定正負公差與小數位數)`,
+              'success'
+            );
+            break;
+          }
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
             onLogCommand(
-              `DIM 指定第一條延伸線原點（或直接點擊圓周建立 ISO 國際規範 Ø 直徑標註）: (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)})`,
+              `DIM 指定第一條延伸線原點（或直接點擊導圓角/圓弧標註半徑 R、點擊圓周標註直徑 Ø）: (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)})`,
               'info'
             );
           } else if (drawingPoints.length === 1) {
@@ -967,6 +1016,11 @@ export const CadViewport: React.FC<CadViewportProps> = ({
 
       if (e.key === 'Escape') {
         setCursorPinnedToOrigin(false);
+        if (pendingRadiusDimArc) {
+          setPendingRadiusDimArc(null);
+          onLogCommand('已取消半徑 R 標註 (ESC)', 'info');
+          return;
+        }
         if (extendFirstPick) {
           setExtendFirstPick(null);
           onSelectChange([]);
@@ -1052,12 +1106,13 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         return;
       }
 
-      // Dynamic numeric typing when drawing, moving, or in offset/chamfer/fillet tool
+      // Dynamic numeric typing when drawing, moving, or in offset/chamfer/fillet/hatch tool
       if (
         (drawingPoints.length > 0 && settings.dynInput) ||
         activeTool === 'offset' ||
         activeTool === 'chamfer' ||
         activeTool === 'fillet' ||
+        activeTool === 'hatch' ||
         activeTool === 'move' ||
         activeTool === 'copy'
       ) {
@@ -1103,6 +1158,116 @@ export const CadViewport: React.FC<CadViewportProps> = ({
 
       // Spacebar acts identically to Enter!
       if (e.key === 'Enter' || e.code === 'Space') {
+        if (activeTool === 'hatch') {
+          e.preventDefault();
+          let effectivePitch = hatchPitch;
+          if (dynValue.trim() !== '') {
+            const parsed = parseFloat(dynValue);
+            if (!isNaN(parsed) && parsed >= 0.5) {
+              effectivePitch = parsed;
+              onChangeHatchPitch(parsed);
+            }
+            setDynValue('');
+          }
+
+          const visibleLayerIds = new Set(
+            layers.filter((l) => l.visible && !l.locked).map((l) => l.id)
+          );
+          const visibleEntities = entities.filter((ent) =>
+            visibleLayerIds.has(ent.layerId)
+          );
+
+          // 1. If user has selected boundary entities (自行選取範圍再輸入執行), hatch the selected entities!
+          if (selectedIds.length > 0) {
+            const selectedEnts = entities.filter(
+              (ent) => selectedIds.includes(ent.id) && ent.type !== 'hatch'
+            );
+            if (selectedEnts.length > 0) {
+              const created = createHatchFromEntities(
+                selectedEnts,
+                effectivePitch,
+                wallLayerId,
+                true
+              );
+              if (created.length > 0) {
+                onUpdateEntities([...entities, ...created]);
+                onSelectChange(created.map((h) => h.id));
+                onLogCommand(
+                  `HATCH 已於「建築主牆/輪廓」圖層執行選取範圍剖面填充 (共 ${created.length} 組，PITCH = ${effectivePitch} mm)！`,
+                  'success'
+                );
+                return;
+              }
+            }
+          }
+
+          // 2. If user clicked 2+ custom boundary points (drawingPoints), execute polygon/rect hatch!
+          if (drawingPoints.length >= 2) {
+            const pts =
+              drawingPoints.length === 2
+                ? [
+                    {
+                      x: Math.min(drawingPoints[0].x, drawingPoints[1].x),
+                      y: Math.min(drawingPoints[0].y, drawingPoints[1].y),
+                    },
+                    {
+                      x: Math.max(drawingPoints[0].x, drawingPoints[1].x),
+                      y: Math.min(drawingPoints[0].y, drawingPoints[1].y),
+                    },
+                    {
+                      x: Math.max(drawingPoints[0].x, drawingPoints[1].x),
+                      y: Math.max(drawingPoints[0].y, drawingPoints[1].y),
+                    },
+                    {
+                      x: Math.min(drawingPoints[0].x, drawingPoints[1].x),
+                      y: Math.max(drawingPoints[0].y, drawingPoints[1].y),
+                    },
+                  ]
+                : drawingPoints.map((p) => ({ ...p }));
+            const newHatch: CadEntity = {
+              id: `hatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+              type: 'hatch',
+              layerId: wallLayerId,
+              pitch: effectivePitch,
+              angle: 45,
+              boundaryType: 'polygon',
+              points: pts,
+            };
+            onAddEntity(newHatch);
+            onSelectChange([newHatch.id]);
+            setDrawingPoints([]);
+            onLogCommand(
+              `HATCH 已於「建築主牆/輪廓」圖層完成自選範圍剖面填充 (PITCH = ${effectivePitch} mm)！`,
+              'success'
+            );
+            return;
+          }
+
+          // 3. Smart Hatch at current cursor position (智慧填充輸入: 輸入 PITCH 按 Enter 直接填充游標所在封閉區域!)
+          const smartHatch = findSmartHatchBoundaryAtPoint(
+            cursorWorld,
+            visibleEntities,
+            effectivePitch,
+            wallLayerId,
+            14 / zoom
+          );
+          if (smartHatch) {
+            onUpdateEntities([...entities, smartHatch]);
+            onSelectChange([smartHatch.id]);
+            onLogCommand(
+              `HATCH 智慧填充輸入完成：已於「建築主牆/輪廓」圖層建立 45° 斜線剖面填充 (PITCH = ${effectivePitch} mm)！`,
+              'success'
+            );
+            return;
+          }
+
+          onLogCommand(
+            `HATCH 已設定斜線 PITCH = ${effectivePitch} mm — 請點選封閉區域進行智慧填充，或選取邊界範圍後按 Enter 執行填充`,
+            'info'
+          );
+          return;
+        }
+
         if (activeTool === 'offset' && dynValue.trim() !== '') {
           e.preventDefault();
           const newDist = parseFloat(dynValue);
@@ -1682,17 +1847,36 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       return;
     }
 
-    // 1b. If in DIMENSION mode and drawingPoints is empty, clicking directly on a Circle circumference starts an ISO Diameter Dimension!
-    if (activeTool === 'dimension' && drawingPoints.length === 0) {
-      const hitTol = 10 / zoom;
+    // 1b. If in DIMENSION mode and drawingPoints is empty, clicking directly on an Arc (導圓角/三點圓弧) starts an ISO Radius Dimension (R), or clicking a Circle starts an ISO Diameter Dimension (Ø)!
+    if (
+      activeTool === 'dimension' &&
+      drawingPoints.length === 0 &&
+      !pendingRadiusDimArc
+    ) {
+      const hitTol = 12 / zoom;
+      const hitArc = [...visibleEntities]
+        .reverse()
+        .find(
+          (ent): ent is ArcEntity =>
+            ent.type === 'arc' && isPointNearEntity(rawWorld, ent, hitTol)
+        );
+      if (hitArc) {
+        setPendingRadiusDimArc(hitArc);
+        onLogCommand(
+          `DIMRADIUS 已偵測導圓角/圓弧 (R${hitArc.radius.toFixed(2)}) — 移動滑鼠決定半徑標註引線位置並點擊完成！`,
+          'info'
+        );
+        return;
+      }
+
       const hitCircle = [...visibleEntities]
         .reverse()
         .find(
-          (ent) =>
+          (ent): ent is CircleEntity =>
             ent.type === 'circle' &&
             Math.abs(dist(rawWorld, ent.center) - ent.radius) <= hitTol
         );
-      if (hitCircle && hitCircle.type === 'circle') {
+      if (hitCircle) {
         const ang = angleBetween(hitCircle.center, rawWorld);
         const p1: Point = {
           x: hitCircle.center.x - hitCircle.radius * Math.cos(ang),
@@ -1711,61 +1895,89 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       }
     }
 
-    // 1c. If in HATCH (45° 斜線填充) mode and drawingPoints is empty, clicking on a closed entity or inside a closed entity fills it with 45° hatch lines!
-    if (activeTool === 'hatch' && drawingPoints.length === 0) {
-      const hitTol = 12 / zoom;
-      let targetEnt = [...visibleEntities]
-        .reverse()
-        .find(
-          (ent) =>
-            ent.type !== 'hatch' &&
-            ent.type !== 'dimension' &&
-            ent.type !== 'text' &&
-            isPointNearEntity(rawWorld, ent, hitTol)
-        );
-
-      // Also check if user clicked INSIDE a circle or rectangle!
-      if (!targetEnt) {
-        targetEnt = [...visibleEntities].reverse().find((ent) => {
-          if (ent.type === 'circle') {
-            return dist(rawWorld, ent.center) <= ent.radius;
-          }
-          if (ent.type === 'rectangle') {
-            const minX = Math.min(ent.p1.x, ent.p2.x);
-            const maxX = Math.max(ent.p1.x, ent.p2.x);
-            const minY = Math.min(ent.p1.y, ent.p2.y);
-            const maxY = Math.max(ent.p1.y, ent.p2.y);
-            return (
-              rawWorld.x >= minX &&
-              rawWorld.x <= maxX &&
-              rawWorld.y >= minY &&
-              rawWorld.y <= maxY
-            );
-          }
-          return false;
-        });
+    // 1c. Check if in HATCH (45° 斜線剖面填充: 支援「智慧填充輸入」與「自行選取範圍再輸入執行」) mode
+    if (activeTool === 'hatch') {
+      const effectivePitch =
+        dynValue.trim() !== '' && !isNaN(parseFloat(dynValue))
+          ? Math.max(0.5, parseFloat(dynValue))
+          : Math.max(0.5, hatchPitch);
+      if (effectivePitch !== hatchPitch) {
+        onChangeHatchPitch(effectivePitch);
       }
 
-      if (targetEnt) {
-        // If clicked a Line, find connected lines to see if they form a closed loop
-        const sourceEnts =
-          targetEnt.type === 'line'
-            ? visibleEntities.filter((e) =>
-                findConnectedEntityIds([targetEnt.id], visibleEntities, 2.5).includes(
-                  e.id
+      // Mode A: 自行選取範圍再輸入執行 (hatchMode === 'selectRange')
+      if (hatchMode === 'selectRange' && drawingPoints.length === 0) {
+        if (selectionBoxStart) {
+          const isCrossing = rawWorld.x < selectionBoxStart.x;
+          const boxedIds = visibleEntities
+            .filter(
+              (ent) =>
+                ent.type !== 'hatch' &&
+                ent.type !== 'dimension' &&
+                ent.type !== 'text' &&
+                isEntityInSelectionBox(
+                  ent,
+                  selectionBoxStart,
+                  rawWorld,
+                  isCrossing
                 )
-              )
-            : [targetEnt];
-        const createdHatches = createHatchFromEntities(
-          sourceEnts,
-          hatchPitch,
-          wallLayerId
-        );
-        if (createdHatches.length > 0) {
-          onUpdateEntities([...entities, ...createdHatches]);
-          onSelectChange(createdHatches.map((h) => h.id));
+            )
+            .map((ent) => ent.id);
+          const merged = e.shiftKey
+            ? Array.from(new Set([...selectedIds, ...boxedIds]))
+            : boxedIds;
+          onSelectChange(merged);
+          setSelectionBoxStart(null);
           onLogCommand(
-            `HATCH 已於「建築主牆/輪廓」圖層建立 45° 斜線剖面填充 (PITCH = ${hatchPitch} mm)！可於下方或右側調整斜線 PITCH 間距`,
+            `HATCH 已框選 ${merged.length} 個邊界圖元 — 可直接輸入 PITCH 後按「空白鍵 / Enter」或點擊「執行填充」完成剖面填充！`,
+            'info'
+          );
+          return;
+        }
+
+        const hitTol = 12 / zoom;
+        const hitEnt = [...visibleEntities]
+          .reverse()
+          .find(
+            (ent) =>
+              ent.type !== 'hatch' &&
+              ent.type !== 'dimension' &&
+              ent.type !== 'text' &&
+              isPointNearEntity(rawWorld, ent, hitTol)
+          );
+
+        if (hitEnt) {
+          const nextIds = selectedIds.includes(hitEnt.id)
+            ? selectedIds.filter((id) => id !== hitEnt.id)
+            : [...selectedIds, hitEnt.id];
+          onSelectChange(nextIds);
+          onLogCommand(
+            `HATCH 已選取 ${nextIds.length} 個邊界圖元（可按 TAB 自動選取相連封閉邊界，或拉框選取）— 輸入 PITCH 後按「空白鍵 / Enter」執行填充！`,
+            'info'
+          );
+          return;
+        } else {
+          // Start window/crossing selection box to select boundary range
+          setSelectionBoxStart(rawWorld);
+          return;
+        }
+      }
+
+      // Mode B: 智慧填充輸入 (hatchMode === 'smart') when drawingPoints is empty
+      if (drawingPoints.length === 0) {
+        const smartHatch = findSmartHatchBoundaryAtPoint(
+          rawWorld,
+          visibleEntities,
+          effectivePitch,
+          wallLayerId,
+          12 / zoom
+        );
+        if (smartHatch) {
+          onUpdateEntities([...entities, smartHatch]);
+          onSelectChange([smartHatch.id]);
+          setDynValue('');
+          onLogCommand(
+            `HATCH 智慧填充完成：已於「建築主牆/輪廓」圖層建立 45° 斜線剖面填充 (PITCH = ${effectivePitch} mm)！`,
             'success'
           );
           return;
@@ -1777,6 +1989,35 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     if (activeTool === 'chamfer' || activeTool === 'fillet') {
       const isChamfer = activeTool === 'chamfer';
       const hitTol = 12 / zoom;
+
+      // In FILLET mode, if user clicks an existing Arc (such as an existing fillet arc) when cornerFirstPick is null,
+      // immediately create a Radius Dimension (R 半徑標註) for that fillet arc!
+      if (!isChamfer && !cornerFirstPick) {
+        const hitExistingArc = [...visibleEntities]
+          .reverse()
+          .find(
+            (ent): ent is ArcEntity =>
+              ent.type === 'arc' && isPointNearEntity(rawWorld, ent, hitTol)
+          );
+        if (hitExistingArc) {
+          const dimLayer = layers.some((l) => l.id === 'DIM')
+            ? 'DIM'
+            : activeLayerId;
+          const rDim = createRadiusDimensionForArc(
+            hitExistingArc,
+            dimLayer,
+            defaultDimFontSize
+          );
+          onUpdateEntities([...entities, rDim]);
+          onSelectChange([rDim.id]);
+          onLogCommand(
+            `FILLET 已為導圓角建立半徑標註: R${hitExistingArc.radius.toFixed(2)}！`,
+            'success'
+          );
+          return;
+        }
+      }
+
       const hit = [...visibleEntities]
         .reverse()
         .find(
@@ -1800,7 +2041,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           onLogCommand(
             isChamfer
               ? `CHAMFER 請依序點選兩條相交直線或矩形相鄰邊建立倒角 (目前倒角距離 D = ${chamferDistance} mm)`
-              : `FILLET 請依序點選兩條相交直線或矩形相鄰邊建立導圓角 (目前圓角半徑 R = ${filletRadius} mm)`,
+              : `FILLET 請依序點選兩條相交直線或矩形相鄰邊建立導圓角 (目前圓角半徑 R = ${filletRadius} mm，或直接點選既有圓角標註 R 半徑)`,
             'info'
           );
         }
@@ -1839,16 +2080,42 @@ export const CadViewport: React.FC<CadViewportProps> = ({
 
         if (res) {
           const removedSet = new Set(res.removedEntityIds);
+          const additions: CadEntity[] = [...res.replacementEntities];
+          const newSelectIds: string[] = res.cornerEntity
+            ? [res.cornerEntity.id]
+            : [];
+
+          // If filletAutoDim is enabled, automatically add R radius dimension for the new fillet arc!
+          if (
+            !isChamfer &&
+            filletAutoDim &&
+            res.cornerEntity &&
+            res.cornerEntity.type === 'arc'
+          ) {
+            const dimLayer = layers.some((l) => l.id === 'DIM')
+              ? 'DIM'
+              : activeLayerId;
+            const autoRDim = createRadiusDimensionForArc(
+              res.cornerEntity,
+              dimLayer,
+              defaultDimFontSize
+            );
+            additions.push(autoRDim);
+            newSelectIds.push(autoRDim.id);
+          }
+
           const nextEntities = entities
             .filter((e) => !removedSet.has(e.id))
-            .concat(res.replacementEntities);
+            .concat(additions);
           onUpdateEntities(nextEntities);
           setCornerFirstPick(null);
-          onSelectChange(res.cornerEntity ? [res.cornerEntity.id] : []);
+          onSelectChange(newSelectIds);
           onLogCommand(
             isChamfer
               ? `CHAMFER 已完成倒角 (D = ${chamferDistance} mm)！可繼續點選下一組邊進行倒角`
-              : `FILLET 已完成導圓角 (R = ${filletRadius} mm)！可繼續點選下一組邊進行導圓角`,
+              : filletAutoDim
+                ? `FILLET 已完成導圓角並自動標註半徑 (R${filletRadius.toFixed(2)})！可繼續點選下一組邊`
+                : `FILLET 已完成導圓角 (R = ${filletRadius} mm)！再點一下圓角弧線或按下方「+標註半徑 R」即可標註半徑`,
             'success'
           );
           return;
@@ -2553,6 +2820,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             mid,
             length,
             isDiameter,
+            isRadius,
             center,
             leaderOutside,
             leaderElbow,
@@ -2581,7 +2849,39 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             ctx.fill();
           };
 
-          if (isDiameter) {
+          if (isRadius) {
+            // ISO 129-1 / CNS Radius Dimension (R 半徑標註) Rendering
+            if (center) {
+              const sc = worldToScreen(center.x, center.y);
+              ctx.save();
+              ctx.lineWidth = 1;
+              ctx.globalAlpha = 0.65;
+              ctx.beginPath();
+              ctx.moveTo(sc.x - 4.5, sc.y);
+              ctx.lineTo(sc.x + 4.5, sc.y);
+              ctx.moveTo(sc.x, sc.y - 4.5);
+              ctx.lineTo(sc.x, sc.y + 4.5);
+              ctx.stroke();
+              ctx.restore();
+            }
+
+            ctx.globalAlpha = 1;
+            ctx.lineWidth = 1.25;
+            ctx.beginPath();
+            ctx.moveTo(sd1.x, sd1.y);
+            ctx.lineTo(sd2.x, sd2.y);
+            if (leaderOutside && leaderElbow && leaderLanding) {
+              const sElbow = worldToScreen(leaderElbow.x, leaderElbow.y);
+              const sLanding = worldToScreen(leaderLanding.x, leaderLanding.y);
+              ctx.moveTo(sd2.x, sd2.y);
+              ctx.lineTo(sElbow.x, sElbow.y);
+              ctx.lineTo(sLanding.x, sLanding.y);
+            }
+            ctx.stroke();
+
+            // Single arrow at the arc circumference pointing toward the arc
+            drawArrow(sd2, ang);
+          } else if (isDiameter) {
             // ISO 129-1 / CNS International Standard Circle Diameter Dimension Rendering
             if (center) {
               const sc = worldToScreen(center.x, center.y);
@@ -3038,19 +3338,49 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       }
     }
 
-    // Live 45° Hatch preview when hovering over a closed shape in 'hatch' mode
-    if (activeTool === 'hatch' && drawingPoints.length === 0 && hoveredEntityId) {
-      const hoveredEnt = visibleEntities.find((e) => e.id === hoveredEntityId);
-      if (hoveredEnt && hoveredEnt.type !== 'hatch') {
+    // Live 45° Hatch preview in 'hatch' mode (supports both Smart Fill and Select Range!)
+    if (activeTool === 'hatch' && drawingPoints.length === 0) {
+      const effectivePitch =
+        dynValue.trim() !== '' && !isNaN(parseFloat(dynValue))
+          ? Math.max(0.5, parseFloat(dynValue))
+          : Math.max(0.5, hatchPitch);
+
+      if (hatchMode === 'selectRange' && selectedIds.length > 0) {
+        const selectedEnts = entities.filter(
+          (e) => selectedIds.includes(e.id) && e.type !== 'hatch'
+        );
         const previewHatches = createHatchFromEntities(
-          [hoveredEnt],
-          hatchPitch,
-          activeLayerId
+          selectedEnts,
+          effectivePitch,
+          wallLayerId,
+          true
         );
         for (const ph of previewHatches) {
-          drawEntity(ph, 'rgba(16, 185, 129, 0.75)');
+          drawEntity(ph, 'rgba(16, 185, 129, 0.78)');
+        }
+      } else if (hatchMode === 'smart') {
+        const smartPreview = findSmartHatchBoundaryAtPoint(
+          cursorWorld,
+          visibleEntities,
+          effectivePitch,
+          wallLayerId,
+          12 / zoom
+        );
+        if (smartPreview) {
+          drawEntity(smartPreview, 'rgba(16, 185, 129, 0.78)');
         }
       }
+    }
+
+    // Live Radius Dimension (R 半徑標註) preview when pendingRadiusDimArc is active
+    if (activeTool === 'dimension' && pendingRadiusDimArc) {
+      const previewRDim = createRadiusDimensionForArc(
+        pendingRadiusDimArc,
+        activeLayerId,
+        defaultDimFontSize,
+        cursorWorld
+      );
+      drawEntity(previewRDim, '#FBBF24');
     }
 
     // 5. Render Grip Handles for Selected Entities in Select Mode
@@ -3747,7 +4077,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             )}
 
             {activeTool === 'fillet' && (
-              <div className="flex items-center gap-1 bg-slate-950 px-1.5 py-0.5 rounded border border-sky-500/50 shrink-0 font-mono">
+              <div className="flex items-center gap-1.5 bg-slate-950 px-1.5 py-0.5 rounded border border-sky-500/50 shrink-0 font-mono">
                 <span className="text-[10px] text-sky-300 font-sans">
                   圓角半徑 R:
                 </span>
@@ -3762,13 +4092,48 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                   className="w-14 px-1 py-0 text-[10px] bg-slate-900 border border-sky-500/60 rounded text-sky-200"
                 />
                 <span className="text-[10px] text-slate-400">mm</span>
+                <button
+                  type="button"
+                  onClick={() => onChangeFilletAutoDim(!filletAutoDim)}
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-sans border transition-colors ${
+                    filletAutoDim
+                      ? 'bg-amber-500 text-slate-950 border-amber-300 font-semibold'
+                      : 'bg-slate-900 text-slate-300 border-slate-700 hover:text-white'
+                  }`}
+                >
+                  {filletAutoDim ? '✓ 自動標註半徑R' : '自動標註半徑R'}
+                </button>
               </div>
             )}
 
             {activeTool === 'hatch' && (
-              <div className="flex items-center gap-1 bg-slate-950 px-1.5 py-0.5 rounded border border-emerald-500/50 shrink-0 font-mono">
+              <div className="flex items-center gap-1.5 bg-slate-950 px-1.5 py-0.5 rounded border border-emerald-500/50 shrink-0 font-mono">
+                <div className="flex items-center bg-slate-900 rounded p-0.5 border border-slate-800 font-sans">
+                  <button
+                    type="button"
+                    onClick={() => onChangeHatchMode('smart')}
+                    className={`px-1.5 py-0.5 rounded text-[10px] ${
+                      hatchMode === 'smart'
+                        ? 'bg-emerald-600 text-white font-semibold'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    智慧填充輸入
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onChangeHatchMode('selectRange')}
+                    className={`px-1.5 py-0.5 rounded text-[10px] ${
+                      hatchMode === 'selectRange'
+                        ? 'bg-emerald-600 text-white font-semibold'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    選取範圍再執行
+                  </button>
+                </div>
                 <span className="text-[10px] text-emerald-300 font-sans">
-                  斜線 PITCH:
+                  PITCH:
                 </span>
                 <input
                   type="number"
@@ -3782,6 +4147,15 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                   className="w-12 px-1 py-0 text-[10px] bg-slate-900 border border-emerald-500/60 rounded text-emerald-200"
                 />
                 <span className="text-[10px] text-slate-400">mm</span>
+                {selectedIds.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={onHatchSelected}
+                    className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-sans font-semibold"
+                  >
+                    執行填充 ({selectedIds.length}) [Enter]
+                  </button>
+                )}
               </div>
             )}
 
@@ -4174,7 +4548,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                 </div>
               )}
 
-              {/* Arc Direct Size Input */}
+              {/* Arc Direct Size Input & 1-Click Radius Dimension (導圓角標註半徑 R) */}
               {singleSelected.type === 'arc' && (
                 <div className="flex items-center gap-2">
                   <label className="flex items-center gap-1">
@@ -4196,6 +4570,27 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                     />
                     <span className="text-slate-500">mm</span>
                   </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const dimLayer = layers.some((l) => l.id === 'DIM')
+                        ? 'DIM'
+                        : activeLayerId;
+                      const rDim = createRadiusDimensionForArc(
+                        singleSelected,
+                        dimLayer,
+                        defaultDimFontSize
+                      );
+                      onUpdateEntities([...entities, rDim]);
+                      onLogCommand(
+                        `已為選取的導圓角/圓弧建立半徑標註: R${singleSelected.radius.toFixed(2)}`,
+                        'success'
+                      );
+                    }}
+                    className="flex items-center gap-1 px-2 py-0.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-sans text-[11px] font-medium"
+                  >
+                    <span>+標註半徑 R</span>
+                  </button>
                 </div>
               )}
 
@@ -4283,7 +4678,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               {/* Dimension Direct Modification Bar: Mode (Linear / ISO Diameter), Precision (0 / 1 / 2), Tolerance (+/-), Font Size */}
               {singleSelected.type === 'dimension' && (
                 <div className="flex flex-wrap items-center gap-2 font-sans">
-                  {/* ISO Diameter / Linear toggle */}
+                  {/* ISO Diameter / Radius / Linear toggle */}
                   <div className="flex items-center bg-slate-950 border border-slate-700 rounded p-0.5">
                     <button
                       type="button"
@@ -4308,6 +4703,17 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                       }`}
                     >
                       Ø直徑(ISO)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => updateSingleEntity({ dimMode: 'radius' })}
+                      className={`px-1.5 py-0.5 rounded text-[10px] ${
+                        singleSelected.dimMode === 'radius'
+                          ? 'bg-emerald-600 text-white'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      R半徑
                     </button>
                   </div>
 
@@ -4601,7 +5007,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         </div>
       )}
 
-      {/* Offset Distance Floating Input HUD when in Offset Mode */}
+      {/* Offset / Hatch Floating Input HUD when in Offset or Hatch Mode */}
       {activeTool === 'offset' && (
         <div
           style={{
@@ -4620,6 +5026,35 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             {dynValue !== '' ? dynValue : offsetDistance} mm
           </span>
           <span className="text-[10px] text-slate-400">[打字+空白鍵]</span>
+        </div>
+      )}
+
+      {activeTool === 'hatch' && (
+        <div
+          style={{
+            transform: `translate(${Math.min(
+              Math.max(8, canvasSize.width - 260),
+              Math.max(8, mouseScreen.x + 16)
+            )}px, ${Math.min(
+              Math.max(8, canvasSize.height - 56),
+              Math.max(8, mouseScreen.y + 16)
+            )}px)`,
+          }}
+          className="pointer-events-none absolute top-0 left-0 z-20 flex items-center gap-1.5 bg-slate-900/95 border border-emerald-500/60 rounded px-2.5 py-1 shadow-lg font-mono text-xs"
+        >
+          <span className="text-emerald-300 font-sans">
+            {hatchMode === 'smart' ? '智慧填充 PITCH:' : '選取範圍 PITCH:'}
+          </span>
+          <span className="px-1.5 py-0.5 rounded bg-emerald-500/25 text-emerald-100 border border-emerald-400/50">
+            {dynValue !== '' ? dynValue : hatchPitch} mm
+          </span>
+          <span className="text-[10px] text-slate-400">
+            {hatchMode === 'smart'
+              ? '[點擊或輸入+Enter]'
+              : selectedIds.length > 0
+                ? `[已選${selectedIds.length}項 按Enter執行]`
+                : '[選取範圍後按Enter]'}
+          </span>
         </div>
       )}
 

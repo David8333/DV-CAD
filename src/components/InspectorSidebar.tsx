@@ -22,6 +22,7 @@ import {
 } from '../types/cad';
 import {
   angleDegrees,
+  createRadiusDimensionForArc,
   DEG_TO_RAD,
   dist,
   getArcThreePoints,
@@ -475,12 +476,12 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                     </span>
                   </div>
 
-                  {/* 1. Dimension Mode: Linear vs ISO International Circle Diameter */}
+                  {/* 1. Dimension Mode: Linear vs ISO Circle Diameter (Ø) vs Radius (R) */}
                   <div className="space-y-1">
                     <span className="block text-[11px] text-slate-300">
                       標註規範模式：
                     </span>
-                    <div className="grid grid-cols-2 gap-1 p-0.5 bg-slate-950 rounded border border-slate-800">
+                    <div className="grid grid-cols-3 gap-1 p-0.5 bg-slate-950 rounded border border-slate-800">
                       <button
                         type="button"
                         onClick={() =>
@@ -489,14 +490,14 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                             textOverride: undefined,
                           })
                         }
-                        className={`py-1 px-2 rounded text-[11px] font-medium transition-colors ${
+                        className={`py-1 px-1.5 rounded text-[10px] font-medium transition-colors ${
                           (selectedDimensions[0].dimMode || 'linear') ===
                           'linear'
                             ? 'bg-sky-600 text-white'
                             : 'text-slate-400 hover:text-slate-200'
                         }`}
                       >
-                        線性尺寸標註
+                        線性尺寸
                       </button>
                       <button
                         type="button"
@@ -506,13 +507,29 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                             textOverride: undefined,
                           })
                         }
-                        className={`py-1 px-2 rounded text-[11px] font-medium transition-colors ${
+                        className={`py-1 px-1.5 rounded text-[10px] font-medium transition-colors ${
                           selectedDimensions[0].dimMode === 'diameter'
                             ? 'bg-amber-500 text-slate-950 font-semibold'
                             : 'text-slate-400 hover:text-slate-200'
                         }`}
                       >
-                        國際規範圓直徑 (Ø)
+                        圓直徑 (Ø)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateSelectedDimensions({
+                            dimMode: 'radius',
+                            textOverride: undefined,
+                          })
+                        }
+                        className={`py-1 px-1.5 rounded text-[10px] font-medium transition-colors ${
+                          selectedDimensions[0].dimMode === 'radius'
+                            ? 'bg-emerald-500 text-slate-950 font-semibold'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        導圓角半徑 (R)
                       </button>
                     </div>
                   </div>
@@ -1246,18 +1263,39 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                       {(() => {
                         const [p1, p2, p3] = getArcThreePoints(singleEntity);
                         return (
-                          <div className="p-2 bg-slate-950/80 border border-slate-800 rounded text-[10px] space-y-1">
-                            <div className="text-slate-400 font-sans">
-                              三點圓弧控制點座標（可拖曳畫布上 P1/P2/P3 調整）：
-                            </div>
-                            <div className="text-emerald-300">
-                              P1 起點: ({p1.x.toFixed(2)}, {p1.y.toFixed(2)})
-                            </div>
-                            <div className="text-amber-300">
-                              P2 第二點: ({p2.x.toFixed(2)}, {p2.y.toFixed(2)})
-                            </div>
-                            <div className="text-rose-300">
-                              P3 終點: ({p3.x.toFixed(2)}, {p3.y.toFixed(2)})
+                          <div className="space-y-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const dimLayer =
+                                  layers.find((l) => l.id === 'DIM')?.id ||
+                                  activeLayerId ||
+                                  '0';
+                                const newDim = createRadiusDimensionForArc(
+                                  singleEntity,
+                                  dimLayer,
+                                  11
+                                );
+                                onUpdateEntities([...entities, newDim]);
+                              }}
+                              className="w-full py-1.5 px-2 bg-emerald-600/25 hover:bg-emerald-600/40 text-emerald-200 border border-emerald-500/50 rounded text-[11px] font-sans font-semibold transition-colors"
+                            >
+                              + 標註導圓角/圓弧半徑 (R
+                              {singleEntity.radius.toFixed(2)})
+                            </button>
+                            <div className="p-2 bg-slate-950/80 border border-slate-800 rounded text-[10px] space-y-1">
+                              <div className="text-slate-400 font-sans">
+                                三點圓弧 / 導圓角控制點座標（可拖曳畫布上 P1/P2/P3 調整）：
+                              </div>
+                              <div className="text-emerald-300">
+                                P1 起點: ({p1.x.toFixed(2)}, {p1.y.toFixed(2)})
+                              </div>
+                              <div className="text-amber-300">
+                                P2 第二點: ({p2.x.toFixed(2)}, {p2.y.toFixed(2)})
+                              </div>
+                              <div className="text-rose-300">
+                                P3 終點: ({p3.x.toFixed(2)}, {p3.y.toFixed(2)})
+                              </div>
                             </div>
                           </div>
                         );

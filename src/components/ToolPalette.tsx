@@ -26,7 +26,7 @@ import {
   ClipboardCopy,
   AlignCenterHorizontal,
 } from 'lucide-react';
-import { RectangleMode, ToolType } from '../types/cad';
+import { HatchMode, RectangleMode, ToolType } from '../types/cad';
 
 interface ToolPaletteProps {
   activeTool: ToolType;
@@ -37,10 +37,14 @@ interface ToolPaletteProps {
   onChangeOffsetDistance: (dist: number) => void;
   hatchPitch: number;
   onChangeHatchPitch: (pitch: number) => void;
+  hatchMode: HatchMode;
+  onChangeHatchMode: (mode: HatchMode) => void;
   chamferDistance: number;
   onChangeChamferDistance: (dist: number) => void;
   filletRadius: number;
   onChangeFilletRadius: (radius: number) => void;
+  filletAutoDim: boolean;
+  onChangeFilletAutoDim: (autoDim: boolean) => void;
   selectedCount: number;
   hasClipboard: boolean;
   onCopyClipboard: () => void;
@@ -53,6 +57,7 @@ interface ToolPaletteProps {
   onDeleteSelected: () => void;
   onAutoDimensionSelected: () => void;
   onHatchSelected?: () => void;
+  onDimensionRadiusSelected?: () => void;
 }
 
 /**
@@ -344,10 +349,14 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
   onChangeOffsetDistance,
   hatchPitch,
   onChangeHatchPitch,
+  hatchMode,
+  onChangeHatchMode,
   chamferDistance,
   onChangeChamferDistance,
   filletRadius,
   onChangeFilletRadius,
+  filletAutoDim,
+  onChangeFilletAutoDim,
   selectedCount,
   hasClipboard,
   onCopyClipboard,
@@ -360,6 +369,7 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
   onDeleteSelected,
   onAutoDimensionSelected,
   onHatchSelected,
+  onDimensionRadiusSelected,
 }) => {
   return (
     <aside className="w-64 shrink-0 h-full bg-[#0F172A] border-r border-slate-800 flex flex-col justify-between p-3 overflow-y-auto select-none">
@@ -666,6 +676,36 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
                 />
               </div>
             </div>
+
+            {/* Fillet Radius Dimension (導圓角標註半徑 R) Controls */}
+            <div className="pt-1 border-t border-slate-800/90 space-y-1.5">
+              <div className="flex items-center justify-between gap-1">
+                <button
+                  type="button"
+                  onClick={() => onChangeFilletAutoDim(!filletAutoDim)}
+                  title="導圓角完成時自動產生 R 半徑標註"
+                  className={`flex-1 py-1 px-2 rounded text-[10px] font-medium border transition-colors ${
+                    filletAutoDim
+                      ? 'bg-amber-500/25 text-amber-200 border-amber-400/70 font-semibold'
+                      : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200'
+                  }`}
+                >
+                  {filletAutoDim
+                    ? '✓ 導圓角自動標註半徑 R'
+                    : '導圓角自動標註半徑 R (關)'}
+                </button>
+                {onDimensionRadiusSelected && (
+                  <button
+                    type="button"
+                    onClick={onDimensionRadiusSelected}
+                    title="為已選取的導圓角/圓弧標註半徑 R (或直接點選圓弧標註)"
+                    className="py-1 px-2 rounded text-[10px] font-medium bg-sky-600/25 hover:bg-sky-600/40 text-sky-200 border border-sky-500/50 whitespace-nowrap"
+                  >
+                    +標註半徑 R
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
 
           {/* 45° Section Hatch Tool & Pitch Control Box */}
@@ -673,17 +713,11 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
             <div className="flex items-center justify-between">
               <button
                 type="button"
-                onClick={() => {
-                  if (selectedCount > 0 && onHatchSelected) {
-                    onHatchSelected();
-                  } else {
-                    onSelectTool('hatch');
-                  }
-                }}
+                onClick={() => onSelectTool('hatch')}
                 className="flex items-center gap-1.5 text-[11px] font-semibold text-emerald-300 hover:text-emerald-200"
               >
                 <HatchIcon className="w-3.5 h-3.5 text-emerald-400" />
-                <span>45° 剖面填充 PITCH</span>
+                <span>45° 剖面填充 (BH)</span>
               </button>
               <span
                 className="px-1.5 py-0.5 rounded bg-sky-950/80 border border-sky-500/40 text-[9px] font-mono text-sky-300"
@@ -692,6 +726,39 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
                 建築主牆/輪廓層
               </span>
             </div>
+
+            {/* Hatch Mode Switcher: 智慧填充輸入 vs 自行選取範圍再輸入執行 */}
+            <div className="grid grid-cols-2 gap-1 p-0.5 bg-slate-950 rounded border border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  onChangeHatchMode('smart');
+                  onSelectTool('hatch');
+                }}
+                className={`py-1 px-1.5 text-[10px] font-medium rounded transition-colors whitespace-nowrap ${
+                  hatchMode === 'smart'
+                    ? 'bg-emerald-600 text-white font-semibold'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                智慧填充輸入
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onChangeHatchMode('selectRange');
+                  onSelectTool('hatch');
+                }}
+                className={`py-1 px-1.5 text-[10px] font-medium rounded transition-colors whitespace-nowrap ${
+                  hatchMode === 'selectRange'
+                    ? 'bg-emerald-600 text-white font-semibold'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                選取範圍再執行
+              </button>
+            </div>
+
             <div className="flex items-center justify-between gap-2">
               <span className="text-[11px] text-slate-300 whitespace-nowrap">
                 斜線間距 PITCH：
@@ -730,6 +797,24 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
                 </button>
               ))}
             </div>
+            {onHatchSelected && (
+              <button
+                type="button"
+                onClick={onHatchSelected}
+                className={`w-full py-1.5 px-2 rounded text-[11px] font-semibold border transition-colors flex items-center justify-center gap-1 ${
+                  selectedCount > 0
+                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400 shadow-sm'
+                    : 'bg-slate-950/80 text-emerald-300/80 border-emerald-500/30 hover:bg-emerald-950/50'
+                }`}
+              >
+                <HatchIcon className="w-3.5 h-3.5" />
+                <span>
+                  {selectedCount > 0
+                    ? `執行選取範圍填充 (${selectedCount}) [Enter]`
+                    : '選取邊界範圍後按 Enter 執行填充'}
+                </span>
+              </button>
+            )}
           </div>
 
           {/* Quick Auto-Dimension & Align Dimension Buttons */}
