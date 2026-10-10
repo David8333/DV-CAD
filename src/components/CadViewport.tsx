@@ -25,7 +25,9 @@ import {
   applyGripMove,
   applyOrthoAndPolar,
   arcFromThreePoints,
+  computeChamferResult,
   computeExtendResult,
+  computeFilletResult,
   computeMutualExtendResult,
   computeTrimResult,
   createHatchFromEntities,
@@ -70,6 +72,10 @@ interface CadViewportProps {
   onChangeOffsetDistance: (dist: number) => void;
   hatchPitch: number;
   onChangeHatchPitch: (pitch: number) => void;
+  chamferDistance: number;
+  onChangeChamferDistance: (dist: number) => void;
+  filletRadius: number;
+  onChangeFilletRadius: (radius: number) => void;
   pan: Point;
   zoom: number;
   onPanZoomChange: (pan: Point, zoom: number) => void;
@@ -108,6 +114,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   onChangeOffsetDistance,
   hatchPitch,
   onChangeHatchPitch,
+  chamferDistance,
+  onChangeChamferDistance,
+  filletRadius,
+  onChangeFilletRadius,
   pan,
   zoom,
   onPanZoomChange,
@@ -147,6 +157,21 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     entityId: string;
     clickPt: Point;
   } | null>(null);
+
+  // Two-edge Chamfer (倒角) / Fillet (導圓角) first pick state
+  const [cornerFirstPick, setCornerFirstPick] = useState<{
+    entityId: string;
+    clickPt: Point;
+  } | null>(null);
+
+  // Resolve A-WALL (建築主牆/輪廓) layer ID for section hatches
+  const wallLayerId =
+    layers.find(
+      (l) =>
+        l.id === 'WALL' ||
+        l.name.includes('建築主牆') ||
+        l.name.includes('輪廓')
+    )?.id || 'WALL';
 
   // Pinned to Origin (0,0) state when user presses JO
   const [cursorPinnedToOrigin, setCursorPinnedToOrigin] =
@@ -373,6 +398,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     dragPreviewRef.current = null;
     setDimAlignGuide(null);
     setExtendFirstPick(null);
+    setCornerFirstPick(null);
     if (activeTool !== 'measure') {
       setMeasureResult(null);
     }
@@ -662,7 +688,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
             onLogCommand(
-              `HATCH 指定 45° 斜線填充區域第一角點: (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)}) — 請點選對角點完成填充（或直接點選圓形/矩形/多邊形自動填充）`,
+              `HATCH 指定 45° 斜線填充區域第一角點: (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)}) — 請點選對角點完成填充（自動採用 A-WALL 建築主牆/輪廓層）`,
               'info'
             );
           } else {
@@ -675,7 +701,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               onAddEntity({
                 id: `hatch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
                 type: 'hatch',
-                layerId: activeLayerId,
+                layerId: wallLayerId,
                 pitch: Math.max(0.5, hatchPitch),
                 angle: 45,
                 boundaryType: 'polygon',
@@ -688,7 +714,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               });
               setDrawingPoints([]);
               onLogCommand(
-                `HATCH 已建立 45° 斜線剖面填充 (PITCH = ${hatchPitch} mm，範圍 ${(maxX - minX).toFixed(1)} × ${(maxY - minY).toFixed(1)} mm)`,
+                `HATCH 已於「建築主牆/輪廓」圖層建立 45° 斜線剖面填充 (PITCH = ${hatchPitch} mm，範圍 ${(maxX - minX).toFixed(1)} × ${(maxY - minY).toFixed(1)} mm)`,
                 'success'
               );
             }
@@ -928,6 +954,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       rectangleMode,
       selectedIds,
       setDrawingPoints,
+      wallLayerId,
       zoom,
     ]
   );
@@ -944,6 +971,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           setExtendFirstPick(null);
           onSelectChange([]);
           onLogCommand('已取消第一條延伸線段選擇 (ESC)', 'info');
+          return;
+        }
+        if (cornerFirstPick) {
+          setCornerFirstPick(null);
+          onSelectChange([]);
+          onLogCommand('已取消第一條邊選擇 (ESC)', 'info');
           return;
         }
         if (drawingPoints.length > 0) {
@@ -1019,10 +1052,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         return;
       }
 
-      // Dynamic numeric typing when drawing, moving, or in offset tool
+      // Dynamic numeric typing when drawing, moving, or in offset/chamfer/fillet tool
       if (
         (drawingPoints.length > 0 && settings.dynInput) ||
         activeTool === 'offset' ||
+        activeTool === 'chamfer' ||
+        activeTool === 'fillet' ||
         activeTool === 'move' ||
         activeTool === 'copy'
       ) {
@@ -1075,6 +1110,34 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             onChangeOffsetDistance(newDist);
             onLogCommand(
               `OFFSET 已設定偏移距離 = ${newDist.toFixed(2)} mm — 請點選要偏移的一側（支援同時偏移所有已選取圖形）`,
+              'success'
+            );
+          }
+          setDynValue('');
+          return;
+        }
+
+        if (activeTool === 'chamfer' && dynValue.trim() !== '') {
+          e.preventDefault();
+          const newDist = parseFloat(dynValue);
+          if (!isNaN(newDist) && newDist >= 0.1) {
+            onChangeChamferDistance(newDist);
+            onLogCommand(
+              `CHAMFER 已設定倒角距離 D = ${newDist.toFixed(2)} mm — 請依序點選兩條相交邊建立倒角`,
+              'success'
+            );
+          }
+          setDynValue('');
+          return;
+        }
+
+        if (activeTool === 'fillet' && dynValue.trim() !== '') {
+          e.preventDefault();
+          const newRadius = parseFloat(dynValue);
+          if (!isNaN(newRadius) && newRadius >= 0.1) {
+            onChangeFilletRadius(newRadius);
+            onLogCommand(
+              `FILLET 已設定導圓角半徑 R = ${newRadius.toFixed(2)} mm — 請依序點選兩條相交邊建立導圓角`,
               'success'
             );
           }
@@ -1696,18 +1759,111 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         const createdHatches = createHatchFromEntities(
           sourceEnts,
           hatchPitch,
-          activeLayerId
+          wallLayerId
         );
         if (createdHatches.length > 0) {
           onUpdateEntities([...entities, ...createdHatches]);
           onSelectChange(createdHatches.map((h) => h.id));
           onLogCommand(
-            `HATCH 已為選取圖形建立 45° 斜線剖面填充 (PITCH = ${hatchPitch} mm)！可於下方或右側調整斜線 PITCH 間距`,
+            `HATCH 已於「建築主牆/輪廓」圖層建立 45° 斜線剖面填充 (PITCH = ${hatchPitch} mm)！可於下方或右側調整斜線 PITCH 間距`,
             'success'
           );
           return;
         }
       }
+    }
+
+    // 1d. Check if in CHAMFER (倒角 CHA) or FILLET (導圓角 F) mode
+    if (activeTool === 'chamfer' || activeTool === 'fillet') {
+      const isChamfer = activeTool === 'chamfer';
+      const hitTol = 12 / zoom;
+      const hit = [...visibleEntities]
+        .reverse()
+        .find(
+          (ent) =>
+            (ent.type === 'line' ||
+              ent.type === 'rectangle' ||
+              ent.type === 'polyline' ||
+              ent.type === 'polygon') &&
+            isPointNearEntity(rawWorld, ent, hitTol)
+        );
+
+      if (!hit) {
+        if (cornerFirstPick) {
+          setCornerFirstPick(null);
+          onSelectChange([]);
+          onLogCommand(
+            `${isChamfer ? 'CHAMFER' : 'FILLET'} 已取消第一條邊選擇 — 請重新點選第一條直線或矩形邊`,
+            'info'
+          );
+        } else {
+          onLogCommand(
+            isChamfer
+              ? `CHAMFER 請依序點選兩條相交直線或矩形相鄰邊建立倒角 (目前倒角距離 D = ${chamferDistance} mm)`
+              : `FILLET 請依序點選兩條相交直線或矩形相鄰邊建立導圓角 (目前圓角半徑 R = ${filletRadius} mm)`,
+            'info'
+          );
+        }
+        return;
+      }
+
+      if (!cornerFirstPick) {
+        setCornerFirstPick({ entityId: hit.id, clickPt: rawWorld });
+        onSelectChange([hit.id]);
+        onLogCommand(
+          isChamfer
+            ? `CHAMFER 已點選第一條邊 (${hit.type.toUpperCase()}) — 請點選相交的第二條邊建立倒角 (D = ${chamferDistance} mm)`
+            : `FILLET 已點選第一條邊 (${hit.type.toUpperCase()}) — 請點選相交的第二條邊建立導圓角 (R = ${filletRadius} mm)`,
+          'info'
+        );
+        return;
+      }
+
+      const firstEnt = entities.find((e) => e.id === cornerFirstPick.entityId);
+      if (firstEnt) {
+        const res = isChamfer
+          ? computeChamferResult(
+              firstEnt,
+              cornerFirstPick.clickPt,
+              hit,
+              rawWorld,
+              chamferDistance
+            )
+          : computeFilletResult(
+              firstEnt,
+              cornerFirstPick.clickPt,
+              hit,
+              rawWorld,
+              filletRadius
+            );
+
+        if (res) {
+          const removedSet = new Set(res.removedEntityIds);
+          const nextEntities = entities
+            .filter((e) => !removedSet.has(e.id))
+            .concat(res.replacementEntities);
+          onUpdateEntities(nextEntities);
+          setCornerFirstPick(null);
+          onSelectChange(res.cornerEntity ? [res.cornerEntity.id] : []);
+          onLogCommand(
+            isChamfer
+              ? `CHAMFER 已完成倒角 (D = ${chamferDistance} mm)！可繼續點選下一組邊進行倒角`
+              : `FILLET 已完成導圓角 (R = ${filletRadius} mm)！可繼續點選下一組邊進行導圓角`,
+            'success'
+          );
+          return;
+        }
+      }
+
+      setCornerFirstPick({ entityId: hit.id, clickPt: rawWorld });
+      onSelectChange([hit.id]);
+      onLogCommand(
+        isChamfer
+          ? `CHAMFER 無法在此位置建立倒角（請點選另一條不平行的相交邊，或縮小倒角距離 D = ${chamferDistance} mm）`
+          : `FILLET 無法在此位置建立導圓角（請點選另一條不平行的相交邊，或縮小圓角半徑 R = ${filletRadius} mm）`,
+        'error'
+      );
+      return;
     }
 
     // 2. Check if in ERASE (刪除圖元 E) mode
@@ -2274,12 +2430,32 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         return;
       }
 
-      const layer = layerMap.get(ent.layerId) || layers[0];
+      const wallLayer =
+        layerMap.get('WALL') ||
+        layers.find(
+          (l) => l.name.includes('建築主牆') || l.name.includes('輪廓')
+        );
+      const layer =
+        (ent.type === 'hatch' && wallLayer
+          ? wallLayer
+          : layerMap.get(ent.layerId)) || layers[0];
       if (!layer || !layer.visible) return;
 
-      const color = overrideColor || ent.color || layer.color;
-      const lineType = ent.lineType || layer.lineType;
-      const rawWeight = ent.lineWeight || layer.lineWeight || 0.25;
+      const color =
+        overrideColor ||
+        ent.color ||
+        (ent.type === 'hatch' && wallLayer ? wallLayer.color : layer.color);
+      const lineType =
+        ent.lineType ||
+        (ent.type === 'hatch' && wallLayer
+          ? wallLayer.lineType
+          : layer.lineType);
+      const rawWeight =
+        ent.lineWeight ||
+        (ent.type === 'hatch' && wallLayer
+          ? wallLayer.lineWeight
+          : layer.lineWeight) ||
+        0.25;
       const baseWidth = settings.showLineWeight
         ? Math.max(1.2, rawWeight * 4.5)
         : 1.5;
@@ -2541,7 +2717,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         }
         case 'hatch': {
           ctx.setLineDash([]);
-          ctx.lineWidth = isSelected || isHovered ? 1.6 : 1.05;
+          ctx.lineWidth = isSelected || isHovered ? baseWidth + 0.8 : baseWidth;
           const hatchSegs = getHatchSegments(ent);
           if (hatchSegs.length > 0) {
             ctx.beginPath();
@@ -2749,6 +2925,98 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             ctx.fill();
             ctx.restore();
           }
+        }
+      }
+    }
+
+    if (
+      (activeTool === 'chamfer' || activeTool === 'fillet') &&
+      cornerFirstPick &&
+      hoveredEntityId
+    ) {
+      const firstEnt = visibleEntities.find(
+        (e) => e.id === cornerFirstPick.entityId
+      );
+      const hoveredEnt = visibleEntities.find((e) => e.id === hoveredEntityId);
+      if (firstEnt && hoveredEnt) {
+        const previewRes =
+          activeTool === 'chamfer'
+            ? computeChamferResult(
+                firstEnt,
+                cornerFirstPick.clickPt,
+                hoveredEnt,
+                cursorWorld,
+                chamferDistance
+              )
+            : computeFilletResult(
+                firstEnt,
+                cornerFirstPick.clickPt,
+                hoveredEnt,
+                cursorWorld,
+                filletRadius
+              );
+        if (previewRes) {
+          ctx.save();
+          // Draw trimmed corner segments in dashed rose
+          ctx.strokeStyle = '#F43F5E';
+          ctx.lineWidth = 2;
+          ctx.setLineDash([5, 4]);
+          for (const [pA, pB] of previewRes.trimmedSegments) {
+            const s1 = worldToScreen(pA.x, pA.y);
+            const s2 = worldToScreen(pB.x, pB.y);
+            ctx.beginPath();
+            ctx.moveTo(s1.x, s1.y);
+            ctx.lineTo(s2.x, s2.y);
+            ctx.stroke();
+          }
+
+          // Draw new chamfer line or fillet arc in bright emerald/sky
+          ctx.setLineDash([]);
+          ctx.strokeStyle = '#10B981';
+          ctx.lineWidth = 3;
+          if (previewRes.cornerEntity?.type === 'line') {
+            const s1 = worldToScreen(
+              previewRes.cornerEntity.p1.x,
+              previewRes.cornerEntity.p1.y
+            );
+            const s2 = worldToScreen(
+              previewRes.cornerEntity.p2.x,
+              previewRes.cornerEntity.p2.y
+            );
+            ctx.beginPath();
+            ctx.moveTo(s1.x, s1.y);
+            ctx.lineTo(s2.x, s2.y);
+            ctx.stroke();
+          } else if (previewRes.cornerEntity?.type === 'arc') {
+            const sc = worldToScreen(
+              previewRes.cornerEntity.center.x,
+              previewRes.cornerEntity.center.y
+            );
+            ctx.beginPath();
+            ctx.arc(
+              sc.x,
+              sc.y,
+              Math.max(1, previewRes.cornerEntity.radius * zoom),
+              -previewRes.cornerEntity.endAngle,
+              -previewRes.cornerEntity.startAngle
+            );
+            ctx.stroke();
+          }
+
+          const sInt = worldToScreen(
+            previewRes.intersectionPoint.x,
+            previewRes.intersectionPoint.y
+          );
+          ctx.fillStyle = '#10B981';
+          ctx.font = 'bold 11px "JetBrains Mono", monospace';
+          ctx.fillText(
+            activeTool === 'chamfer'
+              ? `倒角 D=${chamferDistance}mm`
+              : `導圓角 R=${filletRadius}mm`,
+            sInt.x + 10,
+            sInt.y - 8
+          );
+          ctx.restore();
         }
       }
     }
@@ -3437,7 +3705,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               {activeTool === 'circle' && '畫圓形 (C)'}
               {activeTool === 'arc' && '三點圓弧 (A)'}
               {activeTool === 'polygon' && `正 ${polygonSides} 邊形 (G)`}
-              {activeTool === 'hatch' && `45° 斜線填充 (BH - PITCH ${hatchPitch}mm)`}
+              {activeTool === 'hatch' &&
+                `45° 剖面填充 (BH - 建築主牆/輪廓層 PITCH ${hatchPitch}mm)`}
+              {activeTool === 'chamfer' &&
+                `倒角 (CHA - D=${chamferDistance}mm)`}
+              {activeTool === 'fillet' &&
+                `導圓角 (F - R=${filletRadius}mm)`}
               {activeTool === 'text' && '文字註解 (T)'}
               {activeTool === 'measure' && '測量距離 (K)'}
               {activeTool === 'erase' && '刪除圖元 (E)'}
@@ -3451,6 +3724,46 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               {activeTool === 'extend' && '延伸圖元 (EX)'}
               {activeTool === 'join' && '組裝圖元 (J)'}
             </span>
+
+            {activeTool === 'chamfer' && (
+              <div className="flex items-center gap-1 bg-slate-950 px-1.5 py-0.5 rounded border border-sky-500/50 shrink-0 font-mono">
+                <span className="text-[10px] text-sky-300 font-sans">
+                  倒角距離 D:
+                </span>
+                <input
+                  type="number"
+                  min={0.1}
+                  step="0.5"
+                  value={chamferDistance}
+                  onChange={(e) =>
+                    onChangeChamferDistance(
+                      Math.max(0.1, Number(e.target.value))
+                    )
+                  }
+                  className="w-14 px-1 py-0 text-[10px] bg-slate-900 border border-sky-500/60 rounded text-sky-200"
+                />
+                <span className="text-[10px] text-slate-400">mm</span>
+              </div>
+            )}
+
+            {activeTool === 'fillet' && (
+              <div className="flex items-center gap-1 bg-slate-950 px-1.5 py-0.5 rounded border border-sky-500/50 shrink-0 font-mono">
+                <span className="text-[10px] text-sky-300 font-sans">
+                  圓角半徑 R:
+                </span>
+                <input
+                  type="number"
+                  min={0.1}
+                  step="0.5"
+                  value={filletRadius}
+                  onChange={(e) =>
+                    onChangeFilletRadius(Math.max(0.1, Number(e.target.value)))
+                  }
+                  className="w-14 px-1 py-0 text-[10px] bg-slate-900 border border-sky-500/60 rounded text-sky-200"
+                />
+                <span className="text-[10px] text-slate-400">mm</span>
+              </div>
+            )}
 
             {activeTool === 'hatch' && (
               <div className="flex items-center gap-1 bg-slate-950 px-1.5 py-0.5 rounded border border-emerald-500/50 shrink-0 font-mono">
@@ -3627,7 +3940,15 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               {activeTool === 'join' &&
                 '點選 2 個以上圖元後按「空白鍵 / Enter」，保留原始位置組裝成單一物件'}
               {activeTool === 'hatch' &&
-                '直接點選圓形、矩形、多邊形或封閉線段即可填充 45° 斜線（或點選兩角點拉框填充），可隨時調整 PITCH 間距'}
+                '直接點選圓形、矩形、多邊形或封閉線段即可填充 45° 斜線（直接採用 A-WALL 建築主牆/輪廓圖層），可隨時調整 PITCH 間距'}
+              {activeTool === 'chamfer' &&
+                (cornerFirstPick
+                  ? `已選取第一條邊 — 請移動預覽並點選相交的第二條邊建立倒角 (D=${chamferDistance}mm)`
+                  : '依序點選兩條相交直線或矩形相鄰邊即可建立倒角（可直接輸入距離按空白鍵/Enter）')}
+              {activeTool === 'fillet' &&
+                (cornerFirstPick
+                  ? `已選取第一條邊 — 請移動預覽並點選相交的第二條邊建立導圓角 (R=${filletRadius}mm)`
+                  : '依序點選兩條相交直線或矩形相鄰邊即可建立導圓角（可直接輸入半徑按空白鍵/Enter）')}
               {activeTool === 'select' &&
                 '點選或直接拖曳圖元移動；可在下方修改尺寸、設定正負公差（支援 0）與小數位數，或輸入 X,Y 座標跳轉'}
               {![
@@ -3643,6 +3964,8 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                 'offset',
                 'join',
                 'hatch',
+                'chamfer',
+                'fillet',
                 'select',
               ].includes(activeTool) &&
                 (drawingPoints.length === 0

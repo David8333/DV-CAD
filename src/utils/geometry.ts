@@ -483,7 +483,7 @@ export function getHatchSegments(entity: HatchEntity): Array<[Point, Point]> {
 export function createHatchFromEntities(
   targetEntities: CadEntity[],
   pitch: number,
-  layerId: string
+  layerId = 'WALL'
 ): HatchEntity[] {
   const validPitch = Math.max(0.2, pitch || 5);
   const hatches: HatchEntity[] = [];
@@ -1300,6 +1300,317 @@ export function computeMutualExtendResult(
   }
 
   return null;
+}
+
+export interface CornerOperationResult {
+  intersectionPoint: Point;
+  t1: Point;
+  t2: Point;
+  trimmedSegments: Array<[Point, Point]>;
+  cornerEntity: CadEntity | null;
+  removedEntityIds: string[];
+  replacementEntities: CadEntity[];
+}
+
+function findClosestSegmentIndex(
+  segs: Array<[Point, Point]>,
+  pt: Point
+): number {
+  let bestIdx = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < segs.length; i++) {
+    const d = distToSegment(pt, segs[i][0], segs[i][1]);
+    if (d < bestD) {
+      bestD = d;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
+}
+
+function selectKeepAndTrimEndpoints(
+  a1: Point,
+  a2: Point,
+  pInt: Point,
+  clickPt: Point
+): { keepPt: Point; trimPt: Point; moveFirstEndpoint: boolean } {
+  const dotEnds =
+    (a1.x - pInt.x) * (a2.x - pInt.x) + (a1.y - pInt.y) * (a2.y - pInt.y);
+  if (dotEnds < -1e-4) {
+    const proj = projectPointOnSegment(clickPt, a1, a2);
+    const dotClickA1 =
+      (proj.x - pInt.x) * (a1.x - pInt.x) +
+      (proj.y - pInt.y) * (a1.y - pInt.y);
+    if (dotClickA1 >= 0) {
+      return { keepPt: a1, trimPt: a2, moveFirstEndpoint: false };
+    } else {
+      return { keepPt: a2, trimPt: a1, moveFirstEndpoint: true };
+    }
+  }
+  const d1 = dist(a1, pInt);
+  const d2 = dist(a2, pInt);
+  if (d1 >= d2) {
+    return { keepPt: a1, trimPt: a2, moveFirstEndpoint: false };
+  } else {
+    return { keepPt: a2, trimPt: a1, moveFirstEndpoint: true };
+  }
+}
+
+function computeCornerOperation(
+  mode: 'chamfer' | 'fillet',
+  param: number,
+  firstEnt: CadEntity,
+  firstClickPt: Point,
+  secondEnt: CadEntity,
+  secondClickPt: Point
+): CornerOperationResult | null {
+  const segs1 = getEntitySegments(firstEnt);
+  const segs2 = getEntitySegments(secondEnt);
+  if (segs1.length === 0 || segs2.length === 0) return null;
+
+  const idx1 = findClosestSegmentIndex(segs1, firstClickPt);
+  let idx2 = findClosestSegmentIndex(segs2, secondClickPt);
+
+  // If clicking/hovering on the same multi-segment entity (e.g. rectangle/polygon/polyline) and same segment,
+  // pick the adjacent segment sharing the corner closest to secondClickPt
+  if (firstEnt.id === secondEnt.id && idx1 === idx2) {
+    if (segs1.length < 2) return null;
+    const [sA, sB] = segs1[idx1];
+    const targetCorner =
+      dist(secondClickPt, sA) < dist(secondClickPt, sB) ? sA : sB;
+    let adjIdx = -1;
+    let adjDist = Infinity;
+    for (let i = 0; i < segs1.length; i++) {
+      if (i === idx1) continue;
+      const d = Math.min(
+        dist(segs1[i][0], targetCorner),
+        dist(segs1[i][1], targetCorner)
+      );
+      if (d < adjDist) {
+        adjDist = d;
+        adjIdx = i;
+      }
+    }
+    if (adjIdx === -1) return null;
+    idx2 = adjIdx;
+  }
+
+  const [a1, a2] = segs1[idx1];
+  const [b1, b2] = segs2[idx2];
+
+  const pInt = infiniteLineIntersection(a1, a2, b1, b2);
+  if (!pInt) return null;
+  if (dist(a1, pInt) > 50000 || dist(b1, pInt) > 50000) return null;
+
+  const end1 = selectKeepAndTrimEndpoints(a1, a2, pInt, firstClickPt);
+  const end2 = selectKeepAndTrimEndpoints(b1, b2, pInt, secondClickPt);
+
+  const len1 = dist(pInt, end1.keepPt);
+  const len2 = dist(pInt, end2.keepPt);
+  if (len1 < 1e-3 || len2 < 1e-3) return null;
+
+  const u1: Point = {
+    x: (end1.keepPt.x - pInt.x) / len1,
+    y: (end1.keepPt.y - pInt.y) / len1,
+  };
+  const u2: Point = {
+    x: (end2.keepPt.x - pInt.x) / len2,
+    y: (end2.keepPt.y - pInt.y) / len2,
+  };
+
+  const cosTheta = Math.max(-1, Math.min(1, u1.x * u2.x + u1.y * u2.y));
+  const theta = Math.acos(cosTheta);
+  if (theta < 1e-3 || Math.abs(Math.PI - theta) < 1e-3) return null;
+
+  let t1: Point;
+  let t2: Point;
+  let cornerEntity: CadEntity | null = null;
+  const nowId = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+  if (mode === 'chamfer') {
+    const d = Math.max(0, param);
+    if (d >= len1 - 1e-3 || d >= len2 - 1e-3) return null;
+    t1 = { x: pInt.x + u1.x * d, y: pInt.y + u1.y * d };
+    t2 = { x: pInt.x + u2.x * d, y: pInt.y + u2.y * d };
+    if (d > 1e-4 && dist(t1, t2) > 1e-4) {
+      cornerEntity = {
+        id: `chamfer_${nowId}`,
+        type: 'line',
+        layerId: firstEnt.layerId,
+        color: firstEnt.color,
+        lineType: firstEnt.lineType,
+        lineWeight: firstEnt.lineWeight,
+        p1: t1,
+        p2: t2,
+      };
+    }
+  } else {
+    const r = Math.max(0, param);
+    if (r <= 1e-4) {
+      t1 = pInt;
+      t2 = pInt;
+    } else {
+      const tanHalf = Math.tan(theta / 2);
+      const sinHalf = Math.sin(theta / 2);
+      if (tanHalf < 1e-5 || sinHalf < 1e-5) return null;
+      const tangentDist = r / tanHalf;
+      if (tangentDist >= len1 - 1e-3 || tangentDist >= len2 - 1e-3) {
+        return null;
+      }
+      t1 = {
+        x: pInt.x + u1.x * tangentDist,
+        y: pInt.y + u1.y * tangentDist,
+      };
+      t2 = {
+        x: pInt.x + u2.x * tangentDist,
+        y: pInt.y + u2.y * tangentDist,
+      };
+      const bx = u1.x + u2.x;
+      const by = u1.y + u2.y;
+      const bLen = Math.hypot(bx, by);
+      if (bLen < 1e-5) return null;
+      const bisector = { x: bx / bLen, y: by / bLen };
+      const centerDist = r / sinHalf;
+      const center: Point = {
+        x: pInt.x + bisector.x * centerDist,
+        y: pInt.y + bisector.y * centerDist,
+      };
+      const arcMid: Point = {
+        x: center.x - bisector.x * r,
+        y: center.y - bisector.y * r,
+      };
+      const arcData = arcFromThreePoints(t1, arcMid, t2);
+      if (!arcData) return null;
+      cornerEntity = {
+        id: `fillet_${nowId}`,
+        type: 'arc',
+        layerId: firstEnt.layerId,
+        color: firstEnt.color,
+        lineType: firstEnt.lineType,
+        lineWeight: firstEnt.lineWeight,
+        center: arcData.center,
+        radius: arcData.radius,
+        startAngle: arcData.startAngle,
+        endAngle: arcData.endAngle,
+        p1: t1,
+        p2: arcMid,
+        p3: t2,
+      };
+    }
+  }
+
+  const trimmedSegments: Array<[Point, Point]> = [
+    [t1, pInt],
+    [t2, pInt],
+  ];
+
+  const buildUpdatedLinesForEntity = (
+    ent: CadEntity,
+    segs: Array<[Point, Point]>,
+    modMap: Map<number, { moveFirst: boolean; newPt: Point }>
+  ): CadEntity[] => {
+    if (ent.type === 'line' && segs.length === 1 && modMap.has(0)) {
+      const mod = modMap.get(0)!;
+      return [
+        mod.moveFirst
+          ? { ...ent, p1: mod.newPt }
+          : { ...ent, p2: mod.newPt },
+      ];
+    }
+    return segs.map(([s1, s2], i) => {
+      const mod = modMap.get(i);
+      const p1 = mod ? (mod.moveFirst ? mod.newPt : s1) : s1;
+      const p2 = mod ? (mod.moveFirst ? s2 : mod.newPt) : s2;
+      return {
+        id: `${ent.id}_seg_${i}_${nowId}`,
+        type: 'line',
+        layerId: ent.layerId,
+        color: ent.color,
+        lineType: ent.lineType,
+        lineWeight: ent.lineWeight,
+        p1,
+        p2,
+      };
+    });
+  };
+
+  if (firstEnt.id === secondEnt.id) {
+    const modMap = new Map<number, { moveFirst: boolean; newPt: Point }>();
+    modMap.set(idx1, { moveFirst: end1.moveFirstEndpoint, newPt: t1 });
+    modMap.set(idx2, { moveFirst: end2.moveFirstEndpoint, newPt: t2 });
+    const updatedLines = buildUpdatedLinesForEntity(firstEnt, segs1, modMap);
+    return {
+      intersectionPoint: pInt,
+      t1,
+      t2,
+      trimmedSegments,
+      cornerEntity,
+      removedEntityIds: [firstEnt.id],
+      replacementEntities: cornerEntity
+        ? [...updatedLines, cornerEntity]
+        : updatedLines,
+    };
+  } else {
+    const modMap1 = new Map<number, { moveFirst: boolean; newPt: Point }>();
+    modMap1.set(idx1, { moveFirst: end1.moveFirstEndpoint, newPt: t1 });
+    const modMap2 = new Map<number, { moveFirst: boolean; newPt: Point }>();
+    modMap2.set(idx2, { moveFirst: end2.moveFirstEndpoint, newPt: t2 });
+
+    const lines1 = buildUpdatedLinesForEntity(firstEnt, segs1, modMap1);
+    const lines2 = buildUpdatedLinesForEntity(secondEnt, segs2, modMap2);
+
+    return {
+      intersectionPoint: pInt,
+      t1,
+      t2,
+      trimmedSegments,
+      cornerEntity,
+      removedEntityIds: [firstEnt.id, secondEnt.id],
+      replacementEntities: cornerEntity
+        ? [...lines1, ...lines2, cornerEntity]
+        : [...lines1, ...lines2],
+    };
+  }
+}
+
+/**
+ * Compute Chamfer (倒角) between two lines or polyline/rectangle edges.
+ */
+export function computeChamferResult(
+  firstEnt: CadEntity,
+  firstClickPt: Point,
+  secondEnt: CadEntity,
+  secondClickPt: Point,
+  chamferDistance: number
+): CornerOperationResult | null {
+  return computeCornerOperation(
+    'chamfer',
+    chamferDistance,
+    firstEnt,
+    firstClickPt,
+    secondEnt,
+    secondClickPt
+  );
+}
+
+/**
+ * Compute Fillet (導圓角) between two lines or polyline/rectangle edges.
+ */
+export function computeFilletResult(
+  firstEnt: CadEntity,
+  firstClickPt: Point,
+  secondEnt: CadEntity,
+  secondClickPt: Point,
+  filletRadius: number
+): CornerOperationResult | null {
+  return computeCornerOperation(
+    'fillet',
+    filletRadius,
+    firstEnt,
+    firstClickPt,
+    secondEnt,
+    secondClickPt
+  );
 }
 
 /**

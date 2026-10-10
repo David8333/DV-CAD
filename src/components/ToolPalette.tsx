@@ -37,6 +37,10 @@ interface ToolPaletteProps {
   onChangeOffsetDistance: (dist: number) => void;
   hatchPitch: number;
   onChangeHatchPitch: (pitch: number) => void;
+  chamferDistance: number;
+  onChangeChamferDistance: (dist: number) => void;
+  filletRadius: number;
+  onChangeFilletRadius: (radius: number) => void;
   selectedCount: number;
   hasClipboard: boolean;
   onCopyClipboard: () => void;
@@ -97,6 +101,66 @@ export const HatchIcon: React.FC<{ className?: string }> = ({
     <line x1="4" y1="21" x2="21" y2="4" />
     <line x1="10" y1="21" x2="21" y2="10" />
     <line x1="16" y1="21" x2="21" y2="16" />
+  </svg>
+);
+
+/**
+ * Custom Chamfer Icon (倒角圖示): shows two meeting edges with a 45° beveled chamfer corner
+ */
+export const ChamferIcon: React.FC<{ className?: string }> = ({
+  className = 'w-4 h-4',
+}) => (
+  <svg
+    className={className}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M 4 20 L 4 11" />
+    <path d="M 11 4 L 20 4" />
+    <line x1="4" y1="11" x2="11" y2="4" stroke="#38BDF8" strokeWidth="2.3" />
+    <path
+      d="M 4 11 L 4 4 L 11 4"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeDasharray="2,2"
+      opacity="0.45"
+    />
+  </svg>
+);
+
+/**
+ * Custom Fillet Icon (導圓角圖示): shows two meeting edges joined by a smooth tangent rounded corner arc
+ */
+export const FilletIcon: React.FC<{ className?: string }> = ({
+  className = 'w-4 h-4',
+}) => (
+  <svg
+    className={className}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M 4 20 L 4 12" />
+    <path d="M 12 4 L 20 4" />
+    <path
+      d="M 4 12 A 8 8 0 0 1 12 4"
+      stroke="#38BDF8"
+      strokeWidth="2.3"
+    />
+    <path
+      d="M 4 12 L 4 4 L 12 4"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeDasharray="2,2"
+      opacity="0.45"
+    />
   </svg>
 );
 
@@ -173,6 +237,20 @@ const DRAW_TOOLS: ToolItem[] = [
     label: '剖面填充 (45°)',
     shortcut: 'BH',
     icon: <HatchIcon className="w-4 h-4" />,
+    highlight: true,
+  },
+  {
+    id: 'chamfer',
+    label: '倒角',
+    shortcut: 'CHA',
+    icon: <ChamferIcon className="w-4 h-4" />,
+    highlight: true,
+  },
+  {
+    id: 'fillet',
+    label: '導圓角',
+    shortcut: 'F',
+    icon: <FilletIcon className="w-4 h-4" />,
     highlight: true,
   },
   {
@@ -266,6 +344,10 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
   onChangeOffsetDistance,
   hatchPitch,
   onChangeHatchPitch,
+  chamferDistance,
+  onChangeChamferDistance,
+  filletRadius,
+  onChangeFilletRadius,
   selectedCount,
   hasClipboard,
   onCopyClipboard,
@@ -521,6 +603,71 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
             </div>
           </div>
 
+          {/* Chamfer (倒角 CHA) & Fillet (導圓角 F) Settings Box */}
+          <div className="mt-2 p-2.5 bg-slate-900/90 border border-sky-500/40 rounded-lg space-y-2">
+            <div className="flex items-center justify-between gap-1">
+              <button
+                type="button"
+                onClick={() => onSelectTool('chamfer')}
+                className={`flex-1 flex items-center justify-center gap-1 py-1 px-1.5 rounded text-[11px] font-semibold border transition-colors ${
+                  activeTool === 'chamfer'
+                    ? 'bg-sky-600 text-white border-sky-400'
+                    : 'bg-slate-950 text-sky-300 border-slate-800 hover:border-sky-500/50'
+                }`}
+              >
+                <ChamferIcon className="w-3.5 h-3.5" />
+                <span>倒角 (CHA)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onSelectTool('fillet')}
+                className={`flex-1 flex items-center justify-center gap-1 py-1 px-1.5 rounded text-[11px] font-semibold border transition-colors ${
+                  activeTool === 'fillet'
+                    ? 'bg-sky-600 text-white border-sky-400'
+                    : 'bg-slate-950 text-sky-300 border-slate-800 hover:border-sky-500/50'
+                }`}
+              >
+                <FilletIcon className="w-3.5 h-3.5" />
+                <span>導圓角 (F)</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5 font-mono">
+              <div>
+                <label className="block text-[10px] text-slate-400 font-sans mb-0.5">
+                  倒角距離 D (mm)
+                </label>
+                <input
+                  type="number"
+                  min={0.1}
+                  step="0.5"
+                  value={chamferDistance}
+                  onChange={(e) =>
+                    onChangeChamferDistance(
+                      Math.max(0.1, Number(e.target.value))
+                    )
+                  }
+                  className="w-full px-2 py-1 text-right text-xs bg-slate-950 border border-sky-500/60 rounded text-sky-200 focus:outline-none focus:border-sky-400"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] text-slate-400 font-sans mb-0.5">
+                  導圓角半徑 R (mm)
+                </label>
+                <input
+                  type="number"
+                  min={0.1}
+                  step="0.5"
+                  value={filletRadius}
+                  onChange={(e) =>
+                    onChangeFilletRadius(Math.max(0.1, Number(e.target.value)))
+                  }
+                  className="w-full px-2 py-1 text-right text-xs bg-slate-950 border border-sky-500/60 rounded text-sky-200 focus:outline-none focus:border-sky-400"
+                />
+              </div>
+            </div>
+          </div>
+
           {/* 45° Section Hatch Tool & Pitch Control Box */}
           <div className="mt-2 p-2.5 bg-slate-900/90 border border-emerald-500/40 rounded-lg space-y-2">
             <div className="flex items-center justify-between">
@@ -536,10 +683,13 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
                 className="flex items-center gap-1.5 text-[11px] font-semibold text-emerald-300 hover:text-emerald-200"
               >
                 <HatchIcon className="w-3.5 h-3.5 text-emerald-400" />
-                <span>45° 斜線填充 PITCH 設定</span>
+                <span>45° 剖面填充 PITCH</span>
               </button>
-              <span className="text-[10px] font-mono text-emerald-400/80">
-                45° 斜線
+              <span
+                className="px-1.5 py-0.5 rounded bg-sky-950/80 border border-sky-500/40 text-[9px] font-mono text-sky-300"
+                title="剖面填充直接採用 A-WALL (建築主牆/輪廓) 圖層"
+              >
+                建築主牆/輪廓層
               </span>
             </div>
             <div className="flex items-center justify-between gap-2">

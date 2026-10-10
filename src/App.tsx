@@ -274,6 +274,8 @@ export default function App() {
   const [polygonSides, setPolygonSides] = useState<number>(6);
   const [offsetDistance, setOffsetDistance] = useState<number>(20);
   const [hatchPitch, setHatchPitch] = useState<number>(5);
+  const [chamferDistance, setChamferDistance] = useState<number>(10);
+  const [filletRadius, setFilletRadius] = useState<number>(10);
 
   // Drafting settings
   const [settings, setSettings] = useState<DraftingSettings>({
@@ -469,7 +471,9 @@ export default function App() {
         circle: 'CIRCLE 圓形模式 (快捷鍵 C) — 請點選圓心與半徑',
         arc: 'ARC 三點圓弧模式 (快捷鍵 A) — 依序點選 1.起點 P1、2.弧上第二點 P2、3.終點 P3',
         polygon: 'POLYGON 正多邊形模式 (快捷鍵 G) — 請點選中心與外接圓半徑',
-        hatch: `HATCH 45° 斜線剖面填充模式 (快捷鍵 BH - 目前 PITCH = ${hatchPitch} mm) — 點選圓形、矩形、多邊形或封閉線段自動填充，或點選兩角點拉框填充`,
+        hatch: `HATCH 45° 斜線剖面填充模式 (快捷鍵 BH - 直接採用「建築主牆/輪廓」圖層，PITCH = ${hatchPitch} mm) — 點選封閉圖形自動填充或拉框填充`,
+        chamfer: `CHAMFER 倒角模式 (快捷鍵 CHA - 目前倒角距離 D = ${chamferDistance} mm) — 請依序點選兩條相交直線或矩形相鄰邊建立倒角`,
+        fillet: `FILLET 導圓角模式 (快捷鍵 F - 目前圓角半徑 R = ${filletRadius} mm) — 請依序點選兩條相交直線或矩形相鄰邊建立導圓角`,
         dimension: 'DIMLINEAR 標註尺寸模式 (快捷鍵 D) — 靠近既有標註線時可自動相互對齊',
         text: 'TEXT 文字標註模式 (快捷鍵 T) — 請點選文字插入位置',
         measure: 'DIST 距離與角度測量工具 (快捷鍵 K)',
@@ -485,36 +489,50 @@ export default function App() {
       };
       logCommand(`指令切換: ${toolNames[tool]}`, 'command');
     },
-    [hatchPitch, logCommand, offsetDistance, rectangleMode]
+    [
+      chamferDistance,
+      filletRadius,
+      hatchPitch,
+      logCommand,
+      offsetDistance,
+      rectangleMode,
+    ]
   );
 
-  // One-click 45° Hatch for currently selected entities
+  // One-click 45° Hatch for currently selected entities (directly using A-WALL 建築主牆/輪廓 layer)
   const handleHatchSelected = useCallback(() => {
     if (selectedIds.length === 0) {
       handleSelectTool('hatch');
       return;
     }
+    const wallLayerId =
+      layers.find(
+        (l) =>
+          l.id === 'WALL' ||
+          l.name.includes('建築主牆') ||
+          l.name.includes('輪廓')
+      )?.id || 'WALL';
     const selectedEnts = entities.filter((e) => selectedIds.includes(e.id));
     const createdHatches = createHatchFromEntities(
       selectedEnts,
       hatchPitch,
-      activeLayerId
+      wallLayerId
     );
     if (createdHatches.length > 0) {
       pushEntities([...entities, ...createdHatches]);
       setSelectedIds(createdHatches.map((h) => h.id));
       logCommand(
-        `HATCH 已為已選取的圖形產生 ${createdHatches.length} 組 45° 斜線剖面填充 (PITCH = ${hatchPitch} mm)！`,
+        `HATCH 已於「建築主牆/輪廓」圖層為選取圖形產生 ${createdHatches.length} 組 45° 斜線剖面填充 (PITCH = ${hatchPitch} mm)！`,
         'success'
       );
     } else {
       handleSelectTool('hatch');
     }
   }, [
-    activeLayerId,
     entities,
     handleSelectTool,
     hatchPitch,
+    layers,
     logCommand,
     pushEntities,
     selectedIds,
@@ -1020,6 +1038,12 @@ export default function App() {
           handleSelectTool('hatch');
           return;
         }
+        if (combo === 'CH') {
+          e.preventDefault();
+          clearPrefix();
+          handleSelectTool('chamfer');
+          return;
+        }
       }
 
       // 3. Single-key shortcuts (and start prefix if it's J, T, E, C, A, Z, B)
@@ -1147,6 +1171,11 @@ export default function App() {
           clearPrefix();
           handleExplodeSelected();
           break;
+        case 'f':
+          e.preventDefault();
+          clearPrefix();
+          handleSelectTool('fillet');
+          break;
         default:
           clearPrefix();
           break;
@@ -1240,6 +1269,14 @@ export default function App() {
       填充: 'hatch',
       斜線填充: 'hatch',
       剖面線: 'hatch',
+      CHA: 'chamfer',
+      CH: 'chamfer',
+      CHAMFER: 'chamfer',
+      倒角: 'chamfer',
+      F: 'fillet',
+      FILLET: 'fillet',
+      導圓角: 'fillet',
+      圓角: 'fillet',
       D: 'dimension',
       DIM: 'dimension',
       DIMLINEAR: 'dimension',
@@ -2106,6 +2143,10 @@ export default function App() {
               onChangeOffsetDistance={setOffsetDistance}
               hatchPitch={hatchPitch}
               onChangeHatchPitch={setHatchPitch}
+              chamferDistance={chamferDistance}
+              onChangeChamferDistance={setChamferDistance}
+              filletRadius={filletRadius}
+              onChangeFilletRadius={setFilletRadius}
               selectedCount={selectedIds.length}
               hasClipboard={clipboard.length > 0}
               onCopyClipboard={handleCopyClipboard}
@@ -2147,6 +2188,10 @@ export default function App() {
           onChangeOffsetDistance={setOffsetDistance}
           hatchPitch={hatchPitch}
           onChangeHatchPitch={setHatchPitch}
+          chamferDistance={chamferDistance}
+          onChangeChamferDistance={setChamferDistance}
+          filletRadius={filletRadius}
+          onChangeFilletRadius={setFilletRadius}
           pan={pan}
           zoom={zoom}
           onPanZoomChange={(nextPan, nextZoom) => {
@@ -2184,6 +2229,13 @@ export default function App() {
                   prev.map((l) => (l.id === updatedLayer.id ? updatedLayer : l))
                 )
               }
+              onToggleAllLayers={(visible) => {
+                setLayers((prev) => prev.map((l) => ({ ...l, visible })));
+                logCommand(
+                  visible ? '已一鍵開啟所有圖層顯示' : '已一鍵關閉所有圖層顯示',
+                  'info'
+                );
+              }}
               onAddLayer={(name, color) => {
                 const newId = `L_${Date.now()}`;
                 setLayers((prev) => [

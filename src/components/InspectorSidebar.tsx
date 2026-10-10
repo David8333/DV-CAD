@@ -38,6 +38,7 @@ interface InspectorSidebarProps {
   activeLayerId: string;
   onSelectLayer: (id: string) => void;
   onUpdateLayer: (layer: CadLayer) => void;
+  onToggleAllLayers: (visible: boolean) => void;
   onAddLayer: (name: string, color: string) => void;
   onDeleteLayer: (id: string) => void;
   entities: CadEntity[];
@@ -68,6 +69,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
   activeLayerId,
   onSelectLayer,
   onUpdateLayer,
+  onToggleAllLayers,
   onAddLayer,
   onDeleteLayer,
   entities,
@@ -1559,6 +1561,49 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                   <Plus className="w-4 h-4" />
                 </button>
               </div>
+            </div>
+
+            {/* Toggle All Layers On/Off Control Bar */}
+            <div className="bg-slate-900/80 border border-slate-800 rounded-lg p-2.5 flex items-center justify-between gap-2">
+              <div className="flex flex-col">
+                <span className="text-xs font-semibold text-slate-200">
+                  所有圖層顯示控制
+                </span>
+                <span className="text-[10px] font-mono text-slate-400">
+                  目前開啟：{layers.filter((l) => l.visible).length} / {layers.length} 層
+                </span>
+              </div>
+              {(() => {
+                const allVisible = layers.every((l) => l.visible);
+                return (
+                  <button
+                    type="button"
+                    onClick={() => onToggleAllLayers(!allVisible)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
+                      allVisible
+                        ? 'bg-amber-500/20 text-amber-200 border-amber-500/50 hover:bg-amber-500/30'
+                        : 'bg-emerald-600 text-white border-emerald-400 hover:bg-emerald-500'
+                    }`}
+                    title={
+                      allVisible
+                        ? '點擊一鍵關閉所有圖層顯示'
+                        : '點擊一鍵開啟所有圖層顯示'
+                    }
+                  >
+                    {allVisible ? (
+                      <>
+                        <EyeOff className="w-3.5 h-3.5" />
+                        <span>關閉所有圖層</span>
+                      </>
+                    ) : (
+                      <>
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>開啟所有圖層</span>
+                      </>
+                    )}
+                  </button>
+                );
+              })()}
             </div>
 
             <div className="space-y-1.5">

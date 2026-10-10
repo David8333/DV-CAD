@@ -168,6 +168,8 @@ export type ToolType =
   | 'arc'
   | 'polygon'
   | 'hatch'
+  | 'chamfer'
+  | 'fillet'
   | 'dimension'
   | 'text'
   | 'measure'
