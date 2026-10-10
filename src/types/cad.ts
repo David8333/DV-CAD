@@ -182,7 +182,16 @@ export type ToolType =
   | 'offset'
   | 'trim'
   | 'extend'
-  | 'join';
+  | 'join'
+  | 'pdfWindow';
+
+export interface PdfWindowBounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+  tabId?: string;
+}
 
 export interface DraftingSettings {
   grid: boolean;

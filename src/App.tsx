@@ -28,6 +28,8 @@ import {
   Eye,
   EyeOff,
   FileCode2,
+  FileText,
+  Crop,
   Type,
   Copy,
   Layers,
@@ -40,6 +42,7 @@ import {
   CommandLogItem,
   DraftingSettings,
   HatchMode,
+  PdfWindowBounds,
   Point,
   RectangleMode,
   SnapPoint,
@@ -50,6 +53,13 @@ import { CadViewport } from './components/CadViewport';
 import { ToolPalette, HatchIcon } from './components/ToolPalette';
 import { InspectorSidebar } from './components/InspectorSidebar';
 import { CommandDock } from './components/CommandDock';
+import {
+  generateCadPdfBlob,
+  PdfColorTheme,
+  PdfPageInput,
+  PdfPaperFormat,
+  renderCadPageToCanvas,
+} from './utils/pdfExporter';
 import {
   alignSelectedDimensions,
   angleDegrees,
@@ -513,8 +523,28 @@ export default function App() {
 
   // Modals state
   const [activeModal, setActiveModal] = useState<
-    'templates' | 'shortcuts' | 'array' | 'export' | null
+    'templates' | 'shortcuts' | 'array' | 'export' | 'pdf' | null
   >(null);
+
+  // PDF Export state (匯出畫布分頁 或 窗選要匯出的區域)
+  const [pdfExportScope, setPdfExportScope] = useState<'tabs' | 'window'>(
+    'tabs'
+  );
+  const [pdfSelectedTabIds, setPdfSelectedTabIds] = useState<string[]>([
+    'tab-1',
+  ]);
+  const [pdfWindowBounds, setPdfWindowBounds] =
+    useState<PdfWindowBounds | null>(null);
+  const [pdfPaperFormat, setPdfPaperFormat] =
+    useState<PdfPaperFormat>('a4-landscape');
+  const [pdfColorTheme, setPdfColorTheme] =
+    useState<PdfColorTheme>('white-color');
+  const [pdfIncludeTitleBlock, setPdfIncludeTitleBlock] =
+    useState<boolean>(true);
+  const [pdfIncludeGrid, setPdfIncludeGrid] = useState<boolean>(false);
+  const [pdfPreviewDataUrl, setPdfPreviewDataUrl] = useState<string | null>(
+    null
+  );
 
   // Array Modal parameters
   const [arrayMode, setArrayMode] = useState<'rect' | 'polar'>('rect');
@@ -2179,6 +2209,192 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  const downloadBlob = useCallback((blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, []);
+
+  // Build PdfPageInput array for the current PDF export configuration
+  const buildPdfPages = useCallback(
+    (
+      scope: 'tabs' | 'window',
+      overrideWindowBounds?: PdfWindowBounds | null,
+      overrideTabIds?: string[]
+    ): PdfPageInput[] => {
+      if (scope === 'window') {
+        const bounds =
+          overrideWindowBounds !== undefined
+            ? overrideWindowBounds
+            : pdfWindowBounds;
+        const targetTabId = bounds?.tabId || activeCanvasTabId;
+        const tab =
+          canvasTabs.find((t) => t.id === targetTabId) || currentCanvasTab;
+        const tabEntities =
+          tab.id === activeCanvasTabId
+            ? entities
+            : tab.history[tab.historyIndex] || [];
+        const tabLayers = tab.id === activeCanvasTabId ? layers : tab.layers;
+        return [
+          {
+            title: `${tab.name} (窗選區域)`,
+            subtitle: bounds
+              ? `窗選範圍: (${bounds.minX.toFixed(1)}, ${bounds.minY.toFixed(1)}) ~ (${bounds.maxX.toFixed(1)}, ${bounds.maxY.toFixed(1)}) mm`
+              : undefined,
+            entities: tabEntities,
+            layers: tabLayers,
+            windowBounds: bounds,
+          },
+        ];
+      }
+
+      const targetIds =
+        overrideTabIds && overrideTabIds.length > 0
+          ? overrideTabIds
+          : pdfSelectedTabIds.length > 0
+            ? pdfSelectedTabIds
+            : [activeCanvasTabId];
+
+      const selectedTabs = canvasTabs.filter((t) => targetIds.includes(t.id));
+      const finalTabs =
+        selectedTabs.length > 0 ? selectedTabs : [currentCanvasTab];
+
+      return finalTabs.map((tab) => {
+        const tabEntities =
+          tab.id === activeCanvasTabId
+            ? entities
+            : tab.history[tab.historyIndex] || [];
+        const tabLayers = tab.id === activeCanvasTabId ? layers : tab.layers;
+        return {
+          title: tab.name,
+          subtitle: `畫布分頁全圖匯出 · 圖元數: ${tabEntities.length}`,
+          entities: tabEntities,
+          layers: tabLayers,
+          windowBounds: null,
+        };
+      });
+    },
+    [
+      activeCanvasTabId,
+      canvasTabs,
+      currentCanvasTab,
+      entities,
+      layers,
+      pdfSelectedTabIds,
+      pdfWindowBounds,
+    ]
+  );
+
+  // Update live preview image when PDF modal is open
+  useEffect(() => {
+    if (activeModal !== 'pdf') return;
+    try {
+      const pages = buildPdfPages(pdfExportScope);
+      if (pages.length > 0) {
+        const previewCanvas = renderCadPageToCanvas(
+          pages[0],
+          {
+            paperFormat: pdfPaperFormat,
+            colorTheme: pdfColorTheme,
+            includeTitleBlock: pdfIncludeTitleBlock,
+            includeGrid: pdfIncludeGrid,
+          },
+          0,
+          pages.length,
+          true
+        );
+        setPdfPreviewDataUrl(previewCanvas.toDataURL('image/jpeg', 0.88));
+      }
+    } catch {
+      // Ignore preview generation errors
+    }
+  }, [
+    activeModal,
+    buildPdfPages,
+    pdfColorTheme,
+    pdfExportScope,
+    pdfIncludeGrid,
+    pdfIncludeTitleBlock,
+    pdfPaperFormat,
+  ]);
+
+  // Execute PDF Export (either by selected Canvas Tabs or by Window-Selected Area)
+  const handleExportPdf = useCallback(
+    (
+      overrideScope?: 'tabs' | 'window',
+      overrideWindowBounds?: PdfWindowBounds | null,
+      overrideTabIds?: string[]
+    ) => {
+      const scope = overrideScope || pdfExportScope;
+      const bounds =
+        overrideWindowBounds !== undefined
+          ? overrideWindowBounds
+          : pdfWindowBounds;
+
+      if (scope === 'window' && !bounds) {
+        setActiveModal(null);
+        setPdfExportScope('window');
+        setDrawingPoints([]);
+        setActiveTool('pdfWindow');
+        logCommand(
+          'PDF 窗選匯出：請在畫布上點選（或拖曳框選）要匯出為 PDF 的區域對角點 P1 與 P2',
+          'info'
+        );
+        return;
+      }
+
+      const pages = buildPdfPages(scope, bounds, overrideTabIds);
+      const pdfBlob = generateCadPdfBlob(pages, {
+        paperFormat: pdfPaperFormat,
+        colorTheme: pdfColorTheme,
+        includeTitleBlock: pdfIncludeTitleBlock,
+        includeGrid: pdfIncludeGrid,
+      });
+
+      const fileTag =
+        scope === 'window'
+          ? `${currentCanvasTab.name}_窗選區域`
+          : pages.length > 1
+            ? `畫布分頁_${pages.length}頁合併`
+            : pages[0].title;
+      const safeFileTag = fileTag.replace(/\s+/g, '_');
+      downloadBlob(pdfBlob, `vektorcad_${safeFileTag}_${Date.now()}.pdf`);
+
+      logCommand(
+        scope === 'window' && bounds
+          ? `已成功匯出窗選區域 PDF 圖檔！（範圍 ${(bounds.maxX - bounds.minX).toFixed(1)} × ${(bounds.maxY - bounds.minY).toFixed(1)} mm）`
+          : `已成功匯出 ${pages.length} 個畫布分頁至 PDF 工程圖檔 (${pages.map((p) => p.title).join('、')})！`,
+        'success'
+      );
+    },
+    [
+      buildPdfPages,
+      currentCanvasTab.name,
+      downloadBlob,
+      logCommand,
+      pdfColorTheme,
+      pdfExportScope,
+      pdfIncludeGrid,
+      pdfIncludeTitleBlock,
+      pdfPaperFormat,
+      pdfWindowBounds,
+    ]
+  );
+
+  const handleStartPdfWindowSelection = useCallback(() => {
+    setActiveModal(null);
+    setPdfExportScope('window');
+    setDrawingPoints([]);
+    setActiveTool('pdfWindow');
+    logCommand(
+      '已進入「PDF 窗選匯出區域」模式：請在畫布上點選（或按住拖曳）要匯出的區域對角點 P1 與 P2，完成後將自動匯出 PDF！',
+      'info'
+    );
+  }, [logCommand]);
+
   // Verify daily password
   const handlePasswordSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -2375,11 +2591,24 @@ export default function App() {
         <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
+            onClick={() => {
+              setPdfSelectedTabIds((prev) =>
+                prev.length === 0 ? [activeCanvasTabId] : prev
+              );
+              setActiveModal('pdf');
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-rose-600 rounded-lg hover:bg-rose-500 transition-colors whitespace-nowrap shrink-0 shadow-sm"
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span>匯出 PDF (分頁/窗選)</span>
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveModal('export')}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-sky-600 rounded-lg hover:bg-sky-500 transition-colors whitespace-nowrap shrink-0"
           >
             <FileCode2 className="w-3.5 h-3.5" />
-            <span>匯入 / 輸出 (DXF·DWG)</span>
+            <span>匯入 / 輸出 (DXF·DWG·PDF)</span>
           </button>
           <button
             type="button"
@@ -2931,6 +3160,35 @@ export default function App() {
                     : ''}
             </span>
           </button>
+
+          <div className="h-3.5 w-px bg-slate-800 mx-0.5" />
+
+          <button
+            type="button"
+            onClick={() => {
+              setPdfExportScope('tabs');
+              setPdfSelectedTabIds([activeCanvasTabId]);
+              setActiveModal('pdf');
+            }}
+            title="選擇畫布分頁匯出 PDF"
+            className="flex items-center gap-1 px-2 py-0.5 rounded bg-rose-950/60 text-rose-200 border border-rose-500/40 hover:bg-rose-900/60 text-[11px] font-medium whitespace-nowrap"
+          >
+            <FileText className="w-3 h-3 text-rose-400" />
+            <span>匯出分頁 PDF</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleStartPdfWindowSelection}
+            title="在畫布上窗選局部區域匯出 PDF"
+            className={`flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] font-medium transition-colors whitespace-nowrap ${
+              activeTool === 'pdfWindow'
+                ? 'bg-amber-500 text-slate-950 border-amber-300 font-semibold'
+                : 'bg-amber-950/50 text-amber-200 border-amber-500/40 hover:bg-amber-900/50'
+            }`}
+          >
+            <Crop className="w-3 h-3" />
+            <span>窗選匯出 PDF</span>
+          </button>
         </div>
       </div>
 
@@ -3033,6 +3291,16 @@ export default function App() {
           copySourceEntities={
             crossTabCopyEntities.length > 0 ? crossTabCopyEntities : clipboard
           }
+          onPdfWindowSelected={(bounds) => {
+            const nextBounds: PdfWindowBounds = {
+              ...bounds,
+              tabId: activeCanvasTabId,
+            };
+            setPdfWindowBounds(nextBounds);
+            setPdfExportScope('window');
+            handleExportPdf('window', nextBounds);
+            setActiveModal('pdf');
+          }}
         />
 
         {/* Right Inspector & Layers Sidebar */}
@@ -3653,6 +3921,45 @@ export default function App() {
                   </span>
                 </button>
 
+                <div className="p-3.5 bg-rose-950/25 border border-rose-500/40 rounded-lg space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="font-semibold text-rose-200 flex items-center gap-1.5">
+                        <FileText className="w-4 h-4 text-rose-400" />
+                        <span>匯出標準工程圖 PDF (.PDF)</span>
+                      </div>
+                      <div className="text-slate-400 mt-0.5">
+                        支援選擇單一或多個「畫布分頁」匯出，或在畫布上「窗選區域」匯出 PDF
+                      </div>
+                    </div>
+                    <span className="px-2.5 py-1 font-mono bg-rose-500/20 text-rose-300 rounded shrink-0">
+                      .PDF
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPdfExportScope('tabs');
+                        setPdfSelectedTabIds([activeCanvasTabId]);
+                        setActiveModal('pdf');
+                      }}
+                      className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold transition-colors"
+                    >
+                      <Layers className="w-3.5 h-3.5" />
+                      <span>選擇畫布分頁匯出 PDF</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleStartPdfWindowSelection}
+                      className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-amber-600 hover:bg-amber-500 text-slate-950 font-semibold transition-colors"
+                    >
+                      <Crop className="w-3.5 h-3.5" />
+                      <span>窗選要匯出的區域</span>
+                    </button>
+                  </div>
+                </div>
+
                 <button
                   type="button"
                   onClick={() => {
@@ -3679,6 +3986,341 @@ export default function App() {
                     .JSON
                   </span>
                 </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal 5: Dedicated PDF Export Dialog (支援選擇匯出畫布分頁 或 窗選要匯出的區域) */}
+      {activeModal === 'pdf' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 overflow-y-auto">
+          <div className="w-full max-w-2xl max-h-[92dvh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-2xl p-5 shadow-2xl">
+            <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-rose-500/15 border border-rose-500/40 flex items-center justify-center text-rose-400">
+                  <FileText className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-base font-bold text-slate-100">
+                    匯出 PDF 工程圖面 (支援畫布分頁 / 窗選區域)
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    可選擇匯出指定畫布分頁（支援單頁或多頁合併）或在畫布上窗選局部區域匯出
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveModal(null)}
+                className="px-3 py-1 text-xs bg-slate-800 text-slate-300 hover:text-white rounded-lg"
+              >
+                關閉 (ESC)
+              </button>
+            </div>
+
+            <div className="space-y-4 text-xs">
+              {/* Step 1: Choose Export Mode (匯出畫布分頁 vs 窗選要匯出的區域) */}
+              <div>
+                <label className="block font-semibold text-slate-200 mb-2">
+                  1. 選擇 PDF 匯出範圍模式：
+                </label>
+                <div className="grid grid-cols-2 gap-2 p-1 bg-slate-950 rounded-xl border border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setPdfExportScope('tabs')}
+                    className={`flex items-center justify-center gap-2 py-2.5 px-3 rounded-lg font-semibold transition-colors ${
+                      pdfExportScope === 'tabs'
+                        ? 'bg-rose-600 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <Layers className="w-4 h-4" />
+                    <span>匯出畫布分頁 (1~3 分頁)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPdfExportScope('window')}
+                    className={`flex items-center justify-center gap-2 py-2.5 px-3 rounded-lg font-semibold transition-colors ${
+                      pdfExportScope === 'window'
+                        ? 'bg-amber-500 text-slate-950 shadow-sm'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <Crop className="w-4 h-4" />
+                    <span>窗選要匯出的區域</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Mode A: 匯出畫布分頁 */}
+              {pdfExportScope === 'tabs' && (
+                <div className="p-4 bg-slate-950/90 border border-slate-800 rounded-xl space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-semibold text-sky-300">
+                      勾選要匯出的畫布分頁（可單選或勾選多個分頁合併為多頁 PDF）：
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setPdfSelectedTabIds([activeCanvasTabId])}
+                        className="px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 text-[11px]"
+                      >
+                        僅目前分頁
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPdfSelectedTabIds(canvasTabs.map((t) => t.id))
+                        }
+                        className="px-2 py-1 rounded bg-sky-950/80 hover:bg-sky-900 text-sky-300 border border-sky-500/40 text-[11px]"
+                      >
+                        全選 3 個分頁
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    {canvasTabs.map((tab, idx) => {
+                      const isChecked = pdfSelectedTabIds.includes(tab.id);
+                      const tabEnts =
+                        tab.id === activeCanvasTabId
+                          ? entities
+                          : tab.history[tab.historyIndex] || [];
+                      return (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          onClick={() => {
+                            setPdfSelectedTabIds((prev) => {
+                              if (prev.includes(tab.id)) {
+                                const next = prev.filter((id) => id !== tab.id);
+                                return next.length > 0 ? next : [tab.id];
+                              }
+                              return [...prev, tab.id];
+                            });
+                          }}
+                          className={`flex flex-col justify-between p-3 rounded-xl border text-left transition-all ${
+                            isChecked
+                              ? 'bg-sky-600/20 border-sky-400 text-white shadow-sm'
+                              : 'bg-slate-900/70 border-slate-800 text-slate-400 hover:border-slate-700'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between w-full mb-1.5">
+                            <span className="font-bold text-xs flex items-center gap-1.5">
+                              <span className="font-mono text-[11px] text-sky-400">
+                                #{idx + 1}
+                              </span>
+                              <span>{tab.name}</span>
+                            </span>
+                            <span
+                              className={`w-4 h-4 rounded flex items-center justify-center border ${
+                                isChecked
+                                  ? 'bg-sky-500 border-sky-400 text-white'
+                                  : 'border-slate-600 bg-slate-950'
+                              }`}
+                            >
+                              {isChecked && <Check className="w-3 h-3" />}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between text-[11px] text-slate-400">
+                            <span>圖元數量：{tabEnts.length} 個</span>
+                            {tab.id === activeCanvasTabId && (
+                              <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 text-[10px]">
+                                目前分頁
+                              </span>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Mode B: 窗選要匯出的區域 */}
+              {pdfExportScope === 'window' && (
+                <div className="p-4 bg-amber-950/20 border border-amber-500/40 rounded-xl space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <div className="font-bold text-amber-300 text-sm flex items-center gap-1.5">
+                        <Crop className="w-4 h-4" />
+                        <span>在畫布上窗選要匯出的區域</span>
+                      </div>
+                      <div className="text-slate-300 mt-0.5">
+                        點擊右側按鈕後，於畫布點選兩對角點（或拖曳拉框）即可框選要匯出至 PDF 的局部範圍
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleStartPdfWindowSelection}
+                      className="flex items-center justify-center gap-1.5 px-4 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl shadow-lg shrink-0 transition-colors"
+                    >
+                      <Crop className="w-4 h-4" />
+                      <span>
+                        {pdfWindowBounds ? '重新在畫布窗選區域' : '在畫布窗選區域'}
+                      </span>
+                    </button>
+                  </div>
+
+                  {pdfWindowBounds ? (
+                    <div className="p-3 bg-slate-950/90 border border-amber-500/40 rounded-lg flex flex-wrap items-center justify-between gap-2 font-mono text-[11px]">
+                      <div className="text-amber-200">
+                        已窗選區域：({pdfWindowBounds.minX.toFixed(1)},{' '}
+                        {pdfWindowBounds.minY.toFixed(1)}) ~ (
+                        {pdfWindowBounds.maxX.toFixed(1)},{' '}
+                        {pdfWindowBounds.maxY.toFixed(1)}) mm
+                      </div>
+                      <div className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold">
+                        尺寸：
+                        {(pdfWindowBounds.maxX - pdfWindowBounds.minX).toFixed(1)}{' '}
+                        ×{' '}
+                        {(pdfWindowBounds.maxY - pdfWindowBounds.minY).toFixed(1)}{' '}
+                        mm
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-3 bg-slate-950/80 border border-slate-800 rounded-lg text-slate-400 text-center">
+                      尚未窗選區域 — 請點擊上方「在畫布窗選區域」按鈕到畫布上框選範圍
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Step 2: Paper Size, Background Color Theme & Title Block Options */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="p-3.5 bg-slate-950/90 border border-slate-800 rounded-xl space-y-2">
+                  <label className="block font-semibold text-slate-300">
+                    2. 圖紙尺寸與方向：
+                  </label>
+                  <select
+                    value={pdfPaperFormat}
+                    onChange={(e) =>
+                      setPdfPaperFormat(e.target.value as PdfPaperFormat)
+                    }
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-100 focus:outline-none focus:border-sky-500"
+                  >
+                    <option value="a4-landscape">
+                      A4 橫向 (Landscape 297 × 210 mm)
+                    </option>
+                    <option value="a4-portrait">
+                      A4 直向 (Portrait 210 × 297 mm)
+                    </option>
+                    <option value="a3-landscape">
+                      A3 橫向 (Landscape 420 × 297 mm)
+                    </option>
+                  </select>
+                </div>
+
+                <div className="p-3.5 bg-slate-950/90 border border-slate-800 rounded-xl space-y-2">
+                  <label className="block font-semibold text-slate-300">
+                    3. PDF 背景與線條配色：
+                  </label>
+                  <select
+                    value={pdfColorTheme}
+                    onChange={(e) =>
+                      setPdfColorTheme(e.target.value as PdfColorTheme)
+                    }
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-100 focus:outline-none focus:border-sky-500"
+                  >
+                    <option value="white-color">
+                      白底彩色工程圖 (推薦列印，自動深色化淺色線)
+                    </option>
+                    <option value="monochrome">
+                      白底純黑線條 (標準黑白工程圖)
+                    </option>
+                    <option value="dark-blueprint">
+                      深色藍圖背景 (與畫布深色視覺一致)
+                    </option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-4 px-1">
+                <label className="flex items-center gap-2 cursor-pointer text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={pdfIncludeTitleBlock}
+                    onChange={(e) => setPdfIncludeTitleBlock(e.target.checked)}
+                    className="rounded border-slate-700 bg-slate-950 text-sky-500"
+                  />
+                  <span>顯示標準工程圖框與標題欄 (含分頁名稱/比例/日期)</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={pdfIncludeGrid}
+                    onChange={(e) => setPdfIncludeGrid(e.target.checked)}
+                    className="rounded border-slate-700 bg-slate-950 text-sky-500"
+                  />
+                  <span>包含座標輔助格線</span>
+                </label>
+              </div>
+
+              {/* Live PDF Page Preview */}
+              {pdfPreviewDataUrl && (
+                <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between text-[11px] text-slate-400">
+                    <span>
+                      PDF 版面即時預覽（
+                      {pdfExportScope === 'window'
+                        ? '窗選區域匯出'
+                        : `已選 ${pdfSelectedTabIds.length} 個畫布分頁`}
+                      ）
+                    </span>
+                    <span className="font-mono text-sky-400">
+                      {pdfPaperFormat.toUpperCase()}
+                    </span>
+                  </div>
+                  <div className="w-full max-h-56 overflow-hidden rounded-lg border border-slate-800 bg-slate-900 flex items-center justify-center p-2">
+                    <img
+                      src={pdfPreviewDataUrl}
+                      alt="PDF 匯出預覽"
+                      className="max-h-52 w-auto object-contain rounded shadow"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={handleStartPdfWindowSelection}
+                  className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/40 rounded-xl font-medium transition-colors"
+                >
+                  <Crop className="w-4 h-4" />
+                  <span>在畫布上窗選區域匯出</span>
+                </button>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setActiveModal(null)}
+                    className="px-4 py-2 bg-slate-800 text-slate-300 rounded-xl hover:bg-slate-700"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleExportPdf();
+                      if (pdfExportScope === 'tabs' || pdfWindowBounds) {
+                        setActiveModal(null);
+                      }
+                    }}
+                    className="flex items-center gap-1.5 px-5 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded-xl shadow-lg shadow-rose-950/50 transition-colors"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>
+                      {pdfExportScope === 'window'
+                        ? pdfWindowBounds
+                          ? '下載窗選區域 PDF (.PDF)'
+                          : '開始在畫布窗選區域'
+                        : `立即匯出畫布分頁 PDF (${pdfSelectedTabIds.length} 頁)`}
+                    </span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>

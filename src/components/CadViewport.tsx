@@ -107,6 +107,12 @@ interface CadViewportProps {
   fitTrigger: number;
   jumpToOriginTrigger: number;
   copySourceEntities?: CadEntity[];
+  onPdfWindowSelected?: (bounds: {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+  }) => void;
 }
 
 export const CadViewport: React.FC<CadViewportProps> = ({
@@ -152,6 +158,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   fitTrigger,
   jumpToOriginTrigger,
   copySourceEntities = [],
+  onPdfWindowSelected,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -498,6 +505,30 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               `ZOOM WINDOW 已局部放大至選取區域 (${rw.toFixed(2)} × ${rh.toFixed(2)} mm)`,
               'success'
             );
+          }
+        }
+        return;
+      }
+
+      if (activeTool === 'pdfWindow') {
+        if (drawingPoints.length === 0) {
+          setDrawingPoints([pt]);
+          onLogCommand(
+            `PDF 窗選匯出 — 已指定匯出區域第一角點: (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)}) — 請點選對角點完成窗選並匯出 PDF`,
+            'info'
+          );
+        } else {
+          const p1 = drawingPoints[0];
+          const rw = Math.abs(pt.x - p1.x);
+          const rh = Math.abs(pt.y - p1.y);
+          if (rw > 0.01 && rh > 0.01) {
+            const minX = Math.min(p1.x, pt.x);
+            const maxX = Math.max(p1.x, pt.x);
+            const minY = Math.min(p1.y, pt.y);
+            const maxY = Math.max(p1.y, pt.y);
+            setDrawingPoints([]);
+            onToolComplete();
+            onPdfWindowSelected?.({ minX, minY, maxX, maxY });
           }
         }
         return;
@@ -1028,6 +1059,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       wallLayerId,
       zoom,
       copySourceEntities,
+      onPdfWindowSelected,
     ]
   );
 
@@ -2418,6 +2450,20 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       setDragPreviewEntities(null);
       setActiveEntityDrag(null);
     }
+    if (activeTool === 'pdfWindow' && drawingPoints.length === 1) {
+      const p1 = drawingPoints[0];
+      const rwScreen = Math.abs(cursorWorld.x - p1.x) * zoom;
+      const rhScreen = Math.abs(cursorWorld.y - p1.y) * zoom;
+      if (rwScreen > 14 && rhScreen > 14) {
+        const minX = Math.min(p1.x, cursorWorld.x);
+        const maxX = Math.max(p1.x, cursorWorld.x);
+        const minY = Math.min(p1.y, cursorWorld.y);
+        const maxY = Math.max(p1.y, cursorWorld.y);
+        setDrawingPoints([]);
+        onToolComplete();
+        onPdfWindowSelected?.({ minX, minY, maxX, maxY });
+      }
+    }
   };
 
   // Touch Handlers
@@ -3549,6 +3595,35 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         ctx.setLineDash([6, 4]);
         ctx.fillRect(rx, ry, rw, rh);
         ctx.strokeRect(rx, ry, rw, rh);
+      } else if (activeTool === 'pdfWindow') {
+        const rx = Math.min(s0.x, sCur.x);
+        const ry = Math.min(s0.y, sCur.y);
+        const rw = Math.abs(sCur.x - s0.x);
+        const rh = Math.abs(sCur.y - s0.y);
+        ctx.fillStyle = 'rgba(245, 158, 11, 0.16)';
+        ctx.strokeStyle = '#F59E0B';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([8, 4]);
+        ctx.fillRect(rx, ry, rw, rh);
+        ctx.strokeRect(rx, ry, rw, rh);
+
+        const wMm = Math.abs(cursorWorld.x - p0.x).toFixed(1);
+        const hMm = Math.abs(cursorWorld.y - p0.y).toFixed(1);
+        const badgeText = `PDF 匯出區域: ${wMm} × ${hMm} mm`;
+        ctx.setLineDash([]);
+        ctx.font = 'bold 11px "JetBrains Mono", "Noto Sans TC", monospace';
+        const tw = ctx.measureText(badgeText).width + 16;
+        const bx = rx + rw / 2 - tw / 2;
+        const by = Math.max(24, ry - 26);
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.94)';
+        ctx.fillRect(bx, by, tw, 22);
+        ctx.strokeStyle = '#F59E0B';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(bx, by, tw, 22);
+        ctx.fillStyle = '#FDE68A';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(badgeText, rx + rw / 2, by + 11);
       } else if (activeTool === 'line' || activeTool === 'measure') {
         ctx.beginPath();
         ctx.moveTo(sLast.x, sLast.y);
@@ -5290,6 +5365,30 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* PDF Window Selection Floating Banner */}
+      {activeTool === 'pdfWindow' && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-3 px-4 py-2 rounded-xl bg-amber-950/95 border border-amber-400/80 text-amber-100 text-xs shadow-2xl backdrop-blur-md">
+          <span className="px-2 py-0.5 rounded bg-amber-500 text-slate-950 font-bold font-mono text-[11px]">
+            PDF 窗選匯出
+          </span>
+          <span className="font-medium">
+            {drawingPoints.length === 0
+              ? '請在畫布上點選（或按住拖曳）要匯出為 PDF 的區域第一角點 P1'
+              : '請移動滑鼠並點選對角點 P2 完成窗選區域匯出 PDF'}
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              setDrawingPoints([]);
+              onToolComplete();
+            }}
+            className="px-2.5 py-0.5 rounded bg-slate-900/90 hover:bg-slate-800 text-slate-200 border border-slate-700 text-[11px]"
+          >
+            取消 (ESC)
+          </button>
         </div>
       )}
     </div>
