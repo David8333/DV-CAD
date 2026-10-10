@@ -29,6 +29,8 @@ import {
   EyeOff,
   FileCode2,
   Type,
+  Copy,
+  Layers,
   X,
 } from 'lucide-react';
 import {
@@ -103,16 +105,93 @@ function sanitizeLoadedEntities(rawEntities: unknown[]): CadEntity[] {
   return result;
 }
 
-function loadSavedState(): { entities: CadEntity[]; layers: CadLayer[] } | null {
+interface CanvasTabState {
+  id: string;
+  name: string;
+  history: CadEntity[][];
+  historyIndex: number;
+  layers: CadLayer[];
+  activeLayerId: string;
+  selectedIds: string[];
+  pan: Point;
+  zoom: number;
+}
+
+const DEFAULT_TABS: CanvasTabState[] = [
+  {
+    id: 'tab-1',
+    name: '畫布分頁 1',
+    history: [BLUEPRINT_TEMPLATES[0].entities],
+    historyIndex: 0,
+    layers: DEFAULT_LAYERS,
+    activeLayerId: '0',
+    selectedIds: [],
+    pan: { x: 0, y: 0 },
+    zoom: 1.0,
+  },
+  {
+    id: 'tab-2',
+    name: '畫布分頁 2',
+    history: [[]],
+    historyIndex: 0,
+    layers: DEFAULT_LAYERS,
+    activeLayerId: '0',
+    selectedIds: [],
+    pan: { x: 0, y: 0 },
+    zoom: 1.0,
+  },
+  {
+    id: 'tab-3',
+    name: '畫布分頁 3',
+    history: [[]],
+    historyIndex: 0,
+    layers: DEFAULT_LAYERS,
+    activeLayerId: '0',
+    selectedIds: [],
+    pan: { x: 0, y: 0 },
+    zoom: 1.0,
+  },
+];
+
+function loadSavedTabsState(): CanvasTabState[] | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed.tabs) && parsed.tabs.length === 3) {
+      return parsed.tabs.map((t: Record<string, unknown>, idx: number) => {
+        const ents = Array.isArray(t.entities)
+          ? sanitizeLoadedEntities(t.entities)
+          : idx === 0
+            ? BLUEPRINT_TEMPLATES[0].entities
+            : [];
+        const lyr = Array.isArray(t.layers)
+          ? (t.layers as CadLayer[])
+          : DEFAULT_LAYERS;
+        return {
+          id: typeof t.id === 'string' ? t.id : `tab-${idx + 1}`,
+          name: typeof t.name === 'string' ? t.name : `畫布分頁 ${idx + 1}`,
+          history: [ents],
+          historyIndex: 0,
+          layers: lyr,
+          activeLayerId:
+            typeof t.activeLayerId === 'string' ? t.activeLayerId : '0',
+          selectedIds: [],
+          pan: { x: 0, y: 0 },
+          zoom: 1.0,
+        };
+      });
+    }
     if (Array.isArray(parsed.entities) && Array.isArray(parsed.layers)) {
-      return {
-        entities: sanitizeLoadedEntities(parsed.entities),
-        layers: parsed.layers,
-      };
+      return [
+        {
+          ...DEFAULT_TABS[0],
+          history: [sanitizeLoadedEntities(parsed.entities)],
+          layers: parsed.layers,
+        },
+        DEFAULT_TABS[1],
+        DEFAULT_TABS[2],
+      ];
     }
   } catch {
     // Ignore storage parse errors
@@ -207,29 +286,140 @@ export default function App() {
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  const initialSaved = loadSavedState();
-
-  // History stack for Undo / Redo
-  const [history, setHistory] = useState<CadEntity[][]>([
-    initialSaved ? initialSaved.entities : BLUEPRINT_TEMPLATES[0].entities,
-  ]);
-  const [historyIndex, setHistoryIndex] = useState<number>(0);
-
-  const entities = history[historyIndex];
-
-  const [layers, setLayers] = useState<CadLayer[]>(
-    initialSaved ? initialSaved.layers : DEFAULT_LAYERS
+  // 3 Canvas Tabs State (畫布分頁 1, 畫布分頁 2, 畫布分頁 3)
+  const [canvasTabs, setCanvasTabs] = useState<CanvasTabState[]>(
+    () => loadSavedTabsState() || DEFAULT_TABS
   );
-  const [activeLayerId, setActiveLayerId] = useState<string>('0');
+  const [activeCanvasTabId, setActiveCanvasTabId] = useState<string>('tab-1');
+
+  const currentCanvasTab =
+    canvasTabs.find((t) => t.id === activeCanvasTabId) || canvasTabs[0];
+  const history = currentCanvasTab.history;
+  const historyIndex = currentCanvasTab.historyIndex;
+  const entities = history[historyIndex] || [];
+  const layers = currentCanvasTab.layers;
+  const activeLayerId = currentCanvasTab.activeLayerId;
+  const selectedIds = currentCanvasTab.selectedIds;
+  const pan = currentCanvasTab.pan;
+  const zoom = currentCanvasTab.zoom;
+
+  const setLayers = useCallback(
+    (updater: React.SetStateAction<CadLayer[]>) => {
+      setCanvasTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === activeCanvasTabId
+            ? {
+                ...tab,
+                layers:
+                  typeof updater === 'function' ? updater(tab.layers) : updater,
+              }
+            : tab
+        )
+      );
+    },
+    [activeCanvasTabId]
+  );
+
+  const setActiveLayerId = useCallback(
+    (updater: React.SetStateAction<string>) => {
+      setCanvasTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === activeCanvasTabId
+            ? {
+                ...tab,
+                activeLayerId:
+                  typeof updater === 'function'
+                    ? updater(tab.activeLayerId)
+                    : updater,
+              }
+            : tab
+        )
+      );
+    },
+    [activeCanvasTabId]
+  );
+
+  const setSelectedIds = useCallback(
+    (updater: React.SetStateAction<string[]>) => {
+      setCanvasTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === activeCanvasTabId
+            ? {
+                ...tab,
+                selectedIds:
+                  typeof updater === 'function'
+                    ? updater(tab.selectedIds)
+                    : updater,
+              }
+            : tab
+        )
+      );
+    },
+    [activeCanvasTabId]
+  );
+
+  const setPan = useCallback(
+    (updater: React.SetStateAction<Point>) => {
+      setCanvasTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === activeCanvasTabId
+            ? {
+                ...tab,
+                pan: typeof updater === 'function' ? updater(tab.pan) : updater,
+              }
+            : tab
+        )
+      );
+    },
+    [activeCanvasTabId]
+  );
+
+  const setZoom = useCallback(
+    (updater: React.SetStateAction<number>) => {
+      setCanvasTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === activeCanvasTabId
+            ? {
+                ...tab,
+                zoom:
+                  typeof updater === 'function' ? updater(tab.zoom) : updater,
+              }
+            : tab
+        )
+      );
+    },
+    [activeCanvasTabId]
+  );
+
   const [activeTool, setActiveTool] = useState<ToolType>('select');
   const [rectangleMode, setRectangleMode] = useState<RectangleMode>('corner');
   const [defaultDimFontSize, setDefaultDimFontSize] = useState<number>(11);
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [drawingPoints, setDrawingPoints] = useState<Point[]>([]);
 
-  // Clipboard state for Copy (Ctrl+C), Cut (Ctrl+X), Paste (Ctrl+V)
+  // Global Clipboard & Cross-Tab Continuous Copy Buffer for Copy (Ctrl+C), Cut (Ctrl+X), Paste (Ctrl+V), and Continuous Copy (CO) across the 3 tabs
   const [clipboard, setClipboard] = useState<CadEntity[]>([]);
+  const [clipboardSourceTabId, setClipboardSourceTabId] = useState<
+    string | null
+  >(null);
+  const [clipboardSourceLayers, setClipboardSourceLayers] = useState<
+    CadLayer[]
+  >([]);
   const [pasteCount, setPasteCount] = useState<number>(0);
+  const [crossTabCopyEntities, setCrossTabCopyEntities] = useState<CadEntity[]>(
+    []
+  );
+  const [crossTabCopyLayers, setCrossTabCopyLayers] = useState<CadLayer[]>([]);
+
+  // Keep crossTabCopyEntities synced whenever entities are selected in the current tab
+  useEffect(() => {
+    if (selectedIds.length > 0) {
+      const sel = entities.filter((e) => selectedIds.includes(e.id));
+      if (sel.length > 0) {
+        setCrossTabCopyEntities(sel);
+        setCrossTabCopyLayers(layers);
+      }
+    }
+  }, [entities, layers, selectedIds]);
 
   // DXF / DWG Import state
   const [importMode, setImportMode] = useState<'replace' | 'merge'>('replace');
@@ -260,21 +450,30 @@ export default function App() {
     typeof window !== 'undefined' ? window.innerWidth >= 1200 : false
   );
 
-  // Auto-save to localStorage whenever entities or layers change
+  // Auto-save all 3 canvas tabs to localStorage whenever any tab changes
   useEffect(() => {
     try {
+      const serializedTabs = canvasTabs.map((t) => ({
+        id: t.id,
+        name: t.name,
+        entities: t.history[t.historyIndex] || [],
+        layers: t.layers,
+        activeLayerId: t.activeLayerId,
+      }));
       localStorage.setItem(
         STORAGE_KEY,
-        JSON.stringify({ entities, layers })
+        JSON.stringify({
+          tabs: serializedTabs,
+          entities: serializedTabs[0].entities,
+          layers: serializedTabs[0].layers,
+        })
       );
     } catch {
       // Ignore quota errors
     }
-  }, [entities, layers]);
+  }, [canvasTabs]);
 
-  // Viewport Pan, Zoom & Auto-Fit Trigger
-  const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
-  const [zoom, setZoom] = useState<number>(1.0);
+  // Viewport Auto-Fit & Jump-to-Origin Triggers
   const [fitTrigger, setFitTrigger] = useState<number>(1);
   const [jumpToOriginTrigger, setJumpToOriginTrigger] = useState<number>(0);
 
@@ -309,6 +508,7 @@ export default function App() {
     },
     dynInput: true,
     showLineWeight: true,
+    showShortcutMenu: true,
   });
 
   // Modals state
@@ -356,16 +556,94 @@ export default function App() {
     []
   );
 
-  // Commit entity state to history
+  // Commit entity state to the active canvas tab's history (and ensure any custom layers from cross-tab copy/paste exist)
   const pushEntities = useCallback(
-    (nextEntities: CadEntity[]) => {
-      setHistory((prev) => {
-        const sliced = prev.slice(0, historyIndex + 1);
-        return [...sliced, nextEntities];
-      });
-      setHistoryIndex((idx) => idx + 1);
+    (nextEntities: CadEntity[], extraSourceLayers?: CadLayer[]) => {
+      setCanvasTabs((prev) =>
+        prev.map((tab) => {
+          if (tab.id !== activeCanvasTabId) return tab;
+          const sliced = tab.history.slice(0, tab.historyIndex + 1);
+          let nextLayers = tab.layers;
+          const layerSources =
+            extraSourceLayers && extraSourceLayers.length > 0
+              ? extraSourceLayers
+              : crossTabCopyLayers;
+          if (layerSources.length > 0) {
+            const existingIds = new Set(tab.layers.map((l) => l.id));
+            const missingLayers = layerSources.filter(
+              (l) =>
+                !existingIds.has(l.id) &&
+                nextEntities.some((e) => e.layerId === l.id)
+            );
+            if (missingLayers.length > 0) {
+              nextLayers = [...tab.layers, ...missingLayers];
+            }
+          }
+          return {
+            ...tab,
+            history: [...sliced, nextEntities],
+            historyIndex: tab.historyIndex + 1,
+            layers: nextLayers,
+          };
+        })
+      );
     },
-    [historyIndex]
+    [activeCanvasTabId, crossTabCopyLayers]
+  );
+
+  // Switch between the 3 Canvas Tabs while preserving Cross-Tab Copy/Cut/Paste & Continuous Copy (CO)
+  const handleSwitchCanvasTab = useCallback(
+    (targetTabId: string) => {
+      if (targetTabId === activeCanvasTabId) return;
+      const targetTab = canvasTabs.find((t) => t.id === targetTabId);
+      if (!targetTab) return;
+
+      const currentSelected = entities.filter((e) =>
+        selectedIds.includes(e.id)
+      );
+      const activeCopyPool =
+        currentSelected.length > 0
+          ? currentSelected
+          : crossTabCopyEntities.length > 0
+            ? crossTabCopyEntities
+            : clipboard;
+
+      if (currentSelected.length > 0) {
+        setCrossTabCopyEntities(currentSelected);
+        setCrossTabCopyLayers(layers);
+      }
+
+      setActiveCanvasTabId(targetTabId);
+
+      if (activeTool === 'copy' && activeCopyPool.length > 0) {
+        if (drawingPoints.length === 0) {
+          const refPt = getSelectionReferencePoint(activeCopyPool);
+          setDrawingPoints([refPt]);
+        }
+        logCommand(
+          `已切換至「${targetTab.name}」— 跨分頁連續複製 (CO) 進行中：直接點選畫布即可連續放置 ${activeCopyPool.length} 個圖元副本！`,
+          'command'
+        );
+      } else {
+        setDrawingPoints([]);
+        logCommand(
+          `已切換至「${targetTab.name}」（目前共 ${(targetTab.history[targetTab.historyIndex] || []).length} 個圖元）`,
+          'info'
+        );
+      }
+    },
+    [
+      activeCanvasTabId,
+      activeTool,
+      canvasTabs,
+      clipboard,
+      crossTabCopyEntities,
+      drawingPoints.length,
+      entities,
+      layers,
+      logCommand,
+      selectedIds,
+    ]
   );
 
   // Handle DXF / DWG / JSON File Import
@@ -450,28 +728,66 @@ export default function App() {
 
   const handleUndo = useCallback(() => {
     if (historyIndex > 0) {
-      setHistoryIndex((i) => i - 1);
+      setCanvasTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === activeCanvasTabId
+            ? { ...tab, historyIndex: Math.max(0, tab.historyIndex - 1) }
+            : tab
+        )
+      );
       setDrawingPoints([]);
       logCommand('UNDO 已復原上一步操作 (Ctrl+Z)', 'info');
     } else {
       logCommand('已經是最早的步驟，無法再復原。', 'error');
     }
-  }, [historyIndex, logCommand]);
+  }, [activeCanvasTabId, historyIndex, logCommand]);
 
   const handleRedo = useCallback(() => {
     if (historyIndex < history.length - 1) {
-      setHistoryIndex((i) => i + 1);
+      setCanvasTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === activeCanvasTabId
+            ? {
+                ...tab,
+                historyIndex: Math.min(
+                  tab.history.length - 1,
+                  tab.historyIndex + 1
+                ),
+              }
+            : tab
+        )
+      );
       setDrawingPoints([]);
       logCommand('REDO 已重做操作 (Ctrl+Y)', 'info');
     } else {
       logCommand('沒有可重做的步驟。', 'error');
     }
-  }, [history.length, historyIndex, logCommand]);
+  }, [activeCanvasTabId, history.length, historyIndex, logCommand]);
 
   const handleSelectTool = useCallback(
     (tool: ToolType) => {
       setActiveTool(tool);
-      setDrawingPoints([]);
+      if (tool === 'copy') {
+        const currentSelected = entities.filter((e) =>
+          selectedIds.includes(e.id)
+        );
+        if (currentSelected.length > 0) {
+          setCrossTabCopyEntities(currentSelected);
+          setCrossTabCopyLayers(layers);
+          setDrawingPoints([]);
+        } else {
+          const fallbackPool =
+            crossTabCopyEntities.length > 0 ? crossTabCopyEntities : clipboard;
+          if (fallbackPool.length > 0) {
+            const refPt = getSelectionReferencePoint(fallbackPool);
+            setDrawingPoints([refPt]);
+          } else {
+            setDrawingPoints([]);
+          }
+        }
+      } else {
+        setDrawingPoints([]);
+      }
       if (typeof window !== 'undefined' && window.innerWidth < 1024) {
         setShowLeftPanel(false);
       }
@@ -505,11 +821,16 @@ export default function App() {
     },
     [
       chamferDistance,
+      clipboard,
+      crossTabCopyEntities,
+      entities,
       filletRadius,
       hatchPitch,
+      layers,
       logCommand,
       offsetDistance,
       rectangleMode,
+      selectedIds,
     ]
   );
 
@@ -563,7 +884,7 @@ export default function App() {
     logCommand(`ERASE 已刪除 ${count} 個圖元物件`, 'info');
   }, [entities, logCommand, pushEntities, selectedIds]);
 
-  // Clipboard Copy (Ctrl+C)
+  // Clipboard Copy (Ctrl+C) — supports copying across all 3 canvas tabs
   const handleCopyClipboard = useCallback(() => {
     if (selectedIds.length === 0) {
       logCommand('COPYCLIP 請先選取要複製的圖元物件 (Ctrl+C)。', 'error');
@@ -571,14 +892,25 @@ export default function App() {
     }
     const selected = entities.filter((e) => selectedIds.includes(e.id));
     setClipboard(selected);
+    setClipboardSourceTabId(activeCanvasTabId);
+    setClipboardSourceLayers(layers);
+    setCrossTabCopyEntities(selected);
+    setCrossTabCopyLayers(layers);
     setPasteCount(0);
     logCommand(
-      `COPYCLIP 已將 ${selected.length} 個圖元複製到剪貼簿 (按 Ctrl+V 貼上)`,
+      `COPYCLIP 已從「${currentCanvasTab.name}」複製 ${selected.length} 個圖元至剪貼簿（可切換至任一畫布分頁按 Ctrl+V 貼上或按 CO 連續複製）`,
       'success'
     );
-  }, [entities, logCommand, selectedIds]);
+  }, [
+    activeCanvasTabId,
+    currentCanvasTab.name,
+    entities,
+    layers,
+    logCommand,
+    selectedIds,
+  ]);
 
-  // Clipboard Cut (Ctrl+X)
+  // Clipboard Cut (Ctrl+X) — supports cutting and pasting across all 3 canvas tabs
   const handleCutClipboard = useCallback(() => {
     if (selectedIds.length === 0) {
       logCommand('CUTCLIP 請先選取要剪下的圖元物件 (Ctrl+X)。', 'error');
@@ -586,34 +918,64 @@ export default function App() {
     }
     const selected = entities.filter((e) => selectedIds.includes(e.id));
     setClipboard(selected);
+    setClipboardSourceTabId(activeCanvasTabId);
+    setClipboardSourceLayers(layers);
+    setCrossTabCopyEntities(selected);
+    setCrossTabCopyLayers(layers);
     setPasteCount(0);
     pushEntities(entities.filter((e) => !selectedIds.includes(e.id)));
     setSelectedIds([]);
     logCommand(
-      `CUTCLIP 已剪下 ${selected.length} 個圖元至剪貼簿 (按 Ctrl+V 貼上)`,
+      `CUTCLIP 已從「${currentCanvasTab.name}」剪下 ${selected.length} 個圖元至剪貼簿（可切換至任一畫布分頁按 Ctrl+V 貼上或按 CO 連續複製）`,
       'success'
     );
-  }, [entities, logCommand, pushEntities, selectedIds]);
+  }, [
+    activeCanvasTabId,
+    currentCanvasTab.name,
+    entities,
+    layers,
+    logCommand,
+    pushEntities,
+    selectedIds,
+    setSelectedIds,
+  ]);
 
-  // Clipboard Paste (Ctrl+V)
+  // Clipboard Paste (Ctrl+V) — supports pasting across all 3 canvas tabs
   const handlePasteClipboard = useCallback(() => {
     if (clipboard.length === 0) {
       logCommand('PASTECLIP 剪貼簿目前為空，請先複製 (Ctrl+C) 或剪下 (Ctrl+X) 圖元。', 'error');
       return;
     }
+    const isCrossTabFirstPaste =
+      clipboardSourceTabId !== null &&
+      clipboardSourceTabId !== activeCanvasTabId &&
+      pasteCount === 0;
     const nextStep = pasteCount + 1;
     setPasteCount(nextStep);
-    const offset = nextStep * 20;
+    const offset = isCrossTabFirstPaste ? 0 : nextStep * 20;
     const pasted = clipboard.map((ent) =>
       cloneEntityWithNewIds(ent, offset, -offset)
     );
-    pushEntities([...entities, ...pasted]);
+    pushEntities([...entities, ...pasted], clipboardSourceLayers);
     setSelectedIds(pasted.map((e) => e.id));
     logCommand(
-      `PASTECLIP 已從剪貼簿貼上 ${pasted.length} 個圖元物件 (偏移 +${offset}, -${offset} mm)`,
+      isCrossTabFirstPaste
+        ? `PASTECLIP 已將剪貼簿的 ${pasted.length} 個圖元原位貼上至「${currentCanvasTab.name}」！（再次按 Ctrl+V 可連續偏移貼上）`
+        : `PASTECLIP 已於「${currentCanvasTab.name}」貼上 ${pasted.length} 個圖元物件 (偏移 +${offset}, -${offset} mm)`,
       'success'
     );
-  }, [clipboard, entities, logCommand, pasteCount, pushEntities]);
+  }, [
+    activeCanvasTabId,
+    clipboard,
+    clipboardSourceLayers,
+    clipboardSourceTabId,
+    currentCanvasTab.name,
+    entities,
+    logCommand,
+    pasteCount,
+    pushEntities,
+    setSelectedIds,
+  ]);
 
   // Assemble / Join multiple selected entities while preserving their positions
   const handleJoinSelected = useCallback(() => {
@@ -888,6 +1250,7 @@ export default function App() {
           osnap: '幾何物件鎖點 (OSNAP F3)',
           dynInput: '動態尺寸輸入 (DYN F12)',
           showLineWeight: '工程線寬顯示 (LWT)',
+          showShortcutMenu: '快捷鍵下拉選單',
         };
         logCommand(
           `${names[key]} 已${nextVal ? '啟用 (ON)' : '關閉 (OFF)'}`,
@@ -899,7 +1262,7 @@ export default function App() {
     [logCommand]
   );
 
-  // Complete registry of 1-letter, 2-letter, and 3-letter sequential shortcuts
+  // Registry of ONLY the existing shortcuts defined in the application
   const shortcutRegistry = React.useMemo(
     () => [
       // A
@@ -919,83 +1282,37 @@ export default function App() {
           logCommand('指令切換: ARRAY 陣列複製工具 (快捷鍵 AR)', 'command');
         },
       },
-      {
-        keys: 'ARC',
-        label: '三點圓弧 (Arc 3P)',
-        desc: '三字母快捷鍵：三點圓弧模式',
-        run: () => handleSelectTool('arc'),
-      },
-      {
-        keys: 'ARR',
-        label: '陣列複製 (Array)',
-        desc: '三字母快捷鍵：陣列複製視窗',
-        run: () => {
-          setActiveTool('select');
-          setActiveModal('array');
-          logCommand('指令切換: ARRAY 陣列複製工具 (快捷鍵 ARR)', 'command');
-        },
-      },
       // B
       {
         keys: 'B',
-        label: '自動標註選取圖元 (AutoDim)',
+        label: '自動標註 (AutoDim)',
         desc: '一鍵標註直線、矩形、圓形與導圓角半徑 R',
         run: () => handleAutoDimensionSelected(),
       },
       {
         keys: 'BH',
-        label: '45° 剖面填充 (Hatch)',
+        label: '剖面填充 (45°)',
         desc: '智慧填充輸入或選取範圍執行 45° 斜線填充',
-        run: () => handleSelectTool('hatch'),
-      },
-      {
-        keys: 'BHA',
-        label: '45° 剖面填充 (BHatch)',
-        desc: '三字母快捷鍵：建築主牆/輪廓 45° 剖面填充',
         run: () => handleSelectTool('hatch'),
       },
       // C
       {
         keys: 'C',
-        label: '圓形工具 (Circle)',
+        label: '圓形 (Circle)',
         desc: '點選圓心與半徑繪製圓形',
         run: () => handleSelectTool('circle'),
       },
       {
         keys: 'CO',
-        label: '複製物件 (Copy)',
-        desc: '點選基準點連續複製已選圖元',
+        label: '連續複製 (Copy)',
+        desc: '點選基準點連續複製已選圖元（支援跨分頁連續複製）',
         run: () => handleSelectTool('copy'),
-      },
-      {
-        keys: 'CP',
-        label: '複製物件 (Copy)',
-        desc: '點選基準點連續複製已選圖元',
-        run: () => handleSelectTool('copy'),
-      },
-      {
-        keys: 'CH',
-        label: '倒角工具 (Chamfer)',
-        desc: '點選兩相交直線或矩形邊建立斜角',
-        run: () => handleSelectTool('chamfer'),
       },
       {
         keys: 'CHA',
-        label: '倒角工具 (Chamfer)',
-        desc: '三字母快捷鍵：依序按 C→H→A 啟動倒角',
+        label: '倒角 (Chamfer)',
+        desc: '依序按 C→H→A 點選兩相交直線或矩形邊建立倒角',
         run: () => handleSelectTool('chamfer'),
-      },
-      {
-        keys: 'CIR',
-        label: '圓形工具 (Circle)',
-        desc: '三字母快捷鍵：依序按 C→I→R 繪製圓形',
-        run: () => handleSelectTool('circle'),
-      },
-      {
-        keys: 'COP',
-        label: '複製物件 (Copy)',
-        desc: '三字母快捷鍵：依序按 C→O→P 複製物件',
-        run: () => handleSelectTool('copy'),
       },
       // D
       {
@@ -1003,39 +1320,6 @@ export default function App() {
         label: '標註尺寸 (Dimension)',
         desc: '線性標註 / 圓形 Ø 直徑 / 導圓角 R 半徑標註',
         run: () => handleSelectTool('dimension'),
-      },
-      {
-        keys: 'DR',
-        label: '導圓角半徑標註 (Radius R)',
-        desc: '標註導圓角或圓弧之半徑 R',
-        run: () => handleDimensionRadius(),
-      },
-      {
-        keys: 'DIM',
-        label: '標註尺寸 (Dimension)',
-        desc: '三字母快捷鍵：依序按 D→I→M 啟動標註',
-        run: () => handleSelectTool('dimension'),
-      },
-      {
-        keys: 'DRA',
-        label: '導圓角半徑標註 (DimRadius)',
-        desc: '三字母快捷鍵：依序按 D→R→A 標註圓角半徑 R',
-        run: () => handleDimensionRadius(),
-      },
-      {
-        keys: 'DDI',
-        label: '圓形直徑標註 (DimDiameter)',
-        desc: '三字母快捷鍵：依序按 D→D→I 標註圓直徑 Ø',
-        run: () => handleSelectTool('dimension'),
-      },
-      {
-        keys: 'DEL',
-        label: '刪除圖元 (Delete)',
-        desc: '三字母快捷鍵：刪除已選圖元或進入刪除模式',
-        run: () => {
-          if (selectedIds.length > 0) handleDeleteSelected();
-          else handleSelectTool('erase');
-        },
       },
       // E
       {
@@ -1053,38 +1337,11 @@ export default function App() {
         desc: '點選兩線段互相延伸接合至交點',
         run: () => handleSelectTool('extend'),
       },
-      {
-        keys: 'EXT',
-        label: '延伸圖元 (Extend)',
-        desc: '三字母快捷鍵：依序按 E→X→T 啟動延伸圖元',
-        run: () => handleSelectTool('extend'),
-      },
-      {
-        keys: 'EXP',
-        label: '炸開圖元 (Explode)',
-        desc: '三字母快捷鍵：依序按 E→X→P 炸開組裝圖元/矩形',
-        run: () => handleExplodeSelected(),
-      },
-      {
-        keys: 'ERA',
-        label: '刪除圖元 (Erase)',
-        desc: '三字母快捷鍵：依序按 E→R→A 刪除圖元',
-        run: () => {
-          if (selectedIds.length > 0) handleDeleteSelected();
-          else handleSelectTool('erase');
-        },
-      },
       // F
       {
         keys: 'F',
-        label: '導圓角工具 (Fillet)',
+        label: '導圓角 (Fillet)',
         desc: '點選兩相交直線建立圓角並支援標註半徑 R',
-        run: () => handleSelectTool('fillet'),
-      },
-      {
-        keys: 'FIL',
-        label: '導圓角工具 (Fillet)',
-        desc: '三字母快捷鍵：依序按 F→I→L 啟動導圓角',
         run: () => handleSelectTool('fillet'),
       },
       // G
@@ -1094,24 +1351,12 @@ export default function App() {
         desc: '點選中心與半徑繪製 3~24 邊正多邊形',
         run: () => handleSelectTool('polygon'),
       },
-      {
-        keys: 'GRP',
-        label: '組裝圖元 (Group/Join)',
-        desc: '三字母快捷鍵：依序按 G→R→P 組裝選取圖元',
-        run: () => handleJoinSelected(),
-      },
       // H
       {
         keys: 'H',
-        label: '平移視景 (Pan)',
+        label: '平移畫布 (Pan)',
         desc: '拖曳畫布平移工程圖視角',
         run: () => handleSelectTool('pan'),
-      },
-      {
-        keys: 'HAT',
-        label: '45° 剖面填充 (Hatch)',
-        desc: '三字母快捷鍵：依序按 H→A→T 啟動剖面填充',
-        run: () => handleSelectTool('hatch'),
       },
       // J
       {
@@ -1129,19 +1374,10 @@ export default function App() {
         desc: '將鼠標與視角精確跳至座標原點 X,Y=(0,0)',
         run: () => handleJumpToOrigin(),
       },
-      {
-        keys: 'JOI',
-        label: '組裝圖元 (Join)',
-        desc: '三字母快捷鍵：依序按 J→O→I 組裝選取圖元',
-        run: () => {
-          if (selectedIds.length >= 2) handleJoinSelected();
-          else handleSelectTool('join');
-        },
-      },
       // K
       {
         keys: 'K',
-        label: '測量距離與角度 (Measure)',
+        label: '測量距離 (Measure)',
         desc: '點選兩點量測直線距離、ΔX、ΔY 與角度',
         run: () => handleSelectTool('measure'),
       },
@@ -1152,12 +1388,6 @@ export default function App() {
         desc: '點選起點與終點或輸入長度繪製直線',
         run: () => handleSelectTool('line'),
       },
-      {
-        keys: 'LIN',
-        label: '畫直線 (Line)',
-        desc: '三字母快捷鍵：依序按 L→I→N 繪製直線',
-        run: () => handleSelectTool('line'),
-      },
       // M
       {
         keys: 'M',
@@ -1165,35 +1395,11 @@ export default function App() {
         desc: '點選基準點或輸入 X,Y 座標移動物件',
         run: () => handleSelectTool('move'),
       },
-      {
-        keys: 'MI',
-        label: '鏡射物件 (Mirror)',
-        desc: '點選兩點定義對稱鏡射軸線',
-        run: () => handleSelectTool('mirror'),
-      },
-      {
-        keys: 'MOV',
-        label: '移動物件 (Move)',
-        desc: '三字母快捷鍵：依序按 M→O→V 移動物件',
-        run: () => handleSelectTool('move'),
-      },
-      {
-        keys: 'MIR',
-        label: '鏡射物件 (Mirror)',
-        desc: '三字母快捷鍵：依序按 M→I→R 鏡射物件',
-        run: () => handleSelectTool('mirror'),
-      },
       // O
       {
         keys: 'O',
         label: '偏移複製 (Offset)',
         desc: '支援同時偏移選取的所有圖形',
-        run: () => handleSelectTool('offset'),
-      },
-      {
-        keys: 'OFF',
-        label: '偏移複製 (Offset)',
-        desc: '三字母快捷鍵：依序按 O→F→F 啟動偏移複製',
         run: () => handleSelectTool('offset'),
       },
       // P
@@ -1203,61 +1409,19 @@ export default function App() {
         desc: '連續繪製多段頂點聚合線，按 C 可封閉',
         run: () => handleSelectTool('polyline'),
       },
-      {
-        keys: 'PL',
-        label: '聚合線 (Polyline)',
-        desc: '雙字母快捷鍵：繪製聚合線',
-        run: () => handleSelectTool('polyline'),
-      },
-      {
-        keys: 'PLI',
-        label: '聚合線 (Polyline)',
-        desc: '三字母快捷鍵：依序按 P→L→I 繪製聚合線',
-        run: () => handleSelectTool('polyline'),
-      },
-      {
-        keys: 'POL',
-        label: '正多邊形 (Polygon)',
-        desc: '三字母快捷鍵：依序按 P→O→L 繪製正多邊形',
-        run: () => handleSelectTool('polygon'),
-      },
-      {
-        keys: 'PAN',
-        label: '平移視景 (Pan)',
-        desc: '三字母快捷鍵：依序按 P→A→N 平移畫布',
-        run: () => handleSelectTool('pan'),
-      },
       // Q
       {
         keys: 'Q',
-        label: '旋轉物件 (Rotate)',
+        label: '旋轉角度 (Rotate)',
         desc: '指定中心點與角度旋轉選取物件',
         run: () => handleSelectTool('rotate'),
       },
       // R
       {
         keys: 'R',
-        label: '矩形工具 (Rectangle)',
+        label: '矩形框 (Rectangle)',
         desc: '繪製轉角矩形或中心矩形',
         run: () => handleSelectTool('rectangle'),
-      },
-      {
-        keys: 'RO',
-        label: '旋轉物件 (Rotate)',
-        desc: '指定中心點與角度旋轉選取物件',
-        run: () => handleSelectTool('rotate'),
-      },
-      {
-        keys: 'REC',
-        label: '矩形工具 (Rectangle)',
-        desc: '三字母快捷鍵：依序按 R→E→C 繪製矩形',
-        run: () => handleSelectTool('rectangle'),
-      },
-      {
-        keys: 'ROT',
-        label: '旋轉物件 (Rotate)',
-        desc: '三字母快捷鍵：依序按 R→O→T 旋轉物件',
-        run: () => handleSelectTool('rotate'),
       },
       // T
       {
@@ -1272,29 +1436,17 @@ export default function App() {
         desc: '剪切直線、聚合線、圓形與三點圓弧',
         run: () => handleSelectTool('trim'),
       },
-      {
-        keys: 'TRI',
-        label: '剪切圖元 (Trim)',
-        desc: '三字母快捷鍵：依序按 T→R→I 剪切圖元',
-        run: () => handleSelectTool('trim'),
-      },
-      {
-        keys: 'TXT',
-        label: '文字註解 (Text)',
-        desc: '三字母快捷鍵：依序按 T→X→T 插入文字註解',
-        run: () => handleSelectTool('text'),
-      },
       // V
       {
         keys: 'V',
-        label: '選取與修改模式 (Select)',
+        label: '選取 / 掣點 (Select)',
         desc: '點選、框選圖元或拖曳控制點修改尺寸',
         run: () => handleSelectTool('select'),
       },
       // W
       {
         keys: 'W',
-        label: '鏡射物件 (Mirror)',
+        label: '對稱鏡射 (Mirror)',
         desc: '點選兩點定義對稱鏡射軸線',
         run: () => handleSelectTool('mirror'),
       },
@@ -1314,23 +1466,8 @@ export default function App() {
       },
       {
         keys: 'ZE',
-        label: '全圖置中縮放 (Zoom Extents)',
+        label: '全圖置中 (Zoom Extents)',
         desc: '自動縮放並置中顯示完整圖面',
-        run: () => {
-          setActiveTool('select');
-          handleZoomExtents();
-        },
-      },
-      {
-        keys: 'ZW',
-        label: '窗選局部放大 (Zoom Window)',
-        desc: '點選兩對角點局部放大檢視區域',
-        run: () => handleSelectTool('zoomWindow'),
-      },
-      {
-        keys: 'ZOO',
-        label: '全圖置中縮放 (Zoom Extents)',
-        desc: '三字母快捷鍵：依序按 Z→O→O 全圖置中',
         run: () => {
           setActiveTool('select');
           handleZoomExtents();
@@ -1340,7 +1477,6 @@ export default function App() {
     [
       handleAutoDimensionSelected,
       handleDeleteSelected,
-      handleDimensionRadius,
       handleExplodeSelected,
       handleJoinSelected,
       handleJumpToOrigin,
@@ -2692,6 +2828,112 @@ export default function App() {
         </div>
       </div>
 
+      {/* 3 Canvas Tabs Bar (畫布分頁 1 / 2 / 3) with Cross-Tab Copy / Cut / Paste / Continuous Copy (CO) */}
+      <div className="flex items-center justify-between gap-2 px-3 py-1 bg-[#090D15] border-b border-slate-800 text-xs shrink-0 overflow-x-auto">
+        <div className="flex items-center gap-1.5 shrink-0">
+          <span className="flex items-center gap-1 text-[11px] font-semibold text-slate-400 mr-1">
+            <Layers className="w-3.5 h-3.5 text-sky-400" />
+            <span>畫布分頁：</span>
+          </span>
+          {canvasTabs.map((tab, idx) => {
+            const isTabActive = tab.id === activeCanvasTabId;
+            const tabEntities = tab.history[tab.historyIndex] || [];
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => handleSwitchCanvasTab(tab.id)}
+                className={`flex items-center gap-1.5 px-3 py-1 rounded-md font-medium border transition-colors whitespace-nowrap shrink-0 ${
+                  isTabActive
+                    ? 'bg-sky-600 text-white border-sky-400 shadow-sm'
+                    : 'bg-slate-900/90 text-slate-300 border-slate-800 hover:bg-slate-800 hover:text-white'
+                }`}
+              >
+                <span className="font-mono text-[11px] opacity-80">
+                  #{idx + 1}
+                </span>
+                <span>{tab.name}</span>
+                <span
+                  className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                    isTabActive
+                      ? 'bg-sky-800/90 text-sky-100'
+                      : 'bg-slate-950 text-slate-400'
+                  }`}
+                >
+                  {tabEntities.length}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Cross-Tab Copy / Cut / Paste / Continuous Copy Action Strip */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          <span className="text-[11px] text-slate-400 hidden md:inline">
+            跨分頁圖形操作：
+          </span>
+          <button
+            type="button"
+            onClick={handleCopyClipboard}
+            disabled={selectedIds.length === 0}
+            title="複製選取圖形至跨分頁剪貼簿 (Ctrl+C)"
+            className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-900 text-sky-300 border border-slate-700 hover:border-sky-500/60 disabled:opacity-40 text-[11px] font-medium whitespace-nowrap"
+          >
+            <ClipboardCopy className="w-3 h-3" />
+            <span>複製 (Ctrl+C)</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleCutClipboard}
+            disabled={selectedIds.length === 0}
+            title="剪下選取圖形至跨分頁剪貼簿 (Ctrl+X)"
+            className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-900 text-amber-300 border border-slate-700 hover:border-amber-500/60 disabled:opacity-40 text-[11px] font-medium whitespace-nowrap"
+          >
+            <Scissors className="w-3 h-3" />
+            <span>剪下 (Ctrl+X)</span>
+          </button>
+          <button
+            type="button"
+            onClick={handlePasteClipboard}
+            disabled={clipboard.length === 0}
+            title="於目前畫布分頁貼上剪貼簿圖形 (Ctrl+V)"
+            className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-900 text-emerald-300 border border-slate-700 hover:border-emerald-500/60 disabled:opacity-40 text-[11px] font-medium whitespace-nowrap"
+          >
+            <Clipboard className="w-3 h-3" />
+            <span>
+              貼上{clipboard.length > 0 ? ` (${clipboard.length})` : ''} (Ctrl+V)
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => handleSelectTool('copy')}
+            disabled={
+              selectedIds.length === 0 &&
+              crossTabCopyEntities.length === 0 &&
+              clipboard.length === 0
+            }
+            title="跨分頁連續複製圖形 (快捷鍵 CO)"
+            className={`flex items-center gap-1 px-2.5 py-0.5 rounded border text-[11px] font-medium transition-colors whitespace-nowrap ${
+              activeTool === 'copy'
+                ? 'bg-amber-500 text-slate-950 border-amber-300 font-semibold'
+                : 'bg-slate-900 text-amber-200 border-amber-500/40 hover:border-amber-400 disabled:opacity-40'
+            }`}
+          >
+            <Copy className="w-3 h-3" />
+            <span>
+              連續複製 (CO)
+              {selectedIds.length > 0
+                ? ` (${selectedIds.length})`
+                : crossTabCopyEntities.length > 0
+                  ? ` (${crossTabCopyEntities.length})`
+                  : clipboard.length > 0
+                    ? ` (${clipboard.length})`
+                    : ''}
+            </span>
+          </button>
+        </div>
+      </div>
+
       {/* Main Responsive CAD Workspace */}
       <main className="relative flex-1 flex min-w-0 min-h-0 overflow-hidden">
         {/* Left Tool Palette */}
@@ -2714,7 +2956,7 @@ export default function App() {
               onChangeFilletRadius={setFilletRadius}
               filletAutoDim={filletAutoDim}
               onChangeFilletAutoDim={setFilletAutoDim}
-              onDimensionRadius={handleDimensionRadius}
+              onDimensionRadiusSelected={handleDimensionRadius}
               selectedCount={selectedIds.length}
               hasClipboard={clipboard.length > 0}
               onCopyClipboard={handleCopyClipboard}
@@ -2788,6 +3030,9 @@ export default function App() {
           setDrawingPoints={setDrawingPoints}
           fitTrigger={fitTrigger}
           jumpToOriginTrigger={jumpToOriginTrigger}
+          copySourceEntities={
+            crossTabCopyEntities.length > 0 ? crossTabCopyEntities : clipboard
+          }
         />
 
         {/* Right Inspector & Layers Sidebar */}
@@ -2860,8 +3105,10 @@ export default function App() {
         onExecuteCommand={handleExecuteCommand}
       />
 
-      {/* Cursor-Positioned Quick Shortcut Dropdown Menu when multiple shortcuts share the first letter */}
-      {pendingKeyPrefix && matchingShortcutsForMenu.length > 0 && (
+      {/* Cursor-Positioned Quick Shortcut Dropdown Menu when multiple shortcuts share the first letter (respects settings.showShortcutMenu) */}
+      {settings.showShortcutMenu &&
+        pendingKeyPrefix &&
+        matchingShortcutsForMenu.length > 0 && (
         <div
           onMouseEnter={() => {
             shortcutMenuHoveredRef.current = true;

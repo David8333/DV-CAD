@@ -201,6 +201,7 @@ export interface DraftingSettings {
   };
   dynInput: boolean;
   showLineWeight: boolean;
+  showShortcutMenu: boolean;
 }
 
 export interface CommandLogItem {

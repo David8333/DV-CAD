@@ -106,6 +106,7 @@ interface CadViewportProps {
   setDrawingPoints: React.Dispatch<React.SetStateAction<Point[]>>;
   fitTrigger: number;
   jumpToOriginTrigger: number;
+  copySourceEntities?: CadEntity[];
 }
 
 export const CadViewport: React.FC<CadViewportProps> = ({
@@ -150,6 +151,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   setDrawingPoints,
   fitTrigger,
   jumpToOriginTrigger,
+  copySourceEntities = [],
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -887,29 +889,49 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         }
 
         case 'copy': {
-          if (selectedIds.length === 0) {
-            onLogCommand('COPY 請先選取要複製的物件。', 'error');
+          const currentSelected = entities.filter((e) =>
+            selectedIds.includes(e.id)
+          );
+          const sourceForCopy =
+            currentSelected.length > 0 ? currentSelected : copySourceEntities;
+          if (sourceForCopy.length === 0) {
+            onLogCommand(
+              'COPY 請先選取要複製的物件（支援跨畫布分頁選取或剪貼簿物件連續複製）。',
+              'error'
+            );
             return;
           }
           if (drawingPoints.length === 0) {
             setDrawingPoints([pt]);
             onLogCommand(
-              `COPY 指定基準點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 點選目標點可連續複製，按空白鍵/Esc 結束`,
+              `COPY 指定基準點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 點選目標點可連續複製（可切換至其他畫布分頁繼續點擊連續複製），按空白鍵/Esc 結束`,
               'info'
             );
           } else {
             const base = drawingPoints[0];
             const dx = pt.x - base.x;
             const dy = pt.y - base.y;
-            const copies = entities
-              .filter((e) => selectedIds.includes(e.id))
-              .map((e, i) => ({
-                ...translateEntity(e, dx, dy),
-                id: `copy_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 5)}`,
-              }));
+            const cloneCopiedEntity = (
+              ent: CadEntity,
+              idx: number
+            ): CadEntity => {
+              const shifted = translateEntity(ent, dx, dy);
+              const newId = `copy_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 6)}`;
+              if (shifted.type === 'group') {
+                return {
+                  ...shifted,
+                  id: newId,
+                  children: shifted.children.map((c, ci) =>
+                    cloneCopiedEntity(c, ci)
+                  ),
+                };
+              }
+              return { ...shifted, id: newId };
+            };
+            const copies = sourceForCopy.map((e, i) => cloneCopiedEntity(e, i));
             onUpdateEntities([...entities, ...copies]);
             onLogCommand(
-              `COPY 已複製 ${copies.length} 個物件 — 可繼續點選放置下一個副本，或按空白鍵/Esc 結束`,
+              `COPY 已連續複製 ${copies.length} 個物件 — 可繼續點選放置下一個副本（或切換畫布分頁連續複製），按空白鍵/Esc 結束`,
               'success'
             );
           }
@@ -1005,6 +1027,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       setDrawingPoints,
       wallLayerId,
       zoom,
+      copySourceEntities,
     ]
   );
 
@@ -3733,10 +3756,15 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         ctx.moveTo(s0.x, s0.y);
         ctx.lineTo(sCur.x, sCur.y);
         ctx.stroke();
-        for (const ent of entities) {
-          if (selectedIds.includes(ent.id)) {
-            drawEntity(translateEntity(ent, dx, dy), '#FBBF24');
-          }
+        const currentSelected = entities.filter((ent) =>
+          selectedIds.includes(ent.id)
+        );
+        const previewList =
+          activeTool === 'copy' && currentSelected.length === 0
+            ? copySourceEntities
+            : currentSelected;
+        for (const ent of previewList) {
+          drawEntity(translateEntity(ent, dx, dy), '#FBBF24');
         }
       } else if (activeTool === 'rotate') {
         const ang = angleBetween(p0, cursorWorld);
@@ -3962,6 +3990,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     settings.showLineWeight,
     worldToScreen,
     zoom,
+    copySourceEntities,
   ]);
 
   const anchorPoint =

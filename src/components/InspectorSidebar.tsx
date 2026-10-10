@@ -12,6 +12,7 @@ import {
   Copy,
   Combine,
   AlignCenterHorizontal,
+  Keyboard,
 } from 'lucide-react';
 import {
   CadEntity,
@@ -174,14 +175,46 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
       {/* Tab Content */}
       <div className="flex-1 overflow-y-auto p-4 space-y-5">
         {activeTab === 'properties' ? (
-          selectedEntities.length === 0 ? (
-            /* Document & OSNAP Configuration when nothing is selected */
-            <div className="space-y-5">
-              <div>
-                <h3 className="text-xs font-semibold text-slate-200 mb-2.5">
-                  圖面概況與目前設定
-                </h3>
-                <div className="bg-slate-900/70 border border-slate-800 rounded-lg divide-y divide-slate-800/80 text-xs">
+          <div className="space-y-5">
+            {/* Shortcut Dropdown Menu Toggle Control (always accessible in Properties & Modify Dimensions menu) */}
+            <div className="bg-slate-900/90 border border-sky-500/40 rounded-lg p-3 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Keyboard className="w-4 h-4 text-amber-400 shrink-0" />
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-slate-100 truncate">
+                    快捷鍵下拉選單
+                  </div>
+                  <div className="text-[10px] text-slate-400 truncate">
+                    按相同首字母時於鼠標顯示選單
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  onUpdateSettings((s) => ({
+                    ...s,
+                    showShortcutMenu: !s.showShortcutMenu,
+                  }))
+                }
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors shrink-0 ${
+                  settings.showShortcutMenu
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50 hover:bg-emerald-500/30'
+                    : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'
+                }`}
+              >
+                {settings.showShortcutMenu ? 'ON 開啟中' : 'OFF 已關閉'}
+              </button>
+            </div>
+
+            {selectedEntities.length === 0 ? (
+              /* Document & OSNAP Configuration when nothing is selected */
+              <div className="space-y-5">
+                <div>
+                  <h3 className="text-xs font-semibold text-slate-200 mb-2.5">
+                    圖面概況與目前設定
+                  </h3>
+                  <div className="bg-slate-900/70 border border-slate-800 rounded-lg divide-y divide-slate-800/80 text-xs">
                   <div className="flex items-center justify-between px-3 py-2">
                     <span className="text-slate-400">製圖單位</span>
                     <span className="font-mono text-slate-200">公釐 (mm)</span>
@@ -1557,7 +1590,8 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                 </div>
               )}
             </div>
-          )
+            )}
+          </div>
         ) : (
           /* Layers Manager Tab */
           <div className="space-y-4">
