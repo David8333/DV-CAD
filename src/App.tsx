@@ -846,6 +846,7 @@ export default function App() {
         trim: 'TRIM 剪切圖元模式 (快捷鍵 TR) — 支援剪切直線、聚合線、圓形與三點圓弧',
         extend: 'EXTEND 延伸圖元模式 (快捷鍵 EX) — 點選兩個線段可互相延伸接合至交點（或點選同一線段延伸至邊界）',
         join: 'JOIN 組裝圖元模式 (快捷鍵 J) — 選取多個圖元後按 J 保留原位置組合成單一物件',
+        pdfWindow: 'PDF 窗選匯出模式 — 請在畫布上框選要匯出為 PDF 的區域',
       };
       logCommand(`指令切換: ${toolNames[tool]}`, 'command');
     },

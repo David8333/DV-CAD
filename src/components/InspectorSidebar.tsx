@@ -13,6 +13,7 @@ import {
   Combine,
   AlignCenterHorizontal,
   Keyboard,
+  X,
 } from 'lucide-react';
 import {
   CadEntity,
@@ -53,6 +54,7 @@ interface InspectorSidebarProps {
   onDuplicateSelected: () => void;
   settings: DraftingSettings;
   onUpdateSettings: React.Dispatch<React.SetStateAction<DraftingSettings>>;
+  onClose?: () => void;
 }
 
 const PRESET_COLORS = [
@@ -84,6 +86,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
   onDuplicateSelected,
   settings,
   onUpdateSettings,
+  onClose,
 }) => {
   const [activeTab, setActiveTab] = useState<'properties' | 'layers'>(
     'properties'
@@ -141,35 +144,45 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
   };
 
   return (
-    <aside className="w-80 shrink-0 h-full bg-[#0F172A] border-l border-slate-800 flex flex-col select-none">
-      {/* Segmented Tab Control */}
-      <div className="p-2.5 border-b border-slate-800">
-        <div className="grid grid-cols-2 gap-1 p-1 bg-slate-900 rounded-lg border border-slate-800/80">
+    <aside className="w-64 sm:w-72 xl:w-80 shrink-0 h-full bg-[#0F172A] border-l border-slate-800 flex flex-col select-none relative">
+      {/* Segmented Tab Control + Close Button */}
+      <div className="p-2 border-b border-slate-800 flex items-center gap-1.5">
+        <div className="flex-1 grid grid-cols-2 gap-1 p-0.5 bg-slate-900 rounded-lg border border-slate-800/80">
           <button
             type="button"
             onClick={() => setActiveTab('properties')}
-            className={`flex items-center justify-center gap-1.5 py-1.5 px-3 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
+            className={`flex items-center justify-center gap-1 py-1.5 px-2 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap truncate ${
               activeTab === 'properties'
                 ? 'bg-slate-800 text-slate-100 shadow-sm'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            <Sliders className="w-3.5 h-3.5" />
-            <span>性質與修改尺寸 ({selectedEntities.length})</span>
+            <Sliders className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">性質/尺寸 ({selectedEntities.length})</span>
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('layers')}
-            className={`flex items-center justify-center gap-1.5 py-1.5 px-3 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
+            className={`flex items-center justify-center gap-1 py-1.5 px-2 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap truncate ${
               activeTab === 'layers'
                 ? 'bg-slate-800 text-slate-100 shadow-sm'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            <Layers className="w-3.5 h-3.5" />
-            <span>圖層管理 ({layers.length})</span>
+            <Layers className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">圖層 ({layers.length})</span>
           </button>
         </div>
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            title="收合面板"
+            className="p-1.5 rounded-lg bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800 shrink-0"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        )}
       </div>
 
       {/* Tab Content */}

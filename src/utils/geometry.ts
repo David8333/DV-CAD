@@ -1580,6 +1580,17 @@ function findClosestSegmentIndex(
   return bestIdx;
 }
 
+function projectPointOnSegment(p: Point, a: Point, b: Point): Point {
+  const l2 = (b.x - a.x) ** 2 + (b.y - a.y) ** 2;
+  if (l2 < 1e-9) return a;
+  let t = ((p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y)) / l2;
+  t = Math.max(0, Math.min(1, t));
+  return {
+    x: a.x + t * (b.x - a.x),
+    y: a.y + t * (b.y - a.y),
+  };
+}
+
 function selectKeepAndTrimEndpoints(
   a1: Point,
   a2: Point,
@@ -1946,9 +1957,6 @@ export function findBestSnapPoint(
   const visibleLayerIds = new Set(
     layers.filter((l) => l.visible).map((l) => l.id)
   );
-  const topVisible = entities.filter((e) => visibleLayerIds.has(e.layerId));
-  const visibleEntities = flattenEntities(topVisible);
-
   const maxSnapDist = 14 / zoom;
   let bestSnap: SnapPoint | null = null;
   let bestDist = maxSnapDist;
@@ -1968,11 +1976,61 @@ export function findBestSnapPoint(
   };
 
   if (settings.osnap) {
-    const allSegments: Array<[Point, Point]> = [];
+    const snapMinX = cursorWorld.x - maxSnapDist;
+    const snapMaxX = cursorWorld.x + maxSnapDist;
+    const snapMinY = cursorWorld.y - maxSnapDist;
+    const snapMaxY = cursorWorld.y + maxSnapDist;
 
-    for (const ent of visibleEntities) {
+    const topVisible = entities.filter((e) => visibleLayerIds.has(e.layerId));
+    // Fast bounding box pre-filter avoids traversing 100,000 entities
+    const candidateEntities: CadEntity[] = [];
+    for (let i = 0; i < topVisible.length; i++) {
+      const ent = topVisible[i];
+      if (ent.type === 'line') {
+        const x1 = ent.p1.x, x2 = ent.p2.x;
+        const y1 = ent.p1.y, y2 = ent.p2.y;
+        if (
+          Math.max(x1, x2) < snapMinX ||
+          Math.min(x1, x2) > snapMaxX ||
+          Math.max(y1, y2) < snapMinY ||
+          Math.min(y1, y2) > snapMaxY
+        ) {
+          continue;
+        }
+      } else if (ent.type === 'circle') {
+        const cx = ent.center.x, cy = ent.center.y, r = ent.radius;
+        if (
+          cx + r < snapMinX ||
+          cx - r > snapMaxX ||
+          cy + r < snapMinY ||
+          cy - r > snapMaxY
+        ) {
+          continue;
+        }
+      } else {
+        const b = getEntityBounds(ent);
+        if (
+          b.maxX < snapMinX ||
+          b.minX > snapMaxX ||
+          b.maxY < snapMinY ||
+          b.minY > snapMaxY
+        ) {
+          continue;
+        }
+      }
+      candidateEntities.push(ent);
+      if (candidateEntities.length >= 60) break; // Cap local snap candidates
+    }
+
+    const nearbyVisible = candidateEntities.some((e) => e.type === 'group')
+      ? flattenEntities(candidateEntities)
+      : candidateEntities;
+
+    const nearbySegments: Array<[Point, Point]> = [];
+
+    for (const ent of nearbyVisible) {
       const segs = getEntitySegments(ent);
-      allSegments.push(...segs);
+      nearbySegments.push(...segs);
 
       if (settings.osnapModes.endpoint) {
         for (const [s, e] of segs) {
@@ -2067,14 +2125,14 @@ export function findBestSnapPoint(
       }
     }
 
-    if (settings.osnapModes.intersection && allSegments.length <= 180) {
-      for (let i = 0; i < allSegments.length; i++) {
-        for (let j = i + 1; j < allSegments.length; j++) {
+    if (settings.osnapModes.intersection && nearbySegments.length <= 80) {
+      for (let i = 0; i < nearbySegments.length; i++) {
+        for (let j = i + 1; j < nearbySegments.length; j++) {
           const pt = segmentIntersection(
-            allSegments[i][0],
-            allSegments[i][1],
-            allSegments[j][0],
-            allSegments[j][1]
+            nearbySegments[i][0],
+            nearbySegments[i][1],
+            nearbySegments[j][0],
+            nearbySegments[j][1]
           );
           if (pt) {
             consider(pt, 'intersection', '交點 (Intersection)');
@@ -2248,8 +2306,15 @@ export function isPointNearEntity(
   tolerance: number
 ): boolean {
   switch (entity.type) {
-    case 'line':
+    case 'line': {
+      const minX = Math.min(entity.p1.x, entity.p2.x) - tolerance;
+      const maxX = Math.max(entity.p1.x, entity.p2.x) + tolerance;
+      if (p.x < minX || p.x > maxX) return false;
+      const minY = Math.min(entity.p1.y, entity.p2.y) - tolerance;
+      const maxY = Math.max(entity.p1.y, entity.p2.y) + tolerance;
+      if (p.y < minY || p.y > maxY) return false;
       return distToSegment(p, entity.p1, entity.p2) <= tolerance;
+    }
     case 'rectangle':
     case 'polyline':
     case 'polygon': {

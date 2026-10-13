@@ -52,6 +52,7 @@ const TOOL_PROMPTS: Record<ToolType, string> = {
   trim: 'TRIM 剪切模式 (TR) — 支援剪切直線、矩形、圓形與三點圓弧！移至圖元預覽紅虛線後點擊切除',
   extend: 'EXTEND 延伸模式 (EX) — 依序點選兩個線段可互相延伸接合至交點（或點選同一線段延伸至邊界）',
   join: 'JOIN 組裝圖元 (J) — 保留所有選取圖元原始位置並合併成單一物件，按空白鍵或 Enter 完成',
+  pdfWindow: 'PDF 窗選匯出模式 — 請依序點選或拉框選取欲匯出為 PDF 的區域',
 };
 
 export const CommandDock: React.FC<CommandDockProps> = ({
