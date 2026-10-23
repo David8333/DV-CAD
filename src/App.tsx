@@ -463,6 +463,14 @@ export default function App() {
   // Auto-save all 3 canvas tabs to localStorage whenever any tab changes
   useEffect(() => {
     try {
+      const totalCount = canvasTabs.reduce(
+        (sum, t) => sum + (t.history[t.historyIndex]?.length || 0),
+        0
+      );
+      if (totalCount > 5000) {
+        // Skip serializing massive entity sets to localStorage to prevent freezing main thread
+        return;
+      }
       const serializedTabs = canvasTabs.map((t) => ({
         id: t.id,
         name: t.name,
@@ -593,6 +601,12 @@ export default function App() {
         prev.map((tab) => {
           if (tab.id !== activeCanvasTabId) return tab;
           const sliced = tab.history.slice(0, tab.historyIndex + 1);
+          const maxSteps = nextEntities.length > 10000 ? 5 : 30;
+          const trimmed =
+            sliced.length >= maxSteps
+              ? sliced.slice(sliced.length - maxSteps + 1)
+              : sliced;
+
           let nextLayers = tab.layers;
           const layerSources =
             extraSourceLayers && extraSourceLayers.length > 0
@@ -600,19 +614,20 @@ export default function App() {
               : crossTabCopyLayers;
           if (layerSources.length > 0) {
             const existingIds = new Set(tab.layers.map((l) => l.id));
-            const missingLayers = layerSources.filter(
-              (l) =>
-                !existingIds.has(l.id) &&
-                nextEntities.some((e) => e.layerId === l.id)
-            );
-            if (missingLayers.length > 0) {
-              nextLayers = [...tab.layers, ...missingLayers];
+            const newLayerSources = layerSources.filter((l) => !existingIds.has(l.id));
+            if (newLayerSources.length > 0) {
+              const neededLayers = nextEntities.length > 5000
+                ? newLayerSources
+                : newLayerSources.filter((l) => nextEntities.some((e) => e.layerId === l.id));
+              if (neededLayers.length > 0) {
+                nextLayers = [...tab.layers, ...neededLayers];
+              }
             }
           }
           return {
             ...tab,
-            history: [...sliced, nextEntities],
-            historyIndex: tab.historyIndex + 1,
+            history: [...trimmed, nextEntities],
+            historyIndex: trimmed.length,
             layers: nextLayers,
           };
         })
@@ -717,7 +732,11 @@ export default function App() {
         } else {
           // Merge into existing drawing
           pushEntities([...entities, ...sanitized]);
-          setSelectedIds(sanitized.map((e) => e.id));
+          if (sanitized.length > 100) {
+            setSelectedIds([]);
+          } else {
+            setSelectedIds(sanitized.map((e) => e.id));
+          }
         }
 
         setActiveModal(null);

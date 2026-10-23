@@ -8,9 +8,11 @@ import {
   LineEntity,
   Point,
   PolylineEntity,
+  RectangleEntity,
   TextEntity,
 } from '../types/cad';
 import {
+  arcFromThreePoints,
   DEG_TO_RAD,
   getArcThreePoints,
   rotateEntity,
@@ -206,43 +208,160 @@ function tokenizeDxf(content: string): DxfPair[] {
 }
 
 /**
- * Convert an LWPOLYLINE arc segment with bulge into intermediate points
+ * Convert polyline vertices into native CAD entities:
+ * 1. Recognizable closed axis-aligned rectangle -> native RectangleEntity (or 4 lines if non-axis-aligned)
+ * 2. Arc segments (bulge != 0) -> exact native ArcEntity (never broken into approximate straight lines)
+ * 3. Straight segments (bulge == 0) -> native LineEntity (every line is independently selectable & editable)
+ * 4. Closed polylines retain the closing segment connecting the last vertex back to the first vertex
  */
-function tessellateBulgeSegment(
-  p1: Point,
-  p2: Point,
-  bulge: number,
-  segments = 12
-): Point[] {
-  if (Math.abs(bulge) < 1e-5) return [p1];
-  const chordDx = p2.x - p1.x;
-  const chordDy = p2.y - p1.y;
-  const chordLen = Math.hypot(chordDx, chordDy);
-  if (chordLen < 1e-5) return [p1];
+export function convertPolylineVerticesToCadEntities(
+  verts: Array<{ x: number; y: number; bulge?: number }>,
+  closed: boolean,
+  layerId: string,
+  color?: string,
+  lineType?: CadLayer['lineType'],
+  lineWeight?: number,
+  baseUid = `poly_${Date.now()}`
+): CadEntity[] {
+  if (!verts || verts.length < 2) return [];
 
-  const includedAngle = 4 * Math.atan(bulge);
-  const radius = chordLen / (2 * Math.sin(Math.abs(includedAngle) / 2));
-  const midX = (p1.x + p2.x) / 2;
-  const midY = (p1.y + p2.y) / 2;
-  const apothem = radius * Math.cos(Math.abs(includedAngle) / 2);
-  const sign = bulge >= 0 ? 1 : -1;
-  const nx = (-chordDy / chordLen) * sign;
-  const ny = (chordDx / chordLen) * sign;
-  const factor = Math.abs(includedAngle) <= Math.PI ? 1 : -1;
-  const cx = midX + nx * apothem * factor;
-  const cy = midY + ny * apothem * factor;
-
-  const startAng = Math.atan2(p1.y - cy, p1.x - cx);
-  const pts: Point[] = [];
-  for (let i = 0; i < segments; i++) {
-    const t = i / segments;
-    const ang = startAng + includedAngle * t;
-    pts.push({
-      x: cx + radius * Math.cos(ang),
-      y: cy + radius * Math.sin(ang),
-    });
+  // Filter out immediate duplicate consecutive points (while preserving bulge)
+  const cleanedVerts: Array<{ x: number; y: number; bulge: number }> = [];
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i];
+    const b = Number(v.bulge) || 0;
+    if (cleanedVerts.length > 0) {
+      const prev = cleanedVerts[cleanedVerts.length - 1];
+      if (Math.hypot(v.x - prev.x, v.y - prev.y) < 1e-5) {
+        // Update bulge if duplicate has bulge
+        if (Math.abs(b) > 1e-5 && Math.abs(prev.bulge) < 1e-5) {
+          prev.bulge = b;
+        }
+        continue;
+      }
+    }
+    cleanedVerts.push({ x: Number(v.x) || 0, y: Number(v.y) || 0, bulge: b });
   }
-  return pts;
+
+  // If the last point duplicates the first point in a closed polyline, remove it and mark closed
+  if (cleanedVerts.length >= 3) {
+    const first = cleanedVerts[0];
+    const last = cleanedVerts[cleanedVerts.length - 1];
+    if (Math.hypot(first.x - last.x, first.y - last.y) < 1e-5) {
+      if (Math.abs(last.bulge) > 1e-5 && Math.abs(first.bulge) < 1e-5) {
+        first.bulge = last.bulge;
+      }
+      cleanedVerts.pop();
+      closed = true;
+    }
+  }
+
+  if (cleanedVerts.length < 2) return [];
+
+  // 1. Check if this is a recognizable closed axis-aligned rectangle (4 vertices, all bulge = 0)
+  if (closed && cleanedVerts.length === 4) {
+    const hasBulge = cleanedVerts.some((v) => Math.abs(v.bulge) > 1e-4);
+    if (!hasBulge) {
+      const v0 = cleanedVerts[0];
+      const v1 = cleanedVerts[1];
+      const v2 = cleanedVerts[2];
+      const v3 = cleanedVerts[3];
+
+      const isHorizVert =
+        Math.abs(v0.y - v1.y) < 1e-3 &&
+        Math.abs(v1.x - v2.x) < 1e-3 &&
+        Math.abs(v2.y - v3.y) < 1e-3 &&
+        Math.abs(v3.x - v0.x) < 1e-3;
+
+      const isVertHoriz =
+        Math.abs(v0.x - v1.x) < 1e-3 &&
+        Math.abs(v1.y - v2.y) < 1e-3 &&
+        Math.abs(v2.x - v3.x) < 1e-3 &&
+        Math.abs(v3.y - v0.y) < 1e-3;
+
+      if (isHorizVert || isVertHoriz) {
+        const minX = Math.min(v0.x, v1.x, v2.x, v3.x);
+        const maxX = Math.max(v0.x, v1.x, v2.x, v3.x);
+        const minY = Math.min(v0.y, v1.y, v2.y, v3.y);
+        const maxY = Math.max(v0.y, v1.y, v2.y, v3.y);
+        if (maxX - minX > 1e-4 && maxY - minY > 1e-4) {
+          const rectEnt: RectangleEntity = {
+            id: `${baseUid}_rect`,
+            type: 'rectangle',
+            layerId,
+            color,
+            lineType,
+            lineWeight,
+            p1: { x: minX, y: minY },
+            p2: { x: maxX, y: maxY },
+          };
+          return [rectEnt];
+        }
+      }
+    }
+  }
+
+  // 2. Otherwise: Convert each segment to native Line or native Arc
+  const entities: CadEntity[] = [];
+  const segCount = closed ? cleanedVerts.length : cleanedVerts.length - 1;
+
+  for (let i = 0; i < segCount; i++) {
+    const p1 = { x: cleanedVerts[i].x, y: cleanedVerts[i].y };
+    const nextIdx = (i + 1) % cleanedVerts.length;
+    const p2 = { x: cleanedVerts[nextIdx].x, y: cleanedVerts[nextIdx].y };
+    const segLen = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    if (segLen < 1e-5) continue;
+
+    const b = cleanedVerts[i].bulge;
+
+    if (Math.abs(b) >= 1e-4) {
+      // Bulge arc segment -> native ArcEntity
+      const dx = p2.x - p1.x;
+      const dy = p2.y - p1.y;
+      const midX = (p1.x + p2.x) / 2;
+      const midY = (p1.y + p2.y) / 2;
+      const pMid: Point = {
+        x: midX + dy * (b / 2),
+        y: midY - dx * (b / 2),
+      };
+
+      const arcData = arcFromThreePoints(p1, pMid, p2);
+      if (arcData && arcData.radius > 1e-4) {
+        const arcEnt: ArcEntity = {
+          id: `${baseUid}_arc_${i}`,
+          type: 'arc',
+          layerId,
+          color,
+          lineType,
+          lineWeight,
+          center: arcData.center,
+          radius: arcData.radius,
+          startAngle: arcData.startAngle,
+          endAngle: arcData.endAngle,
+          p1,
+          p2: pMid,
+          p3: p2,
+        };
+        entities.push(arcEnt);
+        continue;
+      }
+    }
+
+    // Straight segment -> native LineEntity
+    const lineEnt: LineEntity = {
+      id: `${baseUid}_line_${i}`,
+      type: 'line',
+      layerId,
+      color,
+      lineType,
+      lineWeight,
+      p1,
+      p2,
+    };
+    entities.push(lineEnt);
+  }
+
+  return entities;
 }
 
 function scaleCadEntity(
@@ -381,38 +500,21 @@ function parseDxfEntityRecords(
 
       if (verts.length >= 2) {
         const closed = (flags & 1) === 1;
-        const points: Point[] = [];
-        for (let vIdx = 0; vIdx < verts.length; vIdx++) {
-          const curr = verts[vIdx];
-          const next = verts[(vIdx + 1) % verts.length];
-          const isLastOpen = !closed && vIdx === verts.length - 1;
-          if (!isLastOpen && Math.abs(curr.bulge) > 1e-4) {
-            points.push(
-              ...tessellateBulgeSegment(
-                { x: curr.x, y: curr.y },
-                { x: next.x, y: next.y },
-                curr.bulge
-              )
-            );
-          } else {
-            points.push({ x: curr.x, y: curr.y });
-          }
-        }
-        const polyEnt: PolylineEntity = {
-          id: uid,
-          type: 'polyline',
-          layerId,
-          color: entityColor,
-          lineType: entityLineType,
-          points,
+        const subEnts = convertPolylineVerticesToCadEntities(
+          verts,
           closed,
-        };
-        entities.push(polyEnt);
+          layerId,
+          entityColor,
+          entityLineType,
+          undefined,
+          uid
+        );
+        entities.push(...subEnts);
       }
     } else if (etype === 'POLYLINE') {
       const flags = getNum(70, 0);
       const closed = (flags & 1) === 1;
-      const pts: Point[] = [];
+      const verts: Array<{ x: number; y: number; bulge: number }> = [];
       i++;
       while (i < records.length) {
         const sub = records[i];
@@ -425,19 +527,38 @@ function parseDxfEntityRecords(
             parseFloat(sub.props.find((p) => p.code === 10)?.value || '0') || 0;
           const vy =
             parseFloat(sub.props.find((p) => p.code === 20)?.value || '0') || 0;
-          pts.push({ x: vx, y: vy });
+          const vb =
+            parseFloat(sub.props.find((p) => p.code === 42)?.value || '0') || 0;
+          verts.push({ x: vx, y: vy, bulge: vb });
         }
         i++;
       }
-      if (pts.length >= 2) {
+      if (verts.length >= 2) {
+        const subEnts = convertPolylineVerticesToCadEntities(
+          verts,
+          closed,
+          layerId,
+          entityColor,
+          entityLineType,
+          undefined,
+          uid
+        );
+        entities.push(...subEnts);
+      }
+    } else if (etype === 'RECTANGLE' || etype === 'RECTANG') {
+      const x1 = getNum(10, 0);
+      const y1 = getNum(20, 0);
+      const x2 = getNum(11, 100);
+      const y2 = getNum(21, 100);
+      if (Math.hypot(x2 - x1, y2 - y1) > 1e-4) {
         entities.push({
           id: uid,
-          type: 'polyline',
+          type: 'rectangle',
           layerId,
           color: entityColor,
           lineType: entityLineType,
-          points: pts,
-          closed,
+          p1: { x: Math.min(x1, x2), y: Math.min(y1, y2) },
+          p2: { x: Math.max(x1, x2), y: Math.max(y1, y2) },
         });
       }
     } else if (etype === 'CIRCLE') {
@@ -1057,13 +1178,17 @@ function convertDwgDatabaseToCad(
   // Build block definitions map from db.tables?.BLOCK_RECORD?.entries
   const blocksMap = new Map<string, { basePoint: Point; entities: CadEntity[] }>();
 
-  const convertRawEntity = (raw: any, blockBaseLayer = '0'): CadEntity | null => {
+  const convertRawEntity = (
+    raw: any,
+    blockBaseLayer = '0'
+  ): CadEntity | CadEntity[] | null => {
     if (!raw || !raw.type) return null;
     const t = String(raw.type).toUpperCase();
     const rawLayer = raw.layer || blockBaseLayer || '0';
     const layerId = ensureLayer(rawLayer, raw.colorIndex);
     const uid = `dwg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const entityColor = raw.colorIndex !== undefined ? aciToHex(raw.colorIndex) : undefined;
+    const entityColor =
+      raw.colorIndex !== undefined ? aciToHex(raw.colorIndex) : undefined;
 
     if (t === 'LINE') {
       const p1 = raw.startPoint || raw.p1 || { x: 0, y: 0 };
@@ -1086,33 +1211,41 @@ function convertDwgDatabaseToCad(
       t === 'POLYLINE2D' ||
       t === 'POLYLINE3D'
     ) {
-      const verts: any[] = raw.vertices || raw.points || [];
-      if (verts.length >= 2) {
-        const closed = Boolean(raw.closed || (raw.flag && (raw.flag & 1) === 1));
-        const pts: Point[] = [];
-        for (let vIdx = 0; vIdx < verts.length; vIdx++) {
-          const curr = verts[vIdx];
-          const next = verts[(vIdx + 1) % verts.length];
-          const b = Number(curr.bulge) || 0;
-          if (Math.abs(b) > 1e-4 && (closed || vIdx < verts.length - 1)) {
-            pts.push(
-              ...tessellateBulgeSegment(
-                { x: Number(curr.x) || 0, y: Number(curr.y) || 0 },
-                { x: Number(next.x) || 0, y: Number(next.y) || 0 },
-                b
-              )
-            );
-          } else {
-            pts.push({ x: Number(curr.x) || 0, y: Number(curr.y) || 0 });
-          }
-        }
+      const rawVerts: any[] = raw.vertices || raw.points || [];
+      if (rawVerts.length >= 2) {
+        const closed = Boolean(
+          raw.closed || (raw.flag && (raw.flag & 1) === 1)
+        );
+        const cleanVerts = rawVerts.map((v) => ({
+          x: Number(v.x) || 0,
+          y: Number(v.y) || 0,
+          bulge: Number(v.bulge) || 0,
+        }));
+        return convertPolylineVerticesToCadEntities(
+          cleanVerts,
+          closed,
+          layerId,
+          entityColor ? ensureHighContrastColor(entityColor) : undefined,
+          undefined,
+          undefined,
+          uid
+        );
+      }
+    } else if (t === 'RECTANGLE' || t === 'RECTANG') {
+      const p1 = raw.p1 || raw.startPoint || { x: 0, y: 0 };
+      const p2 = raw.p2 || raw.endPoint || { x: 100, y: 100 };
+      const minX = Math.min(Number(p1.x) || 0, Number(p2.x) || 0);
+      const maxX = Math.max(Number(p1.x) || 0, Number(p2.x) || 0);
+      const minY = Math.min(Number(p1.y) || 0, Number(p2.y) || 0);
+      const maxY = Math.max(Number(p1.y) || 0, Number(p2.y) || 0);
+      if (maxX - minX > 1e-4 && maxY - minY > 1e-4) {
         return {
           id: uid,
-          type: 'polyline',
+          type: 'rectangle',
           layerId,
           color: entityColor ? ensureHighContrastColor(entityColor) : undefined,
-          points: pts,
-          closed,
+          p1: { x: minX, y: minY },
+          p2: { x: maxX, y: maxY },
         };
       }
     } else if (t === 'CIRCLE') {
@@ -1312,7 +1445,10 @@ function convertDwgDatabaseToCad(
         const bEnts: CadEntity[] = [];
         for (const sub of bEntry.entities) {
           const converted = convertRawEntity(sub, '0');
-          if (converted) bEnts.push(converted);
+          if (converted) {
+            if (Array.isArray(converted)) bEnts.push(...converted);
+            else bEnts.push(converted);
+          }
         }
         const bData = {
           basePoint: {
@@ -1334,7 +1470,10 @@ function convertDwgDatabaseToCad(
 
   for (const raw of rawEntities) {
     const ent = convertRawEntity(raw);
-    if (ent) entities.push(ent);
+    if (ent) {
+      if (Array.isArray(ent)) entities.push(...ent);
+      else entities.push(ent);
+    }
   }
 
   return {

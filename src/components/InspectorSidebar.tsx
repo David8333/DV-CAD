@@ -522,7 +522,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                     </span>
                   </div>
 
-                  {/* 1. Dimension Mode: Linear vs ISO Circle Diameter (Ø) vs Radius (R) */}
+                  {/* 1. Dimension Mode: Linear (Auto) vs Aligned vs Horizontal vs Vertical vs Diameter vs Radius */}
                   <div className="space-y-1">
                     <span className="block text-[11px] text-slate-300">
                       標註規範模式：
@@ -536,6 +536,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                             textOverride: undefined,
                           })
                         }
+                        title="自動判斷水平或垂直 (DIMLINEAR)"
                         className={`py-1 px-1.5 rounded text-[10px] font-medium transition-colors ${
                           (selectedDimensions[0].dimMode || 'linear') ===
                           'linear'
@@ -543,7 +544,58 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                             : 'text-slate-400 hover:text-slate-200'
                         }`}
                       >
-                        線性尺寸
+                        自動線性
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateSelectedDimensions({
+                            dimMode: 'aligned',
+                            textOverride: undefined,
+                          })
+                        }
+                        title="斜向真實距離 (DIMALIGNED)"
+                        className={`py-1 px-1.5 rounded text-[10px] font-medium transition-colors ${
+                          selectedDimensions[0].dimMode === 'aligned'
+                            ? 'bg-sky-600 text-white'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        對齊尺寸
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateSelectedDimensions({
+                            dimMode: 'horizontal',
+                            textOverride: undefined,
+                          })
+                        }
+                        title="水平尺寸量測 X 差值"
+                        className={`py-1 px-1.5 rounded text-[10px] font-medium transition-colors ${
+                          selectedDimensions[0].dimMode === 'horizontal'
+                            ? 'bg-sky-600 text-white'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        水平 (ΔX)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateSelectedDimensions({
+                            dimMode: 'vertical',
+                            textOverride: undefined,
+                          })
+                        }
+                        title="垂直尺寸量測 Y 差值"
+                        className={`py-1 px-1.5 rounded text-[10px] font-medium transition-colors ${
+                          selectedDimensions[0].dimMode === 'vertical'
+                            ? 'bg-sky-600 text-white'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        垂直 (ΔY)
                       </button>
                       <button
                         type="button"
@@ -553,6 +605,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                             textOverride: undefined,
                           })
                         }
+                        title="圓直徑 (DIMDIAMETER)"
                         className={`py-1 px-1.5 rounded text-[10px] font-medium transition-colors ${
                           selectedDimensions[0].dimMode === 'diameter'
                             ? 'bg-amber-500 text-slate-950 font-semibold'
@@ -569,13 +622,14 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                             textOverride: undefined,
                           })
                         }
+                        title="圓弧半徑 (DIMRADIUS)"
                         className={`py-1 px-1.5 rounded text-[10px] font-medium transition-colors ${
                           selectedDimensions[0].dimMode === 'radius'
                             ? 'bg-emerald-500 text-slate-950 font-semibold'
                             : 'text-slate-400 hover:text-slate-200'
                         }`}
                       >
-                        導圓角半徑 (R)
+                        圓弧半徑 (R)
                       </button>
                     </div>
                   </div>

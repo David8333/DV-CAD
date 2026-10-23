@@ -4,6 +4,7 @@ import {
   CadLayer,
   CircleEntity,
   DimensionEntity,
+  DimensionMode,
   DraftingSettings,
   GripHandle,
   GroupEntity,
@@ -106,7 +107,7 @@ export function arcFromThreePoints(
 
   const center = { x: ux, y: uy };
   const radius = dist(center, p1);
-  if (radius < 0.1 || radius > 50000) return null;
+  if (radius < 1e-4 || radius > 1e9) return null;
 
   const a1 = normalizeAngle(Math.atan2(p1.y - uy, p1.x - ux));
   const a2 = normalizeAngle(Math.atan2(p2.y - uy, p2.x - ux));
@@ -1981,11 +1982,14 @@ export function findBestSnapPoint(
     const snapMinY = cursorWorld.y - maxSnapDist;
     const snapMaxY = cursorWorld.y + maxSnapDist;
 
-    const topVisible = entities.filter((e) => visibleLayerIds.has(e.layerId));
-    // Fast bounding box pre-filter avoids traversing 100,000 entities
+    // Recursively flatten all entities to leaves so group children (assemblies/exploded views) are all accessible
+    const allLeaves = flattenEntities(entities);
+    const visibleLeaves = allLeaves.filter((e) => visibleLayerIds.has(e.layerId));
+
+    // Fast bounding box pre-filter avoids traversing non-relevant entities
     const candidateEntities: CadEntity[] = [];
-    for (let i = 0; i < topVisible.length; i++) {
-      const ent = topVisible[i];
+    for (let i = 0; i < visibleLeaves.length; i++) {
+      const ent = visibleLeaves[i];
       if (ent.type === 'line') {
         const x1 = ent.p1.x, x2 = ent.p2.x;
         const y1 = ent.p1.y, y2 = ent.p2.y;
@@ -2019,12 +2023,10 @@ export function findBestSnapPoint(
         }
       }
       candidateEntities.push(ent);
-      if (candidateEntities.length >= 60) break; // Cap local snap candidates
+      if (candidateEntities.length >= 500) break; // Generous safety cap for massive drawings
     }
 
-    const nearbyVisible = candidateEntities.some((e) => e.type === 'group')
-      ? flattenEntities(candidateEntities)
-      : candidateEntities;
+    const nearbyVisible = candidateEntities;
 
     const nearbySegments: Array<[Point, Point]> = [];
 
@@ -2168,7 +2170,8 @@ export function snapDimensionOffsetToExisting(
   rawOffsetPt: Point,
   entities: CadEntity[],
   zoom: number,
-  ignoreId?: string
+  ignoreId?: string,
+  dimMode?: DimensionMode
 ): {
   offsetPoint: Point;
   alignGuide: [Point, Point] | null;
@@ -2178,28 +2181,86 @@ export function snapDimensionOffsetToExisting(
   const len = Math.hypot(dx, dy);
   if (len < 1e-4) return { offsetPoint: rawOffsetPt, alignGuide: null };
 
+  const center = midpoint(p1, p2);
+  const tol = 14 / zoom;
+  let bestOffsetPt = rawOffsetPt;
+  let bestGuide: [Point, Point] | null = null;
+  const leaves = flattenEntities(entities);
+
+  // Determine effective orientation: 'horizontal', 'vertical', or 'aligned'
+  let effectiveMode = dimMode || 'linear';
+  if (effectiveMode === 'linear') {
+    if (Math.abs(dy) < 1e-4) {
+      effectiveMode = 'horizontal';
+    } else if (Math.abs(dx) < 1e-4) {
+      effectiveMode = 'vertical';
+    } else {
+      const distX = Math.abs(rawOffsetPt.x - center.x);
+      const distY = Math.abs(rawOffsetPt.y - center.y);
+      effectiveMode = distY > distX ? 'horizontal' : 'vertical';
+    }
+  }
+
+  if (effectiveMode === 'horizontal') {
+    let bestDiff = tol;
+    for (const ent of leaves) {
+      if (ent.type !== 'dimension' || ent.id === ignoreId) continue;
+      const otherDim = getDimensionLinePoints(ent);
+      // Check if other dimension has a horizontal dimension line (dimP1.y ≈ dimP2.y)
+      if (Math.abs(otherDim.dimP1.y - otherDim.dimP2.y) < 1e-3) {
+        const targetY = otherDim.dimP1.y;
+        const diff = Math.abs(rawOffsetPt.y - targetY);
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          bestOffsetPt = { x: rawOffsetPt.x, y: targetY };
+          const minX = Math.min(p1.x, p2.x, otherDim.dimP1.x, otherDim.dimP2.x);
+          const maxX = Math.max(p1.x, p2.x, otherDim.dimP1.x, otherDim.dimP2.x);
+          bestGuide = [
+            { x: minX, y: targetY },
+            { x: maxX, y: targetY },
+          ];
+        }
+      }
+    }
+    return { offsetPoint: bestOffsetPt, alignGuide: bestGuide };
+  }
+
+  if (effectiveMode === 'vertical') {
+    let bestDiff = tol;
+    for (const ent of leaves) {
+      if (ent.type !== 'dimension' || ent.id === ignoreId) continue;
+      const otherDim = getDimensionLinePoints(ent);
+      // Check if other dimension has a vertical dimension line (dimP1.x ≈ dimP2.x)
+      if (Math.abs(otherDim.dimP1.x - otherDim.dimP2.x) < 1e-3) {
+        const targetX = otherDim.dimP1.x;
+        const diff = Math.abs(rawOffsetPt.x - targetX);
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          bestOffsetPt = { x: targetX, y: rawOffsetPt.y };
+          const minY = Math.min(p1.y, p2.y, otherDim.dimP1.y, otherDim.dimP2.y);
+          const maxY = Math.max(p1.y, p2.y, otherDim.dimP1.y, otherDim.dimP2.y);
+          bestGuide = [
+            { x: targetX, y: minY },
+            { x: targetX, y: maxY },
+          ];
+        }
+      }
+    }
+    return { offsetPoint: bestOffsetPt, alignGuide: bestGuide };
+  }
+
+  // Aligned mode snapping
   const ux = dx / len;
   const uy = dy / len;
   const nx = -uy;
   const ny = ux;
   const curOffsetDist =
     (rawOffsetPt.x - p1.x) * nx + (rawOffsetPt.y - p1.y) * ny;
-  const curMid = midpoint(
-    { x: p1.x + nx * curOffsetDist, y: p1.y + ny * curOffsetDist },
-    { x: p2.x + nx * curOffsetDist, y: p2.y + ny * curOffsetDist }
-  );
-
-  const tol = 12 / zoom;
   let bestDiff = tol;
-  let bestOffsetPt = rawOffsetPt;
-  let bestGuide: [Point, Point] | null = null;
 
-  const leaves = flattenEntities(entities);
   for (const ent of leaves) {
     if (ent.type !== 'dimension' || ent.id === ignoreId) continue;
     const otherDim = getDimensionLinePoints(ent);
-
-    // Project existing dimension's dimP1 onto this dimension's normal vector (nx, ny)
     const targetOffsetDist =
       (otherDim.dimP1.x - p1.x) * nx + (otherDim.dimP1.y - p1.y) * ny;
     const diff = Math.abs(curOffsetDist - targetOffsetDist);
@@ -2387,7 +2448,7 @@ export function getDimensionLinePoints(entity: {
   p1: Point;
   p2: Point;
   offsetPoint: Point;
-  dimMode?: 'linear' | 'diameter' | 'radius';
+  dimMode?: DimensionMode;
   textOverride?: string;
 }): {
   dimP1: Point;
@@ -2549,32 +2610,119 @@ export function getDimensionLinePoints(entity: {
     };
   }
 
-  const ux = dx / len;
-  const uy = dy / len;
-  const nx = -uy;
-  const ny = ux;
-  const offsetDist =
-    (entity.offsetPoint.x - entity.p1.x) * nx +
-    (entity.offsetPoint.y - entity.p1.y) * ny;
-  const dimP1 = {
-    x: entity.p1.x + nx * offsetDist,
-    y: entity.p1.y + ny * offsetDist,
-  };
-  const dimP2 = {
-    x: entity.p2.x + nx * offsetDist,
-    y: entity.p2.y + ny * offsetDist,
-  };
-  return {
-    dimP1,
-    dimP2,
-    mid: midpoint(dimP1, dimP2),
-    angle: Math.atan2(dy, dx),
-    length: len,
-    isDiameter: false,
-    isRadius: false,
-    center,
-    leaderOutside: false,
-  };
+  // 1. Explicit Aligned Dimension (對齊尺寸)
+  if (entity.dimMode === 'aligned') {
+    const ux = dx / len;
+    const uy = dy / len;
+    const nx = -uy;
+    const ny = ux;
+    const offsetDist =
+      (entity.offsetPoint.x - entity.p1.x) * nx +
+      (entity.offsetPoint.y - entity.p1.y) * ny;
+    const dimP1 = {
+      x: entity.p1.x + nx * offsetDist,
+      y: entity.p1.y + ny * offsetDist,
+    };
+    const dimP2 = {
+      x: entity.p2.x + nx * offsetDist,
+      y: entity.p2.y + ny * offsetDist,
+    };
+    return {
+      dimP1,
+      dimP2,
+      mid: midpoint(dimP1, dimP2),
+      angle: Math.atan2(dy, dx),
+      length: len,
+      isDiameter: false,
+      isRadius: false,
+      center,
+      leaderOutside: false,
+    };
+  }
+
+  // 2. Linear Dimension: Horizontal vs Vertical
+  // Determine orientation: 'horizontal', 'vertical', or 'linear' (auto-detect based on offset direction)
+  let isHorizontal: boolean;
+  if (entity.dimMode === 'horizontal') {
+    isHorizontal = true;
+  } else if (entity.dimMode === 'vertical') {
+    isHorizontal = false;
+  } else {
+    // 'linear' (auto) or undefined:
+    if (Math.abs(dy) < 1e-4) {
+      // Pure horizontal line
+      isHorizontal = true;
+    } else if (Math.abs(dx) < 1e-4) {
+      // Pure vertical line
+      isHorizontal = false;
+    } else {
+      // Diagonal: check displacement from midpoint
+      const distX = Math.abs(entity.offsetPoint.x - center.x);
+      const distY = Math.abs(entity.offsetPoint.y - center.y);
+      if (distY > distX) {
+        // Pulled primarily up/down -> horizontal dimension measuring |dx|
+        isHorizontal = true;
+      } else if (distX > distY) {
+        // Pulled primarily left/right -> vertical dimension measuring |dy|
+        isHorizontal = false;
+      } else {
+        // 45° diagonal tie-breaker based on larger measured coordinate difference
+        isHorizontal = Math.abs(dx) >= Math.abs(dy);
+      }
+    }
+  }
+
+  if (isHorizontal) {
+    // Horizontal dimension: measures |dx|, dimension line horizontal at offsetPoint.y
+    const measuredLen = Math.abs(dx);
+    const dimP1 = {
+      x: entity.p1.x,
+      y: entity.offsetPoint.y,
+    };
+    const dimP2 = {
+      x: entity.p2.x,
+      y: entity.offsetPoint.y,
+    };
+    return {
+      dimP1,
+      dimP2,
+      mid: {
+        x: (entity.p1.x + entity.p2.x) / 2,
+        y: entity.offsetPoint.y,
+      },
+      angle: 0,
+      length: measuredLen,
+      isDiameter: false,
+      isRadius: false,
+      center,
+      leaderOutside: false,
+    };
+  } else {
+    // Vertical dimension: measures |dy|, dimension line vertical at offsetPoint.x
+    const measuredLen = Math.abs(dy);
+    const dimP1 = {
+      x: entity.offsetPoint.x,
+      y: entity.p1.y,
+    };
+    const dimP2 = {
+      x: entity.offsetPoint.x,
+      y: entity.p2.y,
+    };
+    return {
+      dimP1,
+      dimP2,
+      mid: {
+        x: entity.offsetPoint.x,
+        y: (entity.p1.y + entity.p2.y) / 2,
+      },
+      angle: Math.PI / 2,
+      length: measuredLen,
+      isDiameter: false,
+      isRadius: false,
+      center,
+      leaderOutside: false,
+    };
+  }
 }
 
 /**
@@ -2644,7 +2792,7 @@ export function formatDimensionLabel(
   entity: {
     p1: Point;
     p2: Point;
-    dimMode?: 'linear' | 'diameter' | 'radius';
+    dimMode?: DimensionMode;
     precision?: 0 | 1 | 2;
     toleranceMode?: 'none' | 'symmetric' | 'deviation';
     toleranceUpper?: number;
@@ -2659,7 +2807,13 @@ export function formatDimensionLabel(
   lowerText: string | null;
   fullText: string;
 } {
-  const len = computedLength ?? dist(entity.p1, entity.p2);
+  const fallbackLen =
+    entity.dimMode === 'horizontal'
+      ? Math.abs(entity.p2.x - entity.p1.x)
+      : entity.dimMode === 'vertical'
+        ? Math.abs(entity.p2.y - entity.p1.y)
+        : dist(entity.p1, entity.p2);
+  const len = computedLength ?? fallbackLen;
   const prec: 0 | 1 | 2 =
     entity.precision === 0 || entity.precision === 1 || entity.precision === 2
       ? entity.precision
@@ -2957,6 +3111,43 @@ export function translateEntity(
     default:
       return entity;
   }
+}
+
+/**
+ * Recursively reassign unique IDs to an entity and all its descendants without altering coordinates.
+ */
+export function reassignEntityUniqueIds(
+  entity: CadEntity,
+  pathPrefix = 'copy'
+): CadEntity {
+  const newId = `${pathPrefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  if (entity.type === 'group') {
+    return {
+      ...entity,
+      id: newId,
+      children: entity.children.map((child, idx) =>
+        reassignEntityUniqueIds(child, `${pathPrefix}_c${idx}`)
+      ),
+    };
+  }
+  return {
+    ...entity,
+    id: newId,
+  };
+}
+
+/**
+ * Clones a CAD entity (including multi-level nested groups), applying displacement (dx, dy)
+ * exactly once to all geometric coordinates and generating fresh unique IDs for all descendants.
+ */
+export function cloneEntityWithDisplacement(
+  entity: CadEntity,
+  dx: number,
+  dy: number,
+  index = 0
+): CadEntity {
+  const shifted = translateEntity(entity, dx, dy);
+  return reassignEntityUniqueIds(shifted, `copy_${index}`);
 }
 
 export function rotateEntity(

@@ -102,7 +102,13 @@ export interface PolygonEntity extends BaseEntity {
 
 export type DimensionPrecision = 0 | 1 | 2;
 export type DimensionToleranceMode = 'none' | 'symmetric' | 'deviation';
-export type DimensionMode = 'linear' | 'diameter' | 'radius';
+export type DimensionMode =
+  | 'linear'
+  | 'diameter'
+  | 'radius'
+  | 'aligned'
+  | 'horizontal'
+  | 'vertical';
 export type HatchMode = 'smart' | 'selectRange';
 
 export interface DimensionEntity extends BaseEntity {
@@ -112,7 +118,7 @@ export interface DimensionEntity extends BaseEntity {
   offsetPoint: Point;
   textOverride?: string;
   fontSize?: number; // default 11
-  dimMode?: DimensionMode; // 'linear' | 'diameter' (ISO Ø) | 'radius' (ISO R 半徑標註)
+  dimMode?: DimensionMode; // 'linear' | 'aligned' | 'horizontal' | 'vertical' | 'diameter' (ISO Ø) | 'radius' (ISO R)
   precision?: DimensionPrecision; // 0 (第0位), 1 (後第1位), 2 (後第2位)
   toleranceMode?: DimensionToleranceMode; // 'none' | 'symmetric' (±) | 'deviation' (+ / -)
   toleranceUpper?: number; // e.g. 0 or +0.01 to +99.99

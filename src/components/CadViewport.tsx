@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import {
   EyeOff,
   Info,
@@ -13,6 +13,7 @@ import {
   CadLayer,
   CircleEntity,
   DimensionEntity,
+  DimensionMode,
   DraftingSettings,
   GripHandle,
   HatchMode,
@@ -40,7 +41,9 @@ import {
   findBestSnapPoint,
   findConnectedEntityIds,
   findSmartHatchBoundaryAtPoint,
+  flattenEntities,
   formatDimensionLabel,
+  cloneEntityWithDisplacement,
   getArcThreePoints,
   getDimensionLinePoints,
   getEntityBounds,
@@ -824,7 +827,8 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             // Check if p1 & p2 are opposite points on a circle -> auto-set dimMode: 'diameter'
             const midPt = midpoint(p1, p2);
             const halfLen = dist(p1, p2) / 2;
-            const matchedCircle = entities.find(
+            const leaves = flattenEntities(entities);
+            const matchedCircle = leaves.find(
               (ent) =>
                 ent.type === 'circle' &&
                 dist(ent.center, midPt) <= Math.max(2, ent.radius * 0.08) &&
@@ -833,14 +837,15 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             const isDia = Boolean(matchedCircle);
             const { offsetPoint: snappedOffset } = isDia
               ? { offsetPoint: pt }
-              : snapDimensionOffsetToExisting(p1, p2, pt, entities, zoom);
-            onAddEntity({
+              : snapDimensionOffsetToExisting(p1, p2, pt, entities, zoom, undefined, 'linear');
+            const targetDimMode: DimensionMode = isDia ? 'diameter' : 'linear';
+            const newDim: DimensionEntity = {
               id,
               type: 'dimension',
               layerId: layers.some((l) => l.id === 'DIM')
                 ? 'DIM'
                 : activeLayerId,
-              dimMode: isDia ? 'diameter' : 'linear',
+              dimMode: targetDimMode,
               precision: 2,
               toleranceMode: 'none',
               toleranceUpper: 0.05,
@@ -849,13 +854,15 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               p2,
               offsetPoint: snappedOffset,
               fontSize: defaultDimFontSize,
-            });
+            };
+            onAddEntity(newDim);
             setDrawingPoints([]);
             setDimAlignGuide(null);
+            const dimInfo = getDimensionLinePoints(newDim);
             onLogCommand(
               isDia
-                ? `DIMDIAMETER 已依 ISO 國際規範標註圓形直徑: Ø${dist(p1, p2).toFixed(2)} (可於下方或右側屬性設定正負公差與小數位數)`
-                : `DIMLINEAR 已標註尺寸: ${dist(p1, p2).toFixed(2)} (可於下方或右側屬性設定正負公差與小數位數)`,
+                ? `DIMDIAMETER 已依 ISO 國際規範標註圓形直徑: Ø${dimInfo.length.toFixed(2)} (可於下方或右側屬性設定正負公差與小數位數)`
+                : `DIMLINEAR 已標註尺寸: ${dimInfo.length.toFixed(2)} (可於下方或右側屬性設定水平/垂直/對齊、正負公差與小數位數)`,
               'success'
             );
           }
@@ -943,24 +950,10 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             const base = drawingPoints[0];
             const dx = pt.x - base.x;
             const dy = pt.y - base.y;
-            const cloneCopiedEntity = (
-              ent: CadEntity,
-              idx: number
-            ): CadEntity => {
-              const shifted = translateEntity(ent, dx, dy);
-              const newId = `copy_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 6)}`;
-              if (shifted.type === 'group') {
-                return {
-                  ...shifted,
-                  id: newId,
-                  children: shifted.children.map((c, ci) =>
-                    cloneCopiedEntity(c, ci)
-                  ),
-                };
-              }
-              return { ...shifted, id: newId };
-            };
-            const copies = sourceForCopy.map((e, i) => cloneCopiedEntity(e, i));
+            // Shift group and all descendants exactly once, generating fresh unique IDs
+            const copies = sourceForCopy.map((e, i) =>
+              cloneEntityWithDisplacement(e, dx, dy, i)
+            );
             onUpdateEntities([...entities, ...copies]);
             onLogCommand(
               `COPY 已連續複製 ${copies.length} 個物件 — 可繼續點選放置下一個副本（或切換畫布分頁連續複製），按空白鍵/Esc 結束`,
@@ -1925,14 +1918,17 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       return;
     }
 
-    // 1b. If in DIMENSION mode and drawingPoints is empty, clicking directly on an Arc (導圓角/三點圓弧) starts an ISO Radius Dimension (R), or clicking a Circle starts an ISO Diameter Dimension (Ø)!
+    // 1b. If in DIMENSION mode and drawingPoints is empty, clicking directly on an Arc starts an ISO Radius Dimension (R), or clicking a Circle starts an ISO Diameter Dimension (Ø)!
+    // CRITICAL: If the user snapped to an endpoint or midpoint, they intend to measure linear distance, so do NOT hijack into radius dimension!
     if (
       activeTool === 'dimension' &&
       drawingPoints.length === 0 &&
-      !pendingRadiusDimArc
+      !pendingRadiusDimArc &&
+      (!activeSnap || (activeSnap.type !== 'endpoint' && activeSnap.type !== 'midpoint'))
     ) {
       const hitTol = 12 / zoom;
-      const hitArc = [...visibleEntities]
+      const leafEntities = flattenEntities(visibleEntities);
+      const hitArc = [...leafEntities]
         .reverse()
         .find(
           (ent): ent is ArcEntity =>
@@ -1947,7 +1943,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         return;
       }
 
-      const hitCircle = [...visibleEntities]
+      const hitCircle = [...leafEntities]
         .reverse()
         .find(
           (ent): ent is CircleEntity =>
@@ -2881,28 +2877,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             -ent.startAngle
           );
           ctx.stroke();
-
-          // Always render the 3 defining points (P1, P2, P3) on 3-point arcs (shrunk by half)
-          const [p1, p2, p3] = getArcThreePoints(ent);
-          const sp1 = worldToScreen(p1.x, p1.y);
-          const sp2 = worldToScreen(p2.x, p2.y);
-          const sp3 = worldToScreen(p3.x, p3.y);
-          ctx.setLineDash([]);
-          const dotRadius = isSelected || isHovered ? 1.9 : 1.3;
-          [
-            { pt: sp1, fill: '#10B981', tag: 'P1' },
-            { pt: sp2, fill: '#FBBF24', tag: 'P2' },
-            { pt: sp3, fill: '#F43F5E', tag: 'P3' },
-          ].forEach(({ pt, fill, tag }) => {
-            ctx.beginPath();
-            ctx.fillStyle = fill;
-            ctx.arc(pt.x, pt.y, dotRadius, 0, Math.PI * 2);
-            ctx.fill();
-            if (isSelected || isHovered) {
-              ctx.font = 'bold 9px "JetBrains Mono", monospace';
-              ctx.fillText(tag, pt.x + 5, pt.y - 4);
-            }
-          });
           break;
         }
         case 'dimension': {
@@ -3927,7 +3901,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           const p2 = drawingPoints[1];
           const midPt = midpoint(p1, p2);
           const halfLen = dist(p1, p2) / 2;
-          const isDia = entities.some(
+          const isDia = flattenEntities(entities).some(
             (ent) =>
               ent.type === 'circle' &&
               dist(ent.center, midPt) <= Math.max(2, ent.radius * 0.08) &&
@@ -3951,13 +3925,15 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       } else if (activeTool === 'move' || activeTool === 'copy') {
         const dx = cursorWorld.x - p0.x;
         const dy = cursorWorld.y - p0.y;
-        ctx.beginPath();
-        ctx.moveTo(s0.x, s0.y);
-        ctx.lineTo(sCur.x, sCur.y);
-        ctx.stroke();
         const currentSelected = entities.filter((ent) =>
           selectedIds.includes(ent.id)
         );
+        if (activeTool === 'move' || currentSelected.length > 0) {
+          ctx.beginPath();
+          ctx.moveTo(s0.x, s0.y);
+          ctx.lineTo(sCur.x, sCur.y);
+          ctx.stroke();
+        }
         const previewList =
           activeTool === 'copy' && currentSelected.length === 0
             ? copySourceEntities
@@ -4207,7 +4183,11 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       : Math.abs(cursorWorld.y - anchorPoint.y)
     : 0;
 
-  const selectedEntities = entities.filter((e) => selectedIds.includes(e.id));
+  const selectedEntities = useMemo(() => {
+    if (selectedIds.length === 0) return [];
+    const set = new Set(selectedIds);
+    return entities.filter((e) => set.has(e.id));
+  }, [entities, selectedIds]);
   const singleSelected =
     selectedEntities.length === 1 ? selectedEntities[0] : null;
   const selectedDims = selectedEntities.filter(
@@ -4906,35 +4886,76 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               {/* Dimension Direct Modification Bar: Mode (Linear / ISO Diameter), Precision (0 / 1 / 2), Tolerance (+/-), Font Size */}
               {singleSelected.type === 'dimension' && (
                 <div className="flex flex-wrap items-center gap-2 font-sans">
-                  {/* ISO Diameter / Radius / Linear toggle */}
+                  {/* Dimension Mode Toggle: Linear / Aligned / Horizontal / Vertical / Diameter / Radius */}
                   <div className="flex items-center bg-slate-950 border border-slate-700 rounded p-0.5">
                     <button
                       type="button"
                       onClick={() => updateSingleEntity({ dimMode: 'linear' })}
+                      title="自動判斷水平或垂直尺寸 (DIMLINEAR)"
                       className={`px-1.5 py-0.5 rounded text-[10px] ${
                         (singleSelected.dimMode ?? 'linear') === 'linear'
                           ? 'bg-sky-600 text-white'
                           : 'text-slate-400 hover:text-white'
                       }`}
                     >
-                      線性
+                      自動線性
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => updateSingleEntity({ dimMode: 'aligned' })}
+                      title="斜向兩點真實距離對齊標註 (DIMALIGNED)"
+                      className={`px-1.5 py-0.5 rounded text-[10px] ${
+                        singleSelected.dimMode === 'aligned'
+                          ? 'bg-sky-600 text-white'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      對齊
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateSingleEntity({ dimMode: 'horizontal' })
+                      }
+                      title="水平尺寸量測 X 差值 (DIMHORIZONTAL)"
+                      className={`px-1.5 py-0.5 rounded text-[10px] ${
+                        singleSelected.dimMode === 'horizontal'
+                          ? 'bg-sky-600 text-white'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      水平
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => updateSingleEntity({ dimMode: 'vertical' })}
+                      title="垂直尺寸量測 Y 差值 (DIMVERTICAL)"
+                      className={`px-1.5 py-0.5 rounded text-[10px] ${
+                        singleSelected.dimMode === 'vertical'
+                          ? 'bg-sky-600 text-white'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      垂直
                     </button>
                     <button
                       type="button"
                       onClick={() =>
                         updateSingleEntity({ dimMode: 'diameter' })
                       }
+                      title="圓直徑標註 (DIMDIAMETER)"
                       className={`px-1.5 py-0.5 rounded text-[10px] ${
                         singleSelected.dimMode === 'diameter'
-                          ? 'bg-sky-600 text-white'
+                          ? 'bg-amber-600 text-white'
                           : 'text-slate-400 hover:text-white'
                       }`}
                     >
-                      Ø直徑(ISO)
+                      Ø直徑
                     </button>
                     <button
                       type="button"
                       onClick={() => updateSingleEntity({ dimMode: 'radius' })}
+                      title="圓弧半徑標註 (DIMRADIUS)"
                       className={`px-1.5 py-0.5 rounded text-[10px] ${
                         singleSelected.dimMode === 'radius'
                           ? 'bg-emerald-600 text-white'
