@@ -169,7 +169,6 @@ export type ToolType =
   | 'pan'
   | 'zoomWindow'
   | 'line'
-  | 'polyline'
   | 'rectangle'
   | 'circle'
   | 'arc'

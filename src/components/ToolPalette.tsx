@@ -4,7 +4,6 @@ import {
   Hand,
   Search,
   Minus,
-  Waypoints,
   Square,
   Circle,
   Hexagon,
@@ -227,12 +226,6 @@ const DRAW_TOOLS: ToolItem[] = [
     icon: <Circle className="w-4 h-4" />,
   },
   {
-    id: 'polyline',
-    label: '聚合線',
-    shortcut: 'P',
-    icon: <Waypoints className="w-4 h-4" />,
-  },
-  {
     id: 'polygon',
     label: '正多邊形',
     shortcut: 'G',
@@ -376,8 +369,8 @@ export const ToolPalette: React.FC<ToolPaletteProps> = ({
   const [showArcDiagram, setShowArcDiagram] = React.useState<boolean>(false);
 
   return (
-    <aside className="w-56 sm:w-60 lg:w-64 shrink-0 h-full bg-[#0F172A] border-r border-slate-800 flex flex-col justify-between p-2 sm:p-2.5 overflow-y-auto select-none">
-      <div className="space-y-3">
+    <aside className="w-56 sm:w-60 lg:w-64 shrink-0 h-full max-h-full min-h-0 bg-[#0F172A] border-r border-slate-800 flex flex-col p-2 sm:p-2.5 overflow-y-auto overscroll-contain select-none">
+      <div className="space-y-3 pb-8">
         {onClose && (
           <div className="flex items-center justify-between pb-1 mb-1 border-b border-slate-800">
             <span className="text-xs font-bold text-slate-200">繪圖工具箱</span>

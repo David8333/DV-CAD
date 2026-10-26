@@ -243,6 +243,13 @@ export const CadViewport: React.FC<CadViewportProps> = ({
   const [moveTargetInputX, setMoveTargetInputX] = useState<string>('0');
   const [moveTargetInputY, setMoveTargetInputY] = useState<string>('0');
 
+  // Move selection confirmation state (AutoCAD Verb-Noun vs Noun-Verb support)
+  const [moveSelectionConfirmed, setMoveSelectionConfirmed] =
+    useState<boolean>(false);
+
+  // Dimension mode when actively creating dimensions (linear/auto, aligned, horizontal, vertical)
+  const [activeDimMode, setActiveDimMode] = useState<DimensionMode>('linear');
+
   // Dynamic numeric input while drawing, moving, or offsetting
   const [dynValue, setDynValue] = useState<string>('');
   const [dynAngleValue, setDynAngleValue] = useState<string>('');
@@ -432,10 +439,11 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     setDimAlignGuide(null);
     setExtendFirstPick(null);
     setCornerFirstPick(null);
+    setMoveSelectionConfirmed(selectedIds.length > 0);
     if (activeTool !== 'measure') {
       setMeasureResult(null);
     }
-  }, [activeTool]);
+  }, [activeTool, selectedIds.length]);
 
   // Execute X,Y coordinate jump for selected entities in move tool
   const executeMoveToCoordinates = useCallback(
@@ -573,23 +581,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                 'success'
               );
             }
-          }
-          break;
-        }
-
-        case 'polyline': {
-          if (drawingPoints.length === 0) {
-            setDrawingPoints([pt]);
-            onLogCommand(
-              `PLINE 指定起點: (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) — 請指定下一頂點，按空白鍵或 Enter 完成聚合線`,
-              'info'
-            );
-          } else {
-            setDrawingPoints((prev) => [...prev, pt]);
-            onLogCommand(
-              `PLINE 新增頂點 (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)})`,
-              'info'
-            );
           }
           break;
         }
@@ -824,21 +815,16 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           } else {
             const p1 = drawingPoints[0];
             const p2 = drawingPoints[1];
-            // Check if p1 & p2 are opposite points on a circle -> auto-set dimMode: 'diameter'
-            const midPt = midpoint(p1, p2);
-            const halfLen = dist(p1, p2) / 2;
-            const leaves = flattenEntities(entities);
-            const matchedCircle = leaves.find(
-              (ent) =>
-                ent.type === 'circle' &&
-                dist(ent.center, midPt) <= Math.max(2, ent.radius * 0.08) &&
-                Math.abs(ent.radius - halfLen) <= Math.max(2, ent.radius * 0.08)
+            const targetDimMode: DimensionMode = activeDimMode;
+            const { offsetPoint: snappedOffset } = snapDimensionOffsetToExisting(
+              p1,
+              p2,
+              pt,
+              entities,
+              zoom,
+              undefined,
+              targetDimMode
             );
-            const isDia = Boolean(matchedCircle);
-            const { offsetPoint: snappedOffset } = isDia
-              ? { offsetPoint: pt }
-              : snapDimensionOffsetToExisting(p1, p2, pt, entities, zoom, undefined, 'linear');
-            const targetDimMode: DimensionMode = isDia ? 'diameter' : 'linear';
             const newDim: DimensionEntity = {
               id,
               type: 'dimension',
@@ -860,9 +846,13 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             setDimAlignGuide(null);
             const dimInfo = getDimensionLinePoints(newDim);
             onLogCommand(
-              isDia
-                ? `DIMDIAMETER 已依 ISO 國際規範標註圓形直徑: Ø${dimInfo.length.toFixed(2)} (可於下方或右側屬性設定正負公差與小數位數)`
-                : `DIMLINEAR 已標註尺寸: ${dimInfo.length.toFixed(2)} (可於下方或右側屬性設定水平/垂直/對齊、正負公差與小數位數)`,
+              targetDimMode === 'aligned'
+                ? `DIMALIGNED 已標註對齊尺寸: ${dimInfo.length.toFixed(2)} mm (依兩點實際距離標註)`
+                : targetDimMode === 'horizontal'
+                  ? `DIMLINEAR 已標註水平尺寸 (ΔX): ${dimInfo.length.toFixed(2)} mm`
+                  : targetDimMode === 'vertical'
+                    ? `DIMLINEAR 已標註垂直尺寸 (ΔY): ${dimInfo.length.toFixed(2)} mm`
+                    : `DIMLINEAR 已標註尺寸: ${dimInfo.length.toFixed(2)} mm (${dimInfo.angle === 0 ? '水平 ΔX' : '垂直 ΔY'})`,
               'success'
             );
           }
@@ -1032,6 +1022,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       setDynField('primary');
     },
     [
+      activeDimMode,
       activeLayerId,
       activeTool,
       canvasSize.height,
@@ -1359,6 +1350,22 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           return;
         }
 
+        // Spacebar/Enter to confirm selection in Move mode when objects are selected and waiting for base point
+        if (
+          activeTool === 'move' &&
+          selectedIds.length > 0 &&
+          drawingPoints.length === 0 &&
+          dynValue.trim() === ''
+        ) {
+          e.preventDefault();
+          setMoveSelectionConfirmed(true);
+          onLogCommand(
+            `MOVE 物件選取確認 (共 ${selectedIds.length} 個物件) — 請點選移動基準點 (Base Point)`,
+            'info'
+          );
+          return;
+        }
+
         // Direct X,Y coordinate jump in MOVE or COPY mode!
         if (
           (activeTool === 'move' || activeTool === 'copy') &&
@@ -1461,7 +1468,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           cursorPinnedToOrigin &&
           [
             'line',
-            'polyline',
             'rectangle',
             'circle',
             'arc',
@@ -1478,23 +1484,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           e.preventDefault();
           setCursorPinnedToOrigin(false);
           commitPoint({ x: 0, y: 0 });
-          return;
-        }
-
-        if (activeTool === 'polyline' && drawingPoints.length >= 2) {
-          e.preventDefault();
-          onAddEntity({
-            id: `pl_${Date.now()}`,
-            type: 'polyline',
-            layerId: activeLayerId,
-            points: drawingPoints,
-            closed: false,
-          });
-          setDrawingPoints([]);
-          onLogCommand(
-            `PLINE 已完成聚合線 (${drawingPoints.length} 個頂點)`,
-            'success'
-          );
           return;
         }
 
@@ -1516,26 +1505,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           onToolComplete();
           return;
         }
-      }
-
-      if (
-        (e.key === 'c' || e.key === 'C') &&
-        activeTool === 'polyline' &&
-        drawingPoints.length >= 3
-      ) {
-        e.preventDefault();
-        onAddEntity({
-          id: `pl_${Date.now()}`,
-          type: 'polyline',
-          layerId: activeLayerId,
-          points: drawingPoints,
-          closed: true,
-        });
-        setDrawingPoints([]);
-        onLogCommand(
-          `PLINE 已建立封閉聚合線 (${drawingPoints.length} 個頂點)`,
-          'success'
-        );
       }
     };
 
@@ -1797,20 +1766,20 @@ export const CadViewport: React.FC<CadViewportProps> = ({
 
     if (e.button === 2) {
       e.preventDefault();
-      if (activeTool === 'polyline' && drawingPoints.length >= 2) {
-        onAddEntity({
-          id: `pl_${Date.now()}`,
-          type: 'polyline',
-          layerId: activeLayerId,
-          points: drawingPoints,
-          closed: false,
-        });
-        setDrawingPoints([]);
+      if (
+        activeTool === 'move' &&
+        selectedIds.length > 0 &&
+        drawingPoints.length === 0 &&
+        !moveSelectionConfirmed
+      ) {
+        setMoveSelectionConfirmed(true);
         onLogCommand(
-          `PLINE 已完成聚合線 (${drawingPoints.length} 個頂點)`,
-          'success'
+          `MOVE 物件選取確認 (共 ${selectedIds.length} 個物件) — 請點選移動基準點 (Base Point)`,
+          'info'
         );
-      } else if (drawingPoints.length > 0) {
+        return;
+      }
+      if (drawingPoints.length > 0) {
         setDrawingPoints([]);
       }
       return;
@@ -1900,14 +1869,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           if (!selectedIds.includes(hit.id)) {
             onSelectChange([hit.id]);
           }
-          // Allow direct smooth dragging of selected entities on canvas without freezing
-          setActiveEntityDrag({
-            startWorld: effectiveWorld,
-            currentWorld: effectiveWorld,
-            initialEntities: entities,
-          });
-          dragPreviewRef.current = null;
-          setDragPreviewEntities(null);
         }
       } else {
         setSelectionBoxStart(rawWorld);
@@ -1918,13 +1879,11 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       return;
     }
 
-    // 1b. If in DIMENSION mode and drawingPoints is empty, clicking directly on an Arc starts an ISO Radius Dimension (R), or clicking a Circle starts an ISO Diameter Dimension (Ø)!
-    // CRITICAL: If the user snapped to an endpoint or midpoint, they intend to measure linear distance, so do NOT hijack into radius dimension!
+    // 1b. If in DIMENSION mode with explicit radius or diameter mode, or pending radius arc:
     if (
       activeTool === 'dimension' &&
       drawingPoints.length === 0 &&
-      !pendingRadiusDimArc &&
-      (!activeSnap || (activeSnap.type !== 'endpoint' && activeSnap.type !== 'midpoint'))
+      (activeDimMode === 'radius' || activeDimMode === 'diameter' || pendingRadiusDimArc)
     ) {
       const hitTol = 12 / zoom;
       const leafEntities = flattenEntities(visibleEntities);
@@ -2207,8 +2166,34 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       return;
     }
 
-    // 2. Check if in ERASE (刪除圖元 E) mode
+    // 2. Check if in ERASE (刪除圖元 E) mode: 支援點選單一圖元刪除，以及按 E 後窗選/框選範圍刪除
     if (activeTool === 'erase') {
+      if (selectionBoxStart) {
+        const isCrossing = rawWorld.x < selectionBoxStart.x;
+        const boxedEntities = visibleEntities.filter((ent) =>
+          isEntityInSelectionBox(
+            ent,
+            selectionBoxStart,
+            rawWorld,
+            isCrossing
+          )
+        );
+        const boxedIds = new Set(boxedEntities.map((ent) => ent.id));
+        if (boxedIds.size > 0) {
+          const remaining = entities.filter((e) => !boxedIds.has(e.id));
+          onUpdateEntities(remaining);
+          onSelectChange(selectedIds.filter((id) => !boxedIds.has(id)));
+          onLogCommand(
+            `ERASE ${isCrossing ? '框選 (Crossing)' : '窗選 (Window)'}: 已成功刪除選取範圍內的 ${boxedIds.size} 個圖元！`,
+            'success'
+          );
+        } else {
+          onLogCommand('ERASE 窗選範圍內無圖元物件', 'info');
+        }
+        setSelectionBoxStart(null);
+        return;
+      }
+
       const hitTol = 10 / zoom;
       const hit = [...visibleEntities]
         .reverse()
@@ -2218,9 +2203,94 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         onSelectChange(selectedIds.filter((id) => id !== hit.id));
         onLogCommand(`ERASE 已刪除圖元 (${hit.type.toUpperCase()})`, 'success');
       } else {
-        onLogCommand('ERASE 請直接點選要刪除的圖元物件', 'info');
+        setSelectionBoxStart(rawWorld);
+        onLogCommand(
+          'ERASE 已指定窗選第一角點 — 請點選對角點以刪除範圍內全部圖元（按 ESC 可取消）',
+          'info'
+        );
       }
       return;
+    }
+
+    // 2b. Check if in MOVE (移動物件 M) mode: 支援先窗選後按 M (Noun-Verb)、先按 M 後選取 (Verb-Noun)，以及基準點 -> 目標點點擊式移動
+    if (activeTool === 'move') {
+      if (drawingPoints.length === 0) {
+        // Step 1: If selection is confirmed (or pre-selected prior to M), this click specifies the BASE POINT!
+        if (selectedIds.length > 0 && moveSelectionConfirmed) {
+          commitPoint(effectiveWorld);
+          return;
+        }
+
+        // If selection not confirmed yet, allow user to click or window-select objects:
+        if (selectionBoxStart) {
+          const isCrossing = rawWorld.x < selectionBoxStart.x;
+          const boxedIds = visibleEntities
+            .filter((ent) =>
+              isEntityInSelectionBox(
+                ent,
+                selectionBoxStart,
+                rawWorld,
+                isCrossing
+              )
+            )
+            .map((ent) => ent.id);
+          if (boxedIds.length > 0) {
+            const nextSel = e.shiftKey
+              ? Array.from(new Set([...selectedIds, ...boxedIds]))
+              : boxedIds;
+            onSelectChange(nextSel);
+            onLogCommand(
+              `MOVE ${isCrossing ? '框選 (Crossing)' : '窗選 (Window)'}: 已選取 ${nextSel.length} 個物件 — 按「空白鍵 / Enter / 右鍵」確認選取，或直接點選移動基準點`,
+              'info'
+            );
+          } else {
+            onLogCommand('MOVE 窗選範圍內無物件，請重新點選或窗選物件', 'info');
+          }
+          setSelectionBoxStart(null);
+          return;
+        }
+
+        const hitTol = 10 / zoom;
+        const hit = [...visibleEntities]
+          .reverse()
+          .find((ent) => isPointNearEntity(rawWorld, ent, hitTol));
+
+        if (hit) {
+          // If clicking an already selected entity's point: start base point immediately
+          if (selectedIds.includes(hit.id) && selectedIds.length > 0) {
+            setMoveSelectionConfirmed(true);
+            commitPoint(effectiveWorld);
+            return;
+          }
+          const nextSelected = e.shiftKey
+            ? (selectedIds.includes(hit.id) ? selectedIds.filter((id) => id !== hit.id) : [...selectedIds, hit.id])
+            : (selectedIds.includes(hit.id) ? selectedIds : [...selectedIds, hit.id]);
+          onSelectChange(nextSelected);
+          onLogCommand(
+            `MOVE 已選取物件 (${hit.type.toUpperCase()}) — 可繼續選取，或按「空白鍵 / Enter / 右鍵」確認選取並點選基準點`,
+            'info'
+          );
+        } else {
+          // If clicking empty canvas while objects already selected: treat as base point!
+          if (selectedIds.length > 0) {
+            setMoveSelectionConfirmed(true);
+            commitPoint(effectiveWorld);
+            return;
+          }
+          setSelectionBoxStart(rawWorld);
+          onLogCommand(
+            'MOVE 請窗選要移動的物件（點選對角點完成選取）',
+            'info'
+          );
+        }
+        return;
+      }
+
+      // Step 2: Base point is already set (drawingPoints.length === 1), this click is the TARGET POINT!
+      if (drawingPoints.length === 1) {
+        commitPoint(effectiveWorld);
+        return;
+      }
     }
 
     // 3. Check if in TRIM (剪切 TR — 支援直線、矩形、圓形、三點圓弧) mode
@@ -3228,10 +3298,18 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     }
 
     // Draw individual entities (circles, rects, arcs, text, hatches, dimensions, groups, selected/hovered lines)
+    const isMovingPreview = activeTool === 'move' && drawingPoints.length > 0;
     for (const ent of individualEntities) {
       const isSelected = selectedSet.has(ent.id);
       const isHovered = hoveredEntityId === ent.id;
-      drawEntity(ent, undefined, isSelected, isHovered);
+      if (isMovingPreview && isSelected) {
+        ctx.save();
+        ctx.globalAlpha = 0.28;
+        drawEntity(ent, '#94A3B8', false, false);
+        ctx.restore();
+      } else {
+        drawEntity(ent, undefined, isSelected, isHovered);
+      }
     }
 
     // 4. Render Live Trim (including Circles & 3-Point Arcs!) / Extend / Offset Previews
@@ -3631,7 +3709,12 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       const dyWorld = cursorWorld.y - pLast.y;
       const cornerScreen = worldToScreen(cursorWorld.x, pLast.y);
 
-      if (Math.abs(dxWorld) > 0.5 || Math.abs(dyWorld) > 0.5) {
+      if (
+        (Math.abs(dxWorld) > 0.5 || Math.abs(dyWorld) > 0.5) &&
+        activeTool !== 'dimension' &&
+        activeTool !== 'move' &&
+        activeTool !== 'copy'
+      ) {
         ctx.save();
         ctx.lineWidth = 1;
         ctx.setLineDash([4, 4]);
@@ -3725,15 +3808,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       } else if (activeTool === 'line' || activeTool === 'measure') {
         ctx.beginPath();
         ctx.moveTo(sLast.x, sLast.y);
-        ctx.lineTo(sCur.x, sCur.y);
-        ctx.stroke();
-      } else if (activeTool === 'polyline') {
-        ctx.beginPath();
-        for (let i = 0; i < drawingPoints.length; i++) {
-          const sp = worldToScreen(drawingPoints[i].x, drawingPoints[i].y);
-          if (i === 0) ctx.moveTo(sp.x, sp.y);
-          else ctx.lineTo(sp.x, sp.y);
-        }
         ctx.lineTo(sCur.x, sCur.y);
         ctx.stroke();
       } else if (activeTool === 'rectangle') {
@@ -3896,27 +3970,37 @@ export const CadViewport: React.FC<CadViewportProps> = ({
           ctx.moveTo(s0.x, s0.y);
           ctx.lineTo(sCur.x, sCur.y);
           ctx.stroke();
+
+          ctx.save();
+          ctx.setLineDash([]);
+          ctx.fillStyle = '#38BDF8';
+          ctx.beginPath();
+          ctx.arc(s0.x, s0.y, 3, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
         } else if (drawingPoints.length === 2) {
           const p1 = drawingPoints[0];
           const p2 = drawingPoints[1];
-          const midPt = midpoint(p1, p2);
-          const halfLen = dist(p1, p2) / 2;
-          const isDia = flattenEntities(entities).some(
-            (ent) =>
-              ent.type === 'circle' &&
-              dist(ent.center, midPt) <= Math.max(2, ent.radius * 0.08) &&
-              Math.abs(ent.radius - halfLen) <= Math.max(2, ent.radius * 0.08)
+          const targetDimMode: DimensionMode = activeDimMode;
+          const { offsetPoint: liveOffset } = snapDimensionOffsetToExisting(
+            p1,
+            p2,
+            cursorWorld,
+            entities,
+            zoom,
+            undefined,
+            targetDimMode
           );
           drawEntity(
             {
               id: 'preview-dim',
               type: 'dimension',
               layerId: activeLayerId,
-              dimMode: isDia ? 'diameter' : 'linear',
+              dimMode: targetDimMode,
               precision: 2,
               p1,
               p2,
-              offsetPoint: cursorWorld,
+              offsetPoint: liveOffset,
               fontSize: defaultDimFontSize,
             },
             '#FBBF24'
@@ -4131,6 +4215,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
       ctx.restore();
     }
   }, [
+    activeDimMode,
     activeGrip,
     activeEntityDrag,
     activeLayerId,
@@ -4203,6 +4288,8 @@ export const CadViewport: React.FC<CadViewportProps> = ({
     );
   };
 
+  const handleDoubleClick = () => {};
+
   return (
     <div
       ref={containerRef}
@@ -4213,6 +4300,7 @@ export const CadViewport: React.FC<CadViewportProps> = ({
         ref={canvasRef}
         onMouseMove={handleMouseMove}
         onMouseDown={handleMouseDown}
+        onDoubleClick={handleDoubleClick}
         onMouseUp={handleMouseUp}
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
@@ -4235,7 +4323,6 @@ export const CadViewport: React.FC<CadViewportProps> = ({
               {activeTool === 'pan' && '平移畫布 (H)'}
               {activeTool === 'line' && '畫直線 (L)'}
               {activeTool === 'dimension' && '標註尺寸 (D)'}
-              {activeTool === 'polyline' && '聚合線 (P)'}
               {activeTool === 'rectangle' &&
                 (rectangleMode === 'center'
                   ? '畫中心矩形 (R)'
@@ -4395,21 +4482,89 @@ export const CadViewport: React.FC<CadViewportProps> = ({
             )}
 
             {activeTool === 'dimension' && (
-              <div className="flex items-center gap-1 bg-slate-950 px-1.5 py-0.5 rounded border border-slate-700 shrink-0">
-                <span className="text-[10px] text-amber-300">字高:</span>
-                <input
-                  type="number"
-                  min={6}
-                  max={72}
-                  value={defaultDimFontSize}
-                  onChange={(e) =>
-                    onChangeDefaultDimFontSize(
-                      Math.max(6, Math.min(72, Number(e.target.value)))
-                    )
-                  }
-                  className="w-10 px-1 py-0 text-[10px] font-mono bg-slate-900 border border-slate-700 rounded text-amber-200"
-                />
+              <div className="flex items-center gap-1.5 shrink-0">
+                <div className="flex items-center bg-slate-950 p-0.5 rounded border border-slate-700 text-[10px]">
+                  <button
+                    type="button"
+                    onClick={() => setActiveDimMode('linear')}
+                    className={`px-1.5 py-0.5 rounded transition-colors ${
+                      activeDimMode === 'linear'
+                        ? 'bg-sky-600 text-white font-medium'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                    title="自動判斷水平或垂直 (DIMLINEAR)"
+                  >
+                    自動
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveDimMode('aligned')}
+                    className={`px-1.5 py-0.5 rounded transition-colors ${
+                      activeDimMode === 'aligned'
+                        ? 'bg-sky-600 text-white font-medium'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                    title="斜向真實直線距離 (DIMALIGNED)"
+                  >
+                    對齊
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveDimMode('horizontal')}
+                    className={`px-1.5 py-0.5 rounded transition-colors ${
+                      activeDimMode === 'horizontal'
+                        ? 'bg-sky-600 text-white font-medium'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                    title="水平尺寸量測 X 差值"
+                  >
+                    水平
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveDimMode('vertical')}
+                    className={`px-1.5 py-0.5 rounded transition-colors ${
+                      activeDimMode === 'vertical'
+                        ? 'bg-sky-600 text-white font-medium'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                    title="垂直尺寸量測 Y 差值"
+                  >
+                    垂直
+                  </button>
+                </div>
+                <div className="flex items-center gap-1 bg-slate-950 px-1.5 py-0.5 rounded border border-slate-700">
+                  <span className="text-[10px] text-amber-300">字高:</span>
+                  <input
+                    type="number"
+                    min={6}
+                    max={72}
+                    value={defaultDimFontSize}
+                    onChange={(e) =>
+                      onChangeDefaultDimFontSize(
+                        Math.max(6, Math.min(72, Number(e.target.value)))
+                      )
+                    }
+                    className="w-10 px-1 py-0 text-[10px] font-mono bg-slate-900 border border-slate-700 rounded text-amber-200"
+                  />
+                </div>
               </div>
+            )}
+
+            {activeTool === 'move' && selectedIds.length > 0 && !moveSelectionConfirmed && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMoveSelectionConfirmed(true);
+                  onLogCommand(
+                    `MOVE 選擇了 ${selectedIds.length} 個物件，請指定基準點:`,
+                    'info'
+                  );
+                }}
+                className="flex items-center gap-1 px-2 py-0.5 bg-amber-600 hover:bg-amber-500 text-white rounded text-[10px] font-semibold shrink-0 cursor-pointer animate-pulse"
+              >
+                確認選擇 ({selectedIds.length}) [Enter/空白鍵]
+              </button>
             )}
 
             {activeTool === 'move' && selectedIds.length > 0 && (
@@ -4501,16 +4656,20 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                   : '步驟 2：點選角點或輸入寬[Tab]高後按「空白鍵 / Enter」')}
               {activeTool === 'dimension' &&
                 (drawingPoints.length === 0
-                  ? '直接點擊圓周可建立 ISO 國際規範 Ø 直徑標註，或點選第一端點建立線性標註'
+                  ? '步驟 1/3：點選第一量測點（第一延伸線原點）'
                   : drawingPoints.length === 1
-                    ? '點選第二個標註端點'
-                    : '移動決定標註線位置（圓外自動產生國際規範水平折線引線，靠近既有標註自動對齊）')}
+                    ? '步驟 2/3：點選第二量測點（第二延伸線原點）'
+                    : '步驟 3/3：移動滑鼠自由定位尺寸線並點擊確認')}
               {activeTool === 'move' &&
-                (drawingPoints.length === 0
-                  ? '點選基準點，或直接輸入 X,Y 座標（亦可使用上方/右側座標跳轉欄）按空白鍵/Enter 跳轉移動'
-                  : '移動指定目標位置點，或直接輸入 X,Y 座標按「空白鍵 / Enter」')}
+                (selectedIds.length === 0
+                  ? (selectionBoxStart ? '點選對角點完成窗選' : '點選物件選取，或在空白處點擊拉出窗選方框')
+                  : drawingPoints.length === 0
+                    ? `已選取 ${selectedIds.length} 個物件 — 步驟 1/2：請點選移動基準點（Base Point）`
+                    : '步驟 2/2：移動滑鼠即時預覽，點選目標位置完成移動（按 ESC 可取消）')}
               {activeTool === 'erase' &&
-                '直接點選畫布上的任何圖元即可立即刪除（或按 ESC 返回選取）'}
+                (selectionBoxStart
+                  ? '點選對角點以刪除範圍內全部圖元（按 ESC 取消）'
+                  : '直接點選圖元刪除，或在空白處點擊拉出窗選方框批次刪除')}
               {activeTool === 'trim' &&
                 '支援剪切直線、矩形、圓形與三點圓弧！將游標移至圖元預覽紅虛線後點擊左鍵切除'}
               {activeTool === 'extend' &&
@@ -5378,6 +5537,42 @@ export const CadViewport: React.FC<CadViewportProps> = ({
                   {dynAngleValue !== '' ? dynAngleValue : liveHeight.toFixed(2)}
                 </span>
               </>
+            ) : activeTool === 'dimension' ? (
+              drawingPoints.length === 1 ? (
+                <>
+                  <span className="text-amber-300 font-sans">量測長度:</span>
+                  <span className="px-1 rounded bg-amber-500/25 text-amber-200 border border-amber-400/50">
+                    {liveDist.toFixed(2)} mm
+                  </span>
+                  <span className="text-[10px] text-slate-400">[點選第二量測點]</span>
+                </>
+              ) : (
+                <>
+                  <span className="text-amber-300 font-sans">
+                    {(() => {
+                      if (drawingPoints.length >= 2) {
+                        const p1 = drawingPoints[0];
+                        const p2 = drawingPoints[1];
+                        const info = getDimensionLinePoints({
+                          p1,
+                          p2,
+                          offsetPoint: cursorWorld,
+                          dimMode: activeDimMode,
+                        });
+                        const modeStr =
+                          activeDimMode === 'aligned'
+                            ? '對齊'
+                            : info.angle === 0
+                              ? '水平 ΔX'
+                              : '垂直 ΔY';
+                        return `${modeStr}: ${info.length.toFixed(2)} mm`;
+                      }
+                      return '尺寸線位置:';
+                    })()}
+                  </span>
+                  <span className="text-[10px] text-amber-200">[移動滑鼠決定偏移，點擊放置]</span>
+                </>
+              )
             ) : (
               <>
                 <span className="text-slate-400">

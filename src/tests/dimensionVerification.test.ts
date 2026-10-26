@@ -26,7 +26,8 @@ console.log('--- DV-CAD Phase 2 尺寸標註與幾何選取/OSNAP 驗證測試 -
 
 const defaultDraftingSettings: DraftingSettings = {
   grid: true,
-  gridSnap: false,
+  snap: false,
+  snapStep: 10,
   ortho: false,
   polar: false,
   polarAngle: 45,
@@ -38,8 +39,9 @@ const defaultDraftingSettings: DraftingSettings = {
     quadrant: true,
     intersection: true,
   },
+  dynInput: true,
   showLineWeight: false,
-  units: 'mm',
+  showShortcutMenu: true,
 };
 
 const defaultLayers = [

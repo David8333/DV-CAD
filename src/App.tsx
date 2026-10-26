@@ -837,15 +837,11 @@ export default function App() {
       } else {
         setDrawingPoints([]);
       }
-      if (typeof window !== 'undefined' && window.innerWidth < 1024) {
-        setShowLeftPanel(false);
-      }
       const toolNames: Record<ToolType, string> = {
         select: 'SELECT 選取與尺寸修改模式 (快捷鍵 V)',
         pan: 'PAN 平移視景模式 (快捷鍵 H)',
         zoomWindow: 'ZOOM WINDOW 窗選局部放大模式 (快捷鍵 Z) — 請點選放大區域的兩個對角點',
         line: 'LINE 畫直線模式 (快捷鍵 L) — 點選起點與終點，或輸入長度按空白鍵/Enter',
-        polyline: 'PLINE 聚合線模式 (快捷鍵 P) — 連續點選頂點，按 C 封閉或按空白鍵/Enter 完成',
         rectangle: `RECTANG 矩形模式 (快捷鍵 R - 目前為${rectangleMode === 'center' ? '中心矩形' : '轉角矩形'})`,
         circle: 'CIRCLE 圓形模式 (快捷鍵 C) — 請點選圓心與半徑',
         arc: 'ARC 三點圓弧模式 (快捷鍵 A) — 依序點選 1.起點 P1、2.弧上第二點 P2、3.終點 P3',
@@ -853,11 +849,11 @@ export default function App() {
         hatch: `HATCH 45° 斜線剖面填充模式 (快捷鍵 BH - 直接採用「建築主牆/輪廓」圖層，PITCH = ${hatchPitch} mm) — 點選封閉圖形自動填充或拉框填充`,
         chamfer: `CHAMFER 倒角模式 (快捷鍵 CHA - 目前倒角距離 D = ${chamferDistance} mm) — 請依序點選兩條相交直線或矩形相鄰邊建立倒角`,
         fillet: `FILLET 導圓角模式 (快捷鍵 F - 目前圓角半徑 R = ${filletRadius} mm) — 請依序點選兩條相交直線或矩形相鄰邊建立導圓角`,
-        dimension: 'DIMLINEAR 標註尺寸模式 (快捷鍵 D) — 靠近既有標註線時可自動相互對齊',
+        dimension: 'DIMLINEAR 線性標註尺寸模式 (快捷鍵 D) — 點選量測第一點、第二點後移動滑鼠自由定位尺寸線',
         text: 'TEXT 文字標註模式 (快捷鍵 T) — 請點選文字插入位置',
         measure: 'DIST 距離與角度測量工具 (快捷鍵 K)',
         erase: 'ERASE 刪除圖元模式 (快捷鍵 E) — 點選欲刪除的圖元',
-        move: 'MOVE 移動物件模式 (快捷鍵 M)',
+        move: 'MOVE 移動物件模式 (快捷鍵 M) — 點選基準點後移動滑鼠即時預覽，點選目標點完成移動',
         copy: 'COPY 複製物件模式 (快捷鍵 CO)',
         rotate: 'ROTATE 旋轉物件模式 (快捷鍵 Q)',
         mirror: 'MIRROR 鏡射物件模式 (快捷鍵 W)',
@@ -1452,13 +1448,6 @@ export default function App() {
         desc: '支援同時偏移選取的所有圖形',
         run: () => handleSelectTool('offset'),
       },
-      // P
-      {
-        keys: 'P',
-        label: '聚合線 (Polyline)',
-        desc: '連續繪製多段頂點聚合線，按 C 可封閉',
-        run: () => handleSelectTool('polyline'),
-      },
       // Q
       {
         keys: 'Q',
@@ -1693,11 +1682,6 @@ export default function App() {
       if (!/^[a-z]$/.test(k)) return;
       const upperKey = k.toUpperCase();
 
-      // Allow 'c' to close a polyline if currently drawing a polyline with >= 3 points
-      if (k === 'c' && activeTool === 'polyline' && drawingPoints.length >= 3) {
-        return;
-      }
-
       // 1. Check JO (Jump to Origin X,Y=(0,0)) first — works even while actively drawing!
       if (pendingKeyPrefix === 'J' && upperKey === 'O') {
         e.preventDefault();
@@ -1877,9 +1861,6 @@ export default function App() {
       L: 'line',
       LINE: 'line',
       直線: 'line',
-      PL: 'polyline',
-      PLINE: 'polyline',
-      聚合線: 'polyline',
       REC: 'rectangle',
       RECTANG: 'rectangle',
       R: 'rectangle',
@@ -2629,7 +2610,14 @@ export default function App() {
       </header>
 
       {/* Secondary Workspace Ribbon Toolbar */}
-      <div className="flex items-center justify-between gap-2 px-3 py-1.5 bg-[#0B0F17] border-b border-slate-800/90 text-xs shrink-0 overflow-x-auto">
+      <div
+        onWheel={(e) => {
+          if (e.deltaY !== 0 && e.currentTarget.scrollWidth > e.currentTarget.clientWidth) {
+            e.currentTarget.scrollLeft += e.deltaY;
+          }
+        }}
+        className="flex items-center justify-between gap-2 px-3 py-1.5 bg-[#0B0F17] border-b border-slate-800/90 text-xs shrink-0 overflow-x-auto custom-scrollbar-x select-none"
+      >
         <div className="flex items-center gap-1.5 shrink-0">
           <button
             type="button"
@@ -3065,7 +3053,14 @@ export default function App() {
       </div>
 
       {/* 3 Canvas Tabs Bar (畫布分頁 1 / 2 / 3) with Cross-Tab Copy / Cut / Paste / Continuous Copy (CO) */}
-      <div className="flex items-center justify-between gap-2 px-3 py-1 bg-[#090D15] border-b border-slate-800 text-xs shrink-0 overflow-x-auto">
+      <div
+        onWheel={(e) => {
+          if (e.deltaY !== 0 && e.currentTarget.scrollWidth > e.currentTarget.clientWidth) {
+            e.currentTarget.scrollLeft += e.deltaY;
+          }
+        }}
+        className="flex items-center justify-between gap-2 px-3 py-1 bg-[#090D15] border-b border-slate-800 text-xs shrink-0 overflow-x-auto custom-scrollbar-x select-none"
+      >
         <div className="flex items-center gap-1.5 shrink-0">
           <span className="flex items-center gap-1 text-[11px] font-semibold text-slate-400 mr-1">
             <Layers className="w-3.5 h-3.5 text-sky-400" />
@@ -3174,47 +3169,56 @@ export default function App() {
       <main className="relative flex-1 flex min-w-0 min-h-0 overflow-hidden">
         {/* Left Tool Palette */}
         {showLeftPanel && (
-          <div className="absolute inset-y-0 left-0 z-30 lg:static lg:z-auto flex h-full shadow-2xl lg:shadow-none">
-            <ToolPalette
-              activeTool={activeTool}
-              onSelectTool={handleSelectTool}
-              rectangleMode={rectangleMode}
-              onChangeRectangleMode={setRectangleMode}
-              offsetDistance={offsetDistance}
-              onChangeOffsetDistance={setOffsetDistance}
-              hatchPitch={hatchPitch}
-              onChangeHatchPitch={setHatchPitch}
-              hatchMode={hatchMode}
-              onChangeHatchMode={setHatchMode}
-              chamferDistance={chamferDistance}
-              onChangeChamferDistance={setChamferDistance}
-              filletRadius={filletRadius}
-              onChangeFilletRadius={setFilletRadius}
-              filletAutoDim={filletAutoDim}
-              onChangeFilletAutoDim={setFilletAutoDim}
-              onDimensionRadiusSelected={handleDimensionRadius}
-              selectedCount={selectedIds.length}
-              hasClipboard={clipboard.length > 0}
-              onCopyClipboard={handleCopyClipboard}
-              onCutClipboard={handleCutClipboard}
-              onPasteClipboard={handlePasteClipboard}
-              onAlignDimensions={handleAlignDimensions}
-              onOpenArrayModal={() => setActiveModal('array')}
-              onExplodeSelected={handleExplodeSelected}
-              onJoinSelected={handleJoinSelected}
-              onDeleteSelected={handleDeleteSelected}
-              onAutoDimensionSelected={handleAutoDimensionSelected}
-              onHatchSelected={handleHatchSelected}
-            />
-            <button
-              type="button"
+          <>
+            {/* Backdrop for mobile/tablet when ToolPalette overlays the canvas */}
+            <div
+              className="lg:hidden fixed inset-0 bg-slate-950/60 backdrop-blur-[1px] z-20 transition-opacity"
               onClick={() => setShowLeftPanel(false)}
-              className="lg:hidden absolute top-2 right-2 p-1 bg-slate-800 text-slate-300 rounded"
-              title="關閉工具面板"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
+              aria-hidden="true"
+            />
+            <div className="absolute inset-y-0 left-0 z-30 lg:static lg:z-auto flex h-full max-h-full min-h-0 shadow-2xl lg:shadow-none">
+              <ToolPalette
+                activeTool={activeTool}
+                onSelectTool={handleSelectTool}
+                rectangleMode={rectangleMode}
+                onChangeRectangleMode={setRectangleMode}
+                offsetDistance={offsetDistance}
+                onChangeOffsetDistance={setOffsetDistance}
+                hatchPitch={hatchPitch}
+                onChangeHatchPitch={setHatchPitch}
+                hatchMode={hatchMode}
+                onChangeHatchMode={setHatchMode}
+                chamferDistance={chamferDistance}
+                onChangeChamferDistance={setChamferDistance}
+                filletRadius={filletRadius}
+                onChangeFilletRadius={setFilletRadius}
+                filletAutoDim={filletAutoDim}
+                onChangeFilletAutoDim={setFilletAutoDim}
+                onDimensionRadiusSelected={handleDimensionRadius}
+                selectedCount={selectedIds.length}
+                hasClipboard={clipboard.length > 0}
+                onCopyClipboard={handleCopyClipboard}
+                onCutClipboard={handleCutClipboard}
+                onPasteClipboard={handlePasteClipboard}
+                onAlignDimensions={handleAlignDimensions}
+                onOpenArrayModal={() => setActiveModal('array')}
+                onExplodeSelected={handleExplodeSelected}
+                onJoinSelected={handleJoinSelected}
+                onDeleteSelected={handleDeleteSelected}
+                onAutoDimensionSelected={handleAutoDimensionSelected}
+                onHatchSelected={handleHatchSelected}
+                onClose={() => setShowLeftPanel(false)}
+              />
+              <button
+                type="button"
+                onClick={() => setShowLeftPanel(false)}
+                className="lg:hidden absolute top-2 right-2 p-1 bg-slate-800 text-slate-300 rounded"
+                title="關閉工具面板"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </>
         )}
 
         {/* Center High-Precision CAD Viewport */}
@@ -3283,58 +3287,65 @@ export default function App() {
 
         {/* Right Inspector & Layers Sidebar */}
         {showRightPanel && (
-          <div className="absolute inset-y-0 right-0 z-30 xl:static xl:z-auto flex h-full shadow-2xl xl:shadow-none">
-            <InspectorSidebar
-              layers={layers}
-              activeLayerId={activeLayerId}
-              onSelectLayer={setActiveLayerId}
-              onUpdateLayer={(updatedLayer) =>
-                setLayers((prev) =>
-                  prev.map((l) => (l.id === updatedLayer.id ? updatedLayer : l))
-                )
-              }
-              onToggleAllLayers={(visible) => {
-                setLayers((prev) => prev.map((l) => ({ ...l, visible })));
-                logCommand(
-                  visible ? '已一鍵開啟所有圖層顯示' : '已一鍵關閉所有圖層顯示',
-                  'info'
-                );
-              }}
-              onAddLayer={(name, color) => {
-                const newId = `L_${Date.now()}`;
-                setLayers((prev) => [
-                  ...prev,
-                  {
-                    id: newId,
-                    name,
-                    color,
-                    visible: true,
-                    locked: false,
-                    lineType: 'continuous',
-                    lineWeight: 0.25,
-                  },
-                ]);
-                setActiveLayerId(newId);
-                logCommand(`已建立新圖層：「${name}」`, 'success');
-              }}
-              onDeleteLayer={(id) => {
-                if (id === '0') return;
-                setLayers((prev) => prev.filter((l) => l.id !== id));
-                if (activeLayerId === id) setActiveLayerId('0');
-                logCommand('已刪除圖層', 'info');
-              }}
-              entities={entities}
-              selectedIds={selectedIds}
-              onUpdateEntities={handleUpdateEntities}
-              onDeleteSelected={handleDeleteSelected}
-              onExplodeSelected={handleExplodeSelected}
-              onJoinSelected={handleJoinSelected}
-              onAlignDimensions={handleAlignDimensions}
-              onDuplicateSelected={handleDuplicateSelected}
-              settings={settings}
-              onUpdateSettings={setSettings}
+          <>
+            <div
+              className="xl:hidden fixed inset-0 bg-slate-950/60 backdrop-blur-[1px] z-20"
+              onClick={() => setShowRightPanel(false)}
             />
-          </div>
+            <div className="absolute inset-y-0 right-0 z-30 xl:static xl:z-auto flex h-full max-h-full min-h-0 shadow-2xl xl:shadow-none">
+              <InspectorSidebar
+                layers={layers}
+                activeLayerId={activeLayerId}
+                onSelectLayer={setActiveLayerId}
+                onUpdateLayer={(updatedLayer) =>
+                  setLayers((prev) =>
+                    prev.map((l) => (l.id === updatedLayer.id ? updatedLayer : l))
+                  )
+                }
+                onToggleAllLayers={(visible) => {
+                  setLayers((prev) => prev.map((l) => ({ ...l, visible })));
+                  logCommand(
+                    visible ? '已一鍵開啟所有圖層顯示' : '已一鍵關閉所有圖層顯示',
+                    'info'
+                  );
+                }}
+                onAddLayer={(name, color) => {
+                  const newId = `L_${Date.now()}`;
+                  setLayers((prev) => [
+                    ...prev,
+                    {
+                      id: newId,
+                      name,
+                      color,
+                      visible: true,
+                      locked: false,
+                      lineType: 'continuous',
+                      lineWeight: 0.25,
+                    },
+                  ]);
+                  setActiveLayerId(newId);
+                  logCommand(`已建立新圖層：「${name}」`, 'success');
+                }}
+                onDeleteLayer={(id) => {
+                  if (id === '0') return;
+                  setLayers((prev) => prev.filter((l) => l.id !== id));
+                  if (activeLayerId === id) setActiveLayerId('0');
+                  logCommand('已刪除圖層', 'info');
+                }}
+                entities={entities}
+                selectedIds={selectedIds}
+                onUpdateEntities={handleUpdateEntities}
+                onDeleteSelected={handleDeleteSelected}
+                onExplodeSelected={handleExplodeSelected}
+                onJoinSelected={handleJoinSelected}
+                onAlignDimensions={handleAlignDimensions}
+                onDuplicateSelected={handleDuplicateSelected}
+                settings={settings}
+                onUpdateSettings={setSettings}
+                onClose={() => setShowRightPanel(false)}
+              />
+            </div>
+          </>
         )}
       </main>
 
