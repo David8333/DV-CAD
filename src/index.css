@@ -61,26 +61,3 @@
   background: #475569;
 }
 
-/* Custom horizontal scrollbar for toolbars */
-.custom-scrollbar-x {
-  scrollbar-width: thin;
-  scrollbar-color: #334155 #0B0F17;
-}
-
-.custom-scrollbar-x::-webkit-scrollbar {
-  height: 5px;
-}
-
-.custom-scrollbar-x::-webkit-scrollbar-track {
-  background: #0B0F17;
-}
-
-.custom-scrollbar-x::-webkit-scrollbar-thumb {
-  background: #334155;
-  border-radius: 3px;
-}
-
-.custom-scrollbar-x::-webkit-scrollbar-thumb:hover {
-  background: #38BDF8;
-}
-

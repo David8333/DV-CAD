@@ -28,6 +28,7 @@ const TOOL_PROMPTS: Record<ToolType, string> = {
   pan: 'PAN 平移視景 — 拖曳畫布或雙指縮放平移',
   zoomWindow: 'ZOOM WINDOW 請依序點選放大框的第一角點與對角點，立即局部放大',
   line: 'LINE 指定點或輸入 [長度] 按空白鍵/Enter / 按 JO 跳至原點 (0,0)',
+  polyline: 'PLINE 指定下一頂點，輸入 C 封閉，或按空白鍵/Enter 結束',
   rectangle: 'RECTANG 指定角點或中心點，或直接輸入寬度 [Tab] 高度按空白鍵/Enter',
   circle: 'CIRCLE 指定圓心與半徑 R，或輸入半徑數值按空白鍵/Enter',
   arc: 'ARC [三點圓弧] 依序點選 [1.起點 P1] → [2.弧上第二點 P2] → [3.終點 P3]',
@@ -39,11 +40,11 @@ const TOOL_PROMPTS: Record<ToolType, string> = {
   fillet:
     'FILLET 導圓角模式 (F) — 依序點選兩條相交直線或矩形相鄰邊建立導圓角（可直接輸入半徑 R 按空白鍵/Enter）',
   dimension:
-    'DIMLINEAR 線性標註 (D) — 依序點選第一、第二延伸線原點，移動滑鼠自由定位尺寸線並點擊放置（自動判斷水平/垂直尺寸）',
+    'DIM 直接點擊圓周建立 ISO 國際規範 Ø 直徑標註，或點選兩點建立線性標註（可調小數位數與正負公差 0）',
   text: 'TEXT 點選圖面要放置工程文字註解的座標位置',
   measure: 'DIST 點選兩點以量測距離、ΔX、ΔY 與夾角',
   erase: 'ERASE 刪除圖元模式 (E) — 點選畫布上的任何圖元立即刪除，或按 ESC 返回',
-  move: 'MOVE 移動物件 (M) — 點選基準點後移動滑鼠即時預覽，點選目標點完成移動（或輸入 X,Y 座標跳轉）',
+  move: 'MOVE 點選基準點與目標點，或直接輸入 X,Y 座標（例如 100,50）按空白鍵/Enter 跳轉移動',
   copy: 'COPY 指定複製基準點，可連續點選多個目標點或輸入 X,Y 座標放置副本',
   rotate: 'ROTATE 指定旋轉中心基準點，再拖曳或輸入旋轉角度',
   mirror: 'MIRROR 依序點選兩點定義對稱鏡射軸線',
@@ -51,7 +52,6 @@ const TOOL_PROMPTS: Record<ToolType, string> = {
   trim: 'TRIM 剪切模式 (TR) — 支援剪切直線、矩形、圓形與三點圓弧！移至圖元預覽紅虛線後點擊切除',
   extend: 'EXTEND 延伸模式 (EX) — 依序點選兩個線段可互相延伸接合至交點（或點選同一線段延伸至邊界）',
   join: 'JOIN 組裝圖元 (J) — 保留所有選取圖元原始位置並合併成單一物件，按空白鍵或 Enter 完成',
-  pdfWindow: 'PDF 窗選匯出模式 — 請依序點選或拉框選取欲匯出為 PDF 的區域',
 };
 
 export const CommandDock: React.FC<CommandDockProps> = ({

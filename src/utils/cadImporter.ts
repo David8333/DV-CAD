@@ -8,17 +8,14 @@ import {
   LineEntity,
   Point,
   PolylineEntity,
-  RectangleEntity,
   TextEntity,
 } from '../types/cad';
 import {
-  arcFromThreePoints,
   DEG_TO_RAD,
   getArcThreePoints,
   rotateEntity,
   translateEntity,
 } from './geometry';
-import { LibreDwg, createModule, Dwg_File_Type } from '@mlightcad/libredwg-web';
 
 export interface CadImportResult {
   entities: CadEntity[];
@@ -37,10 +34,10 @@ const ACI_COLORS: Record<number, string> = {
   2: '#FACC15', // Yellow
   3: '#22C55E', // Green
   4: '#06B6D4', // Cyan
-  5: '#38BDF8', // Blue / Sky
+  5: '#3B82F6', // Blue
   6: '#D946EF', // Magenta
   7: '#F8FAFC', // White/Default
-  8: '#94A3B8', // Dark Gray -> readable gray
+  8: '#94A3B8', // Dark Gray
   9: '#CBD5E1', // Light Gray
   10: '#F87171',
   11: '#FCA5A5',
@@ -61,53 +58,17 @@ const ACI_COLORS: Record<number, string> = {
   160: '#E879F9',
   170: '#F472B6',
   190: '#FB7185',
-  250: '#94A3B8',
-  251: '#A1A1AA',
+  250: '#64748B',
+  251: '#94A3B8',
   252: '#CBD5E1',
   253: '#E2E8F0',
   254: '#F1F5F9',
   255: '#F8FAFC',
 };
 
-/**
- * Ensure imported entity or layer colors are high contrast against the dark CAD canvas
- */
-export function ensureHighContrastColor(
-  c: string | undefined,
-  fallback = '#F8FAFC'
-): string {
-  if (!c) return fallback;
-  const clean = c.trim().toLowerCase();
-  if (
-    clean === '#000' ||
-    clean === '#000000' ||
-    clean === 'black' ||
-    clean === '#0f172a' ||
-    clean === '#0b0f17' ||
-    clean === '#070b11' ||
-    clean === '#111' ||
-    clean === '#111111' ||
-    clean === '#1e293b' ||
-    clean === '#334155'
-  ) {
-    return '#F8FAFC';
-  }
-  if (/^#[0-9a-f]{6}$/.test(clean)) {
-    const r = parseInt(clean.slice(1, 3), 16);
-    const g = parseInt(clean.slice(3, 5), 16);
-    const b = parseInt(clean.slice(5, 7), 16);
-    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-    if (lum < 50) {
-      return '#38BDF8';
-    }
-  }
-  return c;
-}
-
 function aciToHex(aci: number | undefined, fallback = '#38BDF8'): string {
   if (aci === undefined || Number.isNaN(aci)) return fallback;
   const abs = Math.abs(Math.round(aci));
-  if (abs === 7 || abs === 0) return '#F8FAFC';
   if (ACI_COLORS[abs]) return ACI_COLORS[abs];
   // Nearest decade color
   const decade = Math.round(abs / 10) * 10;
@@ -125,59 +86,22 @@ function mapDxfLineType(ltName?: string): CadLayer['lineType'] {
 }
 
 /**
- * Clean AutoCAD MTEXT & TEXT special formatting codes and decode Unicode / Big5 escapes
+ * Clean AutoCAD MTEXT & TEXT special formatting codes
  */
 export function cleanCadText(raw: string): string {
   if (!raw) return '';
-  let text = raw;
-
-  // 1. Decode Unicode escapes \U+XXXX (e.g. \U+6A19\U+8A3B -> 標註)
-  text = text.replace(/\\U\+([0-9A-Fa-f]{4})/gi, (_, hex) => {
-    try {
-      return String.fromCharCode(parseInt(hex, 16));
-    } catch {
-      return '';
-    }
-  });
-
-  // 2. Decode AutoCAD Big5/MIF \M+1xxxx or \M+5xxxx legacy escapes
-  text = text.replace(/\\M\+[15]([0-9A-Fa-f]{4})/gi, (_, hex) => {
-    try {
-      const b1 = parseInt(hex.slice(0, 2), 16);
-      const b2 = parseInt(hex.slice(2, 4), 16);
-      return new TextDecoder('big5').decode(new Uint8Array([b1, b2]));
-    } catch {
-      return '';
-    }
-  });
-
-  // 3. Special CAD symbols
-  text = text
+  let text = raw
     .replace(/%%[cC]/g, 'Ø')
     .replace(/%%[dD]/g, '°')
     .replace(/%%[pP]/g, '±')
     .replace(/%%[uU]/g, '')
-    .replace(/%%[oO]/g, '')
-    .replace(/%%[kK]/g, '')
-    .replace(/%%%+/g, '%');
-
-  // 4. MTEXT line break \P -> newline
-  text = text.replace(/\\P/gi, '\n');
-  text = text.replace(/\\~/g, ' ');
-
-  // 5. MTEXT font tags \f...; (e.g. \fMingLiU|b0|i0|c136|p34;)
-  text = text.replace(/\\[fF][^;]*;/g, '');
-  text = text.replace(/\\[hH][0-9.]+(?:x|X)?;/g, '');
-  text = text.replace(/\\[cC][0-9]+;/g, '');
-  text = text.replace(/\\[wW][0-9.]+;/g, '');
-  text = text.replace(/\\[qQ][0-9.-]+;/g, '');
-  text = text.replace(/\\[aA][0-9]+;/g, '');
-  text = text.replace(/\\S([^;^#]+)[\^#/]([^;]*);/g, '$1/$2');
-  text = text.replace(/\\[LlOoKk]/g, '');
-  text = text.replace(/\\[A-Za-z][^;]*;/g, '');
-  text = text.replace(/\{|\}/g, '');
-
-  return text.trim();
+    .replace(/\\P/g, ' ')
+    .replace(/\\~/g, ' ')
+    .replace(/\\[A-Za-z][^;]*;/g, '')
+    .replace(/\{|\}/g, '')
+    .trim();
+  if (!text) text = raw.trim();
+  return text;
 }
 
 interface DxfPair {
@@ -208,160 +132,43 @@ function tokenizeDxf(content: string): DxfPair[] {
 }
 
 /**
- * Convert polyline vertices into native CAD entities:
- * 1. Recognizable closed axis-aligned rectangle -> native RectangleEntity (or 4 lines if non-axis-aligned)
- * 2. Arc segments (bulge != 0) -> exact native ArcEntity (never broken into approximate straight lines)
- * 3. Straight segments (bulge == 0) -> native LineEntity (every line is independently selectable & editable)
- * 4. Closed polylines retain the closing segment connecting the last vertex back to the first vertex
+ * Convert an LWPOLYLINE arc segment with bulge into intermediate points
  */
-export function convertPolylineVerticesToCadEntities(
-  verts: Array<{ x: number; y: number; bulge?: number }>,
-  closed: boolean,
-  layerId: string,
-  color?: string,
-  lineType?: CadLayer['lineType'],
-  lineWeight?: number,
-  baseUid = `poly_${Date.now()}`
-): CadEntity[] {
-  if (!verts || verts.length < 2) return [];
+function tessellateBulgeSegment(
+  p1: Point,
+  p2: Point,
+  bulge: number,
+  segments = 12
+): Point[] {
+  if (Math.abs(bulge) < 1e-5) return [p1];
+  const chordDx = p2.x - p1.x;
+  const chordDy = p2.y - p1.y;
+  const chordLen = Math.hypot(chordDx, chordDy);
+  if (chordLen < 1e-5) return [p1];
 
-  // Filter out immediate duplicate consecutive points (while preserving bulge)
-  const cleanedVerts: Array<{ x: number; y: number; bulge: number }> = [];
-  for (let i = 0; i < verts.length; i++) {
-    const v = verts[i];
-    const b = Number(v.bulge) || 0;
-    if (cleanedVerts.length > 0) {
-      const prev = cleanedVerts[cleanedVerts.length - 1];
-      if (Math.hypot(v.x - prev.x, v.y - prev.y) < 1e-5) {
-        // Update bulge if duplicate has bulge
-        if (Math.abs(b) > 1e-5 && Math.abs(prev.bulge) < 1e-5) {
-          prev.bulge = b;
-        }
-        continue;
-      }
-    }
-    cleanedVerts.push({ x: Number(v.x) || 0, y: Number(v.y) || 0, bulge: b });
+  const includedAngle = 4 * Math.atan(bulge);
+  const radius = chordLen / (2 * Math.sin(Math.abs(includedAngle) / 2));
+  const midX = (p1.x + p2.x) / 2;
+  const midY = (p1.y + p2.y) / 2;
+  const apothem = radius * Math.cos(Math.abs(includedAngle) / 2);
+  const sign = bulge >= 0 ? 1 : -1;
+  const nx = (-chordDy / chordLen) * sign;
+  const ny = (chordDx / chordLen) * sign;
+  const factor = Math.abs(includedAngle) <= Math.PI ? 1 : -1;
+  const cx = midX + nx * apothem * factor;
+  const cy = midY + ny * apothem * factor;
+
+  const startAng = Math.atan2(p1.y - cy, p1.x - cx);
+  const pts: Point[] = [];
+  for (let i = 0; i < segments; i++) {
+    const t = i / segments;
+    const ang = startAng + includedAngle * t;
+    pts.push({
+      x: cx + radius * Math.cos(ang),
+      y: cy + radius * Math.sin(ang),
+    });
   }
-
-  // If the last point duplicates the first point in a closed polyline, remove it and mark closed
-  if (cleanedVerts.length >= 3) {
-    const first = cleanedVerts[0];
-    const last = cleanedVerts[cleanedVerts.length - 1];
-    if (Math.hypot(first.x - last.x, first.y - last.y) < 1e-5) {
-      if (Math.abs(last.bulge) > 1e-5 && Math.abs(first.bulge) < 1e-5) {
-        first.bulge = last.bulge;
-      }
-      cleanedVerts.pop();
-      closed = true;
-    }
-  }
-
-  if (cleanedVerts.length < 2) return [];
-
-  // 1. Check if this is a recognizable closed axis-aligned rectangle (4 vertices, all bulge = 0)
-  if (closed && cleanedVerts.length === 4) {
-    const hasBulge = cleanedVerts.some((v) => Math.abs(v.bulge) > 1e-4);
-    if (!hasBulge) {
-      const v0 = cleanedVerts[0];
-      const v1 = cleanedVerts[1];
-      const v2 = cleanedVerts[2];
-      const v3 = cleanedVerts[3];
-
-      const isHorizVert =
-        Math.abs(v0.y - v1.y) < 1e-3 &&
-        Math.abs(v1.x - v2.x) < 1e-3 &&
-        Math.abs(v2.y - v3.y) < 1e-3 &&
-        Math.abs(v3.x - v0.x) < 1e-3;
-
-      const isVertHoriz =
-        Math.abs(v0.x - v1.x) < 1e-3 &&
-        Math.abs(v1.y - v2.y) < 1e-3 &&
-        Math.abs(v2.x - v3.x) < 1e-3 &&
-        Math.abs(v3.y - v0.y) < 1e-3;
-
-      if (isHorizVert || isVertHoriz) {
-        const minX = Math.min(v0.x, v1.x, v2.x, v3.x);
-        const maxX = Math.max(v0.x, v1.x, v2.x, v3.x);
-        const minY = Math.min(v0.y, v1.y, v2.y, v3.y);
-        const maxY = Math.max(v0.y, v1.y, v2.y, v3.y);
-        if (maxX - minX > 1e-4 && maxY - minY > 1e-4) {
-          const rectEnt: RectangleEntity = {
-            id: `${baseUid}_rect`,
-            type: 'rectangle',
-            layerId,
-            color,
-            lineType,
-            lineWeight,
-            p1: { x: minX, y: minY },
-            p2: { x: maxX, y: maxY },
-          };
-          return [rectEnt];
-        }
-      }
-    }
-  }
-
-  // 2. Otherwise: Convert each segment to native Line or native Arc
-  const entities: CadEntity[] = [];
-  const segCount = closed ? cleanedVerts.length : cleanedVerts.length - 1;
-
-  for (let i = 0; i < segCount; i++) {
-    const p1 = { x: cleanedVerts[i].x, y: cleanedVerts[i].y };
-    const nextIdx = (i + 1) % cleanedVerts.length;
-    const p2 = { x: cleanedVerts[nextIdx].x, y: cleanedVerts[nextIdx].y };
-    const segLen = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-    if (segLen < 1e-5) continue;
-
-    const b = cleanedVerts[i].bulge;
-
-    if (Math.abs(b) >= 1e-4) {
-      // Bulge arc segment -> native ArcEntity
-      const dx = p2.x - p1.x;
-      const dy = p2.y - p1.y;
-      const midX = (p1.x + p2.x) / 2;
-      const midY = (p1.y + p2.y) / 2;
-      const pMid: Point = {
-        x: midX + dy * (b / 2),
-        y: midY - dx * (b / 2),
-      };
-
-      const arcData = arcFromThreePoints(p1, pMid, p2);
-      if (arcData && arcData.radius > 1e-4) {
-        const arcEnt: ArcEntity = {
-          id: `${baseUid}_arc_${i}`,
-          type: 'arc',
-          layerId,
-          color,
-          lineType,
-          lineWeight,
-          center: arcData.center,
-          radius: arcData.radius,
-          startAngle: arcData.startAngle,
-          endAngle: arcData.endAngle,
-          p1,
-          p2: pMid,
-          p3: p2,
-        };
-        entities.push(arcEnt);
-        continue;
-      }
-    }
-
-    // Straight segment -> native LineEntity
-    const lineEnt: LineEntity = {
-      id: `${baseUid}_line_${i}`,
-      type: 'line',
-      layerId,
-      color,
-      lineType,
-      lineWeight,
-      p1,
-      p2,
-    };
-    entities.push(lineEnt);
-  }
-
-  return entities;
+  return pts;
 }
 
 function scaleCadEntity(
@@ -500,21 +307,38 @@ function parseDxfEntityRecords(
 
       if (verts.length >= 2) {
         const closed = (flags & 1) === 1;
-        const subEnts = convertPolylineVerticesToCadEntities(
-          verts,
-          closed,
+        const points: Point[] = [];
+        for (let vIdx = 0; vIdx < verts.length; vIdx++) {
+          const curr = verts[vIdx];
+          const next = verts[(vIdx + 1) % verts.length];
+          const isLastOpen = !closed && vIdx === verts.length - 1;
+          if (!isLastOpen && Math.abs(curr.bulge) > 1e-4) {
+            points.push(
+              ...tessellateBulgeSegment(
+                { x: curr.x, y: curr.y },
+                { x: next.x, y: next.y },
+                curr.bulge
+              )
+            );
+          } else {
+            points.push({ x: curr.x, y: curr.y });
+          }
+        }
+        const polyEnt: PolylineEntity = {
+          id: uid,
+          type: 'polyline',
           layerId,
-          entityColor,
-          entityLineType,
-          undefined,
-          uid
-        );
-        entities.push(...subEnts);
+          color: entityColor,
+          lineType: entityLineType,
+          points,
+          closed,
+        };
+        entities.push(polyEnt);
       }
     } else if (etype === 'POLYLINE') {
       const flags = getNum(70, 0);
       const closed = (flags & 1) === 1;
-      const verts: Array<{ x: number; y: number; bulge: number }> = [];
+      const pts: Point[] = [];
       i++;
       while (i < records.length) {
         const sub = records[i];
@@ -527,38 +351,19 @@ function parseDxfEntityRecords(
             parseFloat(sub.props.find((p) => p.code === 10)?.value || '0') || 0;
           const vy =
             parseFloat(sub.props.find((p) => p.code === 20)?.value || '0') || 0;
-          const vb =
-            parseFloat(sub.props.find((p) => p.code === 42)?.value || '0') || 0;
-          verts.push({ x: vx, y: vy, bulge: vb });
+          pts.push({ x: vx, y: vy });
         }
         i++;
       }
-      if (verts.length >= 2) {
-        const subEnts = convertPolylineVerticesToCadEntities(
-          verts,
-          closed,
-          layerId,
-          entityColor,
-          entityLineType,
-          undefined,
-          uid
-        );
-        entities.push(...subEnts);
-      }
-    } else if (etype === 'RECTANGLE' || etype === 'RECTANG') {
-      const x1 = getNum(10, 0);
-      const y1 = getNum(20, 0);
-      const x2 = getNum(11, 100);
-      const y2 = getNum(21, 100);
-      if (Math.hypot(x2 - x1, y2 - y1) > 1e-4) {
+      if (pts.length >= 2) {
         entities.push({
           id: uid,
-          type: 'rectangle',
+          type: 'polyline',
           layerId,
           color: entityColor,
           lineType: entityLineType,
-          p1: { x: Math.min(x1, x2), y: Math.min(y1, y2) },
-          p2: { x: Math.max(x1, x2), y: Math.max(y1, y2) },
+          points: pts,
+          closed,
         });
       }
     } else if (etype === 'CIRCLE') {
@@ -734,15 +539,10 @@ function parseDxfEntityRecords(
         entities.push(dimEnt);
       }
     } else if (etype === 'INSERT' && blocksMap) {
-      const rawBlockName = getStr(2);
-      if (rawBlockName) {
-        const blockName = rawBlockName.trim();
-        const blockDef =
-          blocksMap.get(rawBlockName) ||
-          blocksMap.get(blockName) ||
-          blocksMap.get(blockName.toUpperCase());
-        if (blockDef) {
-          const insX = getNum(10, 0);
+      const blockName = getStr(2);
+      if (blockName && blocksMap.has(blockName)) {
+        const blockDef = blocksMap.get(blockName)!;
+        const insX = getNum(10, 0);
         const insY = getNum(20, 0);
         const sx = getNum(41, 1);
         const sy = getNum(42, 1);
@@ -784,7 +584,6 @@ function parseDxfEntityRecords(
         }
       }
     }
-  }
 
     i++;
   }
@@ -817,7 +616,7 @@ export function parseDxfContent(
         color:
           cleanName === '0'
             ? '#F8FAFC'
-            : ensureHighContrastColor(aciToHex(aci, '#38BDF8')),
+            : aciToHex(aci, '#38BDF8'),
         visible: true,
         locked: false,
         lineType: mapDxfLineType(lineTypeName),
@@ -881,8 +680,7 @@ export function parseDxfContent(
             }
             const id = ensureLayer(lName, Math.abs(lColor), lType);
             const layerObj = layerMap.get(id)!;
-            layerObj.visible = true;
-            layerObj.color = ensureHighContrastColor(layerObj.color);
+            layerObj.visible = lColor >= 0 && (lFlags & 1) === 0;
             layerObj.locked = (lFlags & 4) === 4;
             continue;
           }
@@ -936,13 +734,10 @@ export function parseDxfContent(
                 ensureLayer,
                 blocksMap
               );
-              const bData = {
+              blocksMap.set(blockName, {
                 basePoint: { x: bx, y: by },
                 entities: blkEntities,
-              };
-              blocksMap.set(blockName, bData);
-              blocksMap.set(blockName.trim(), bData);
-              blocksMap.set(blockName.trim().toUpperCase(), bData);
+              });
             }
             continue;
           }
@@ -1021,34 +816,8 @@ export function parseDxfContent(
   };
 }
 
-let libreDwgPromise: Promise<any> | null = null;
-
-async function getLibreDwg(): Promise<any> {
-  if (!libreDwgPromise) {
-    libreDwgPromise = (async () => {
-      try {
-        const wasmModule = await createModule({
-          locateFile: (p: string) => {
-            if (p.endsWith('.wasm')) return '/libredwg-web.wasm';
-            return p;
-          },
-        });
-        return LibreDwg.createByWasmInstance(wasmModule);
-      } catch (err1) {
-        console.warn('createModule with /libredwg-web.wasm failed, falling back:', err1);
-        try {
-          return await LibreDwg.create('');
-        } catch {
-          return await LibreDwg.create();
-        }
-      }
-    })();
-  }
-  return libreDwgPromise;
-}
-
 /**
- * Parse binary DWG file using local LibreDWG WebAssembly engine (dwg_write_dxf and database converter)
+ * Parse binary DWG file using LibreDWG WebAssembly (via CDN) with a built-in binary DWG parser fallback
  */
 async function parseBinaryDwgBuffer(
   buffer: ArrayBuffer,
@@ -1069,68 +838,33 @@ async function parseBinaryDwgBuffer(
   };
   const versionLabel = dwgVersionNames[headerAscii] || headerAscii || 'DWG';
 
-  // Strategy 1: GNU LibreDWG Native WASM dwg_write_dxf
+  // Strategy 1: Try dynamic LibreDWG WebAssembly engine in browser
   try {
-    const inst = await getLibreDwg();
-    if (inst && typeof inst.dwg_write_dxf === 'function') {
-      const dxfBytes: Uint8Array | null = inst.dwg_write_dxf(buffer);
-      if (dxfBytes && dxfBytes.length > 50) {
-        // Multi-encoding decode (UTF-8, Big5, GB18030)
-        let dxfText = '';
-        const utf8 = new TextDecoder('utf-8').decode(dxfBytes);
-        if (utf8.includes('\uFFFD')) {
-          try {
-            const big5 = new TextDecoder('big5').decode(dxfBytes);
-            dxfText = big5.includes('\uFFFD')
-              ? new TextDecoder('gb18030').decode(dxfBytes)
-              : big5;
-          } catch {
-            dxfText = utf8;
-          }
-        } else {
-          dxfText = utf8;
-        }
+    const cdnUrl = 'https://esm.sh/@mlightcad/libredwg-web@0.1.3';
+    const libredwgMod: any = await import(/* @vite-ignore */ cdnUrl);
+    const LibreDwg = libredwgMod.LibreDwg || libredwgMod.default?.LibreDwg;
+    const Dwg_File_Type =
+      libredwgMod.Dwg_File_Type || libredwgMod.default?.Dwg_File_Type;
 
-        const dxfRes = parseDxfContent(dxfText, fileName);
-        if (dxfRes.entities.length > 0) {
-          // Boost contrast and ensure visible layers
-          dxfRes.layers.forEach((l) => {
-            l.color = ensureHighContrastColor(l.color);
-            l.visible = true;
-          });
-          return {
-            ...dxfRes,
-            format: 'DWG',
-            version: versionLabel,
-          };
+    if (LibreDwg) {
+      const instance = await LibreDwg.create();
+      const dwgDataPtr = instance.dwg_read_data(
+        buffer,
+        Dwg_File_Type ? Dwg_File_Type.DWG : 0
+      );
+      if (dwgDataPtr) {
+        const db = instance.convert(dwgDataPtr);
+        instance.dwg_free(dwgDataPtr);
+        if (db && Array.isArray(db.entities)) {
+          return convertDwgDatabaseToCad(db, fileName, versionLabel);
         }
       }
     }
-  } catch (err) {
-    console.warn('LibreDwg dwg_write_dxf failed:', err);
+  } catch {
+    // Proceed to built-in binary DWG geometry & block scanner
   }
 
-  // Strategy 2: GNU LibreDWG dwg_read_data + convert to DwgDatabase
-  try {
-    const inst = await getLibreDwg();
-    if (inst && typeof inst.dwg_read_data === 'function') {
-      const ptr = inst.dwg_read_data(buffer, Dwg_File_Type ? Dwg_File_Type.DWG : 0);
-      if (ptr) {
-        const db = inst.convert(ptr);
-        inst.dwg_free(ptr);
-        if (db) {
-          const res = convertDwgDatabaseToCad(db, fileName, versionLabel);
-          if (res.entities.length > 0) {
-            return res;
-          }
-        }
-      }
-    }
-  } catch (err) {
-    console.warn('LibreDwg convert database failed:', err);
-  }
-
-  // Strategy 3: Built-in binary geometry fallback
+  // Strategy 2: Built-in binary DWG coordinate & text extractor
   return extractGeometryFromBinaryDwg(bytes, fileName, versionLabel);
 }
 
@@ -1149,9 +883,7 @@ function convertDwgDatabaseToCad(
       layerMap.set(clean, {
         id: clean,
         name: clean === '0' ? '0 (預設結構層)' : clean,
-        color: ensureHighContrastColor(
-          clean === '0' ? '#F8FAFC' : aciToHex(colorIndex, '#38BDF8')
-        ),
+        color: clean === '0' ? '#F8FAFC' : aciToHex(colorIndex, '#38BDF8'),
         visible: true,
         locked: false,
         lineType: 'continuous',
@@ -1165,316 +897,104 @@ function convertDwgDatabaseToCad(
   if (db.tables?.LAYER?.entries) {
     for (const l of db.tables.LAYER.entries) {
       if (l && l.name) {
-        const lyrId = ensureLayer(l.name, l.colorIndex ?? l.color);
-        const lyr = layerMap.get(lyrId);
-        if (lyr) {
-          lyr.visible = true;
-          lyr.color = ensureHighContrastColor(lyr.color);
-        }
+        ensureLayer(l.name, l.colorIndex ?? l.color);
       }
     }
   }
 
-  // Build block definitions map from db.tables?.BLOCK_RECORD?.entries
-  const blocksMap = new Map<string, { basePoint: Point; entities: CadEntity[] }>();
+  const entities: CadEntity[] = [];
+  const rawEntities: any[] = Array.isArray(db.entities) ? db.entities : [];
 
-  const convertRawEntity = (
-    raw: any,
-    blockBaseLayer = '0'
-  ): CadEntity | CadEntity[] | null => {
-    if (!raw || !raw.type) return null;
+  rawEntities.forEach((raw, idx) => {
+    if (!raw || !raw.type) return;
     const t = String(raw.type).toUpperCase();
-    const rawLayer = raw.layer || blockBaseLayer || '0';
-    const layerId = ensureLayer(rawLayer, raw.colorIndex);
-    const uid = `dwg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const entityColor =
-      raw.colorIndex !== undefined ? aciToHex(raw.colorIndex) : undefined;
+    const layerId = ensureLayer(raw.layer || '0', raw.colorIndex);
+    const uid = `dwg_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 5)}`;
 
     if (t === 'LINE') {
       const p1 = raw.startPoint || raw.p1 || { x: 0, y: 0 };
       const p2 = raw.endPoint || raw.p2 || { x: 0, y: 0 };
       if (Math.hypot(p2.x - p1.x, p2.y - p1.y) > 1e-4) {
-        return {
+        entities.push({
           id: uid,
           type: 'line',
           layerId,
-          color: entityColor ? ensureHighContrastColor(entityColor) : undefined,
           p1: { x: Number(p1.x) || 0, y: Number(p1.y) || 0 },
           p2: { x: Number(p2.x) || 0, y: Number(p2.y) || 0 },
-        };
+        });
       }
-    } else if (
-      t === 'LWPOLYLINE' ||
-      t === 'POLYLINE' ||
-      t === 'POLYLINE_2D' ||
-      t === 'POLYLINE_3D' ||
-      t === 'POLYLINE2D' ||
-      t === 'POLYLINE3D'
-    ) {
-      const rawVerts: any[] = raw.vertices || raw.points || [];
-      if (rawVerts.length >= 2) {
-        const closed = Boolean(
-          raw.closed || (raw.flag && (raw.flag & 1) === 1)
-        );
-        const cleanVerts = rawVerts.map((v) => ({
-          x: Number(v.x) || 0,
-          y: Number(v.y) || 0,
-          bulge: Number(v.bulge) || 0,
-        }));
-        return convertPolylineVerticesToCadEntities(
-          cleanVerts,
-          closed,
-          layerId,
-          entityColor ? ensureHighContrastColor(entityColor) : undefined,
-          undefined,
-          undefined,
-          uid
-        );
-      }
-    } else if (t === 'RECTANGLE' || t === 'RECTANG') {
-      const p1 = raw.p1 || raw.startPoint || { x: 0, y: 0 };
-      const p2 = raw.p2 || raw.endPoint || { x: 100, y: 100 };
-      const minX = Math.min(Number(p1.x) || 0, Number(p2.x) || 0);
-      const maxX = Math.max(Number(p1.x) || 0, Number(p2.x) || 0);
-      const minY = Math.min(Number(p1.y) || 0, Number(p2.y) || 0);
-      const maxY = Math.max(Number(p1.y) || 0, Number(p2.y) || 0);
-      if (maxX - minX > 1e-4 && maxY - minY > 1e-4) {
-        return {
+    } else if (t === 'LWPOLYLINE' || t === 'POLYLINE' || t === 'POLYLINE2D') {
+      const verts: any[] = raw.vertices || raw.points || [];
+      if (verts.length >= 2) {
+        entities.push({
           id: uid,
-          type: 'rectangle',
+          type: 'polyline',
           layerId,
-          color: entityColor ? ensureHighContrastColor(entityColor) : undefined,
-          p1: { x: minX, y: minY },
-          p2: { x: maxX, y: maxY },
-        };
+          points: verts.map((v) => ({
+            x: Number(v.x) || 0,
+            y: Number(v.y) || 0,
+          })),
+          closed: Boolean(raw.closed || (raw.flag && (raw.flag & 1) === 1)),
+        });
       }
     } else if (t === 'CIRCLE') {
       const c = raw.center || { x: 0, y: 0 };
       const r = Math.abs(Number(raw.radius) || 10);
-      if (r > 1e-4) {
-        return {
-          id: uid,
-          type: 'circle',
-          layerId,
-          color: entityColor ? ensureHighContrastColor(entityColor) : undefined,
-          center: { x: Number(c.x) || 0, y: Number(c.y) || 0 },
-          radius: r,
-        };
-      }
+      entities.push({
+        id: uid,
+        type: 'circle',
+        layerId,
+        center: { x: Number(c.x) || 0, y: Number(c.y) || 0 },
+        radius: r,
+      });
     } else if (t === 'ARC') {
-      const c = { x: Number(raw.center?.x) || 0, y: Number(raw.center?.y) || 0 };
+      const c = {
+        x: Number(raw.center?.x) || 0,
+        y: Number(raw.center?.y) || 0,
+      };
       const r = Math.abs(Number(raw.radius) || 10);
-      if (r > 1e-4) {
-        const rawStart = Number(raw.startAngle) || 0;
-        const rawEnd = Number(raw.endAngle) || Math.PI / 2;
-        const isDeg = Math.abs(rawStart) > Math.PI * 2 || Math.abs(rawEnd) > Math.PI * 2;
-        const startAngle = isDeg ? rawStart * DEG_TO_RAD : rawStart;
-        const endAngle = isDeg ? rawEnd * DEG_TO_RAD : rawEnd;
-        const [p1, p2, p3] = getArcThreePoints({
-          center: c,
-          radius: r,
-          startAngle,
-          endAngle,
-        });
-        return {
-          id: uid,
-          type: 'arc',
-          layerId,
-          color: entityColor ? ensureHighContrastColor(entityColor) : undefined,
-          center: c,
-          radius: r,
-          startAngle,
-          endAngle,
-          p1,
-          p2,
-          p3,
-        };
-      }
-    } else if (t === 'ELLIPSE') {
-      const c = { x: Number(raw.center?.x) || 0, y: Number(raw.center?.y) || 0 };
-      const mx = Number(raw.majorAxisEndPoint?.x) || 20;
-      const my = Number(raw.majorAxisEndPoint?.y) || 0;
-      const ratio = Math.max(0.05, Number(raw.axisRatio) || 0.5);
-      const startParam = Number(raw.startAngle) || 0;
-      const endParam = Number(raw.endAngle) || Math.PI * 2;
-      const majorR = Math.hypot(mx, my);
-      const minorR = majorR * ratio;
-      const rot = Math.atan2(my, mx);
-      if (majorR > 1e-4) {
-        const isClosed = Math.abs(endParam - startParam - Math.PI * 2) < 0.02 || Math.abs(endParam - startParam) < 1e-4;
-        const steps = 36;
-        const pts: Point[] = [];
-        const total = isClosed ? Math.PI * 2 : endParam - startParam;
-        const count = isClosed ? steps : steps + 1;
-        for (let s = 0; s < count; s++) {
-          const p = startParam + (total * s) / steps;
-          const lx = majorR * Math.cos(p);
-          const ly = minorR * Math.sin(p);
-          pts.push({
-            x: c.x + lx * Math.cos(rot) - ly * Math.sin(rot),
-            y: c.y + lx * Math.sin(rot) + ly * Math.cos(rot),
-          });
-        }
-        return {
-          id: uid,
-          type: 'polyline',
-          layerId,
-          color: entityColor ? ensureHighContrastColor(entityColor) : undefined,
-          points: pts,
-          closed: isClosed,
-        };
-      }
-    } else if (t === 'SPLINE') {
-      const pts = (raw.fitPoints || raw.controlPoints || []).map((p: any) => ({
-        x: Number(p.x) || 0,
-        y: Number(p.y) || 0,
-      }));
-      if (pts.length >= 2) {
-        return {
-          id: uid,
-          type: 'polyline',
-          layerId,
-          color: entityColor ? ensureHighContrastColor(entityColor) : undefined,
-          points: pts,
-          closed: Boolean(raw.flag && (raw.flag & 1) === 1),
-        };
-      }
-    } else if (t === 'TEXT' || t === 'MTEXT' || t === 'ATTRIB' || t === 'ATTDEF') {
-      const pos = raw.insertionPoint || raw.textPoint || raw.startPoint || raw.position || { x: 0, y: 0 };
-      const txt = cleanCadText(String(raw.text || raw.string || raw.value || ''));
+      // LibreDWG angles may be in radians or degrees
+      const rawStart = Number(raw.startAngle) || 0;
+      const rawEnd = Number(raw.endAngle) || Math.PI / 2;
+      const isDeg = Math.abs(rawStart) > Math.PI * 2 || Math.abs(rawEnd) > Math.PI * 2;
+      const startAngle = isDeg ? rawStart * DEG_TO_RAD : rawStart;
+      const endAngle = isDeg ? rawEnd * DEG_TO_RAD : rawEnd;
+      const [p1, p2, p3] = getArcThreePoints({
+        center: c,
+        radius: r,
+        startAngle,
+        endAngle,
+      });
+      entities.push({
+        id: uid,
+        type: 'arc',
+        layerId,
+        center: c,
+        radius: r,
+        startAngle,
+        endAngle,
+        p1,
+        p2,
+        p3,
+      });
+    } else if (t === 'TEXT' || t === 'MTEXT') {
+      const pos = raw.insertionPoint ||
+        raw.startPoint ||
+        raw.position || { x: 0, y: 0 };
+      const txt = cleanCadText(String(raw.text || raw.string || ''));
       if (txt) {
-        return {
+        entities.push({
           id: uid,
           type: 'text',
           layerId,
-          color: entityColor ? ensureHighContrastColor(entityColor) : undefined,
           position: { x: Number(pos.x) || 0, y: Number(pos.y) || 0 },
           content: txt,
           fontSize: Math.max(2, Number(raw.textHeight || raw.height) || 10),
           rotation: Number(raw.rotation) || 0,
-        };
-      }
-    } else if (t === 'DIMENSION') {
-      const defPt = raw.definitionPoint || { x: 0, y: 0 };
-      const txtPt = raw.textPoint || raw.insertionPoint || defPt;
-      const p1 = raw.firstPoint || raw.definitionPoint2 || { x: defPt.x - 25, y: defPt.y };
-      const p2 = raw.secondPoint || raw.definitionPoint3 || { x: defPt.x + 25, y: defPt.y };
-      const rawText = raw.text || raw.textOverride;
-      const textOverride = rawText && rawText !== '<>' && rawText.trim() !== '' ? cleanCadText(rawText) : undefined;
-      return {
-        id: uid,
-        type: 'dimension',
-        layerId,
-        color: entityColor ? ensureHighContrastColor(entityColor) : undefined,
-        p1: { x: Number(p1.x) || 0, y: Number(p1.y) || 0 },
-        p2: { x: Number(p2.x) || 0, y: Number(p2.y) || 0 },
-        offsetPoint: { x: Number(txtPt.x) || 0, y: Number(txtPt.y) || 0 },
-        textOverride,
-        fontSize: Math.max(3, Number(raw.textHeight) || 11),
-      };
-    } else if (t === 'INSERT') {
-      const blkName = String(raw.name || '');
-      const blockDef = blocksMap.get(blkName) || blocksMap.get(blkName.trim()) || blocksMap.get(blkName.trim().toUpperCase());
-      if (blockDef && blockDef.entities.length > 0) {
-        const insX = Number(raw.insertionPoint?.x) || 0;
-        const insY = Number(raw.insertionPoint?.y) || 0;
-        const sx = Number(raw.xScale) || 1;
-        const sy = Number(raw.yScale) || 1;
-        const rotRad = (Number(raw.rotation) || 0) * (Math.abs(Number(raw.rotation) || 0) > Math.PI * 2 ? DEG_TO_RAD : 1);
-        const children = blockDef.entities.map((child, cIdx) => {
-          let tr = translateEntity(child, -blockDef.basePoint.x, -blockDef.basePoint.y);
-          if (Math.abs(sx - 1) > 1e-4 || Math.abs(sy - 1) > 1e-4) {
-            tr = scaleCadEntity(tr, { x: 0, y: 0 }, sx, sy);
-          }
-          if (Math.abs(rotRad) > 1e-4) {
-            tr = rotateEntity(tr, { x: 0, y: 0 }, rotRad);
-          }
-          tr = translateEntity(tr, insX, insY);
-          return {
-            ...tr,
-            id: `${uid}_b_${cIdx}`,
-            layerId: tr.layerId === '0' ? layerId : tr.layerId,
-          };
         });
-        return {
-          id: uid,
-          type: 'group',
-          layerId,
-          color: entityColor ? ensureHighContrastColor(entityColor) : undefined,
-          children,
-          name: `圖塊: ${blkName}`,
-        };
-      }
-    } else if (t === 'LEADER' || t === 'MULTILEADER') {
-      const pts = (raw.vertices || raw.points || []).map((p: any) => ({
-        x: Number(p.x) || 0,
-        y: Number(p.y) || 0,
-      }));
-      if (pts.length >= 2) {
-        return {
-          id: uid,
-          type: 'polyline',
-          layerId,
-          color: entityColor ? ensureHighContrastColor(entityColor) : undefined,
-          points: pts,
-          closed: false,
-        };
-      }
-    } else if (t === 'SOLID' || t === '3DFACE' || t === 'TRACE') {
-      const pts = [raw.p1, raw.p2, raw.p4 || raw.p3, raw.p3]
-        .filter(Boolean)
-        .map((p: any) => ({ x: Number(p.x) || 0, y: Number(p.y) || 0 }));
-      if (pts.length >= 3) {
-        return {
-          id: uid,
-          type: 'polyline',
-          layerId,
-          color: entityColor ? ensureHighContrastColor(entityColor) : undefined,
-          points: pts,
-          closed: true,
-        };
       }
     }
-    return null;
-  };
-
-  // Convert block definitions
-  if (db.tables?.BLOCK_RECORD?.entries) {
-    for (const bEntry of db.tables.BLOCK_RECORD.entries) {
-      if (bEntry && bEntry.name && Array.isArray(bEntry.entities)) {
-        const bEnts: CadEntity[] = [];
-        for (const sub of bEntry.entities) {
-          const converted = convertRawEntity(sub, '0');
-          if (converted) {
-            if (Array.isArray(converted)) bEnts.push(...converted);
-            else bEnts.push(converted);
-          }
-        }
-        const bData = {
-          basePoint: {
-            x: Number(bEntry.basePoint?.x) || 0,
-            y: Number(bEntry.basePoint?.y) || 0,
-          },
-          entities: bEnts,
-        };
-        blocksMap.set(bEntry.name, bData);
-        blocksMap.set(bEntry.name.trim(), bData);
-        blocksMap.set(bEntry.name.trim().toUpperCase(), bData);
-      }
-    }
-  }
-
-  // Convert model space entities
-  const rawEntities: any[] = Array.isArray(db.entities) ? db.entities : [];
-  const entities: CadEntity[] = [];
-
-  for (const raw of rawEntities) {
-    const ent = convertRawEntity(raw);
-    if (ent) {
-      if (Array.isArray(ent)) entities.push(...ent);
-      else entities.push(ent);
-    }
-  }
+  });
 
   return {
     entities,

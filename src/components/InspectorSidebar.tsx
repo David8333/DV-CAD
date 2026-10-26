@@ -13,7 +13,6 @@ import {
   Combine,
   AlignCenterHorizontal,
   Keyboard,
-  X,
 } from 'lucide-react';
 import {
   CadEntity,
@@ -54,7 +53,6 @@ interface InspectorSidebarProps {
   onDuplicateSelected: () => void;
   settings: DraftingSettings;
   onUpdateSettings: React.Dispatch<React.SetStateAction<DraftingSettings>>;
-  onClose?: () => void;
 }
 
 const PRESET_COLORS = [
@@ -86,7 +84,6 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
   onDuplicateSelected,
   settings,
   onUpdateSettings,
-  onClose,
 }) => {
   const [activeTab, setActiveTab] = useState<'properties' | 'layers'>(
     'properties'
@@ -144,45 +141,35 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
   };
 
   return (
-    <aside className="w-64 sm:w-72 xl:w-80 shrink-0 h-full bg-[#0F172A] border-l border-slate-800 flex flex-col select-none relative">
-      {/* Segmented Tab Control + Close Button */}
-      <div className="p-2 border-b border-slate-800 flex items-center gap-1.5">
-        <div className="flex-1 grid grid-cols-2 gap-1 p-0.5 bg-slate-900 rounded-lg border border-slate-800/80">
+    <aside className="w-80 shrink-0 h-full bg-[#0F172A] border-l border-slate-800 flex flex-col select-none">
+      {/* Segmented Tab Control */}
+      <div className="p-2.5 border-b border-slate-800">
+        <div className="grid grid-cols-2 gap-1 p-1 bg-slate-900 rounded-lg border border-slate-800/80">
           <button
             type="button"
             onClick={() => setActiveTab('properties')}
-            className={`flex items-center justify-center gap-1 py-1.5 px-2 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap truncate ${
+            className={`flex items-center justify-center gap-1.5 py-1.5 px-3 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
               activeTab === 'properties'
                 ? 'bg-slate-800 text-slate-100 shadow-sm'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            <Sliders className="w-3.5 h-3.5 shrink-0" />
-            <span className="truncate">性質/尺寸 ({selectedEntities.length})</span>
+            <Sliders className="w-3.5 h-3.5" />
+            <span>性質與修改尺寸 ({selectedEntities.length})</span>
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('layers')}
-            className={`flex items-center justify-center gap-1 py-1.5 px-2 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap truncate ${
+            className={`flex items-center justify-center gap-1.5 py-1.5 px-3 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
               activeTab === 'layers'
                 ? 'bg-slate-800 text-slate-100 shadow-sm'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            <Layers className="w-3.5 h-3.5 shrink-0" />
-            <span className="truncate">圖層 ({layers.length})</span>
+            <Layers className="w-3.5 h-3.5" />
+            <span>圖層管理 ({layers.length})</span>
           </button>
         </div>
-        {onClose && (
-          <button
-            type="button"
-            onClick={onClose}
-            title="收合面板"
-            className="p-1.5 rounded-lg bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800 shrink-0"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        )}
       </div>
 
       {/* Tab Content */}
@@ -522,7 +509,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                     </span>
                   </div>
 
-                  {/* 1. Dimension Mode: Linear (Auto) vs Aligned vs Horizontal vs Vertical vs Diameter vs Radius */}
+                  {/* 1. Dimension Mode: Linear vs ISO Circle Diameter (Ø) vs Radius (R) */}
                   <div className="space-y-1">
                     <span className="block text-[11px] text-slate-300">
                       標註規範模式：
@@ -536,7 +523,6 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                             textOverride: undefined,
                           })
                         }
-                        title="自動判斷水平或垂直 (DIMLINEAR)"
                         className={`py-1 px-1.5 rounded text-[10px] font-medium transition-colors ${
                           (selectedDimensions[0].dimMode || 'linear') ===
                           'linear'
@@ -544,58 +530,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                             : 'text-slate-400 hover:text-slate-200'
                         }`}
                       >
-                        自動線性
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          updateSelectedDimensions({
-                            dimMode: 'aligned',
-                            textOverride: undefined,
-                          })
-                        }
-                        title="斜向真實距離 (DIMALIGNED)"
-                        className={`py-1 px-1.5 rounded text-[10px] font-medium transition-colors ${
-                          selectedDimensions[0].dimMode === 'aligned'
-                            ? 'bg-sky-600 text-white'
-                            : 'text-slate-400 hover:text-slate-200'
-                        }`}
-                      >
-                        對齊尺寸
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          updateSelectedDimensions({
-                            dimMode: 'horizontal',
-                            textOverride: undefined,
-                          })
-                        }
-                        title="水平尺寸量測 X 差值"
-                        className={`py-1 px-1.5 rounded text-[10px] font-medium transition-colors ${
-                          selectedDimensions[0].dimMode === 'horizontal'
-                            ? 'bg-sky-600 text-white'
-                            : 'text-slate-400 hover:text-slate-200'
-                        }`}
-                      >
-                        水平 (ΔX)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          updateSelectedDimensions({
-                            dimMode: 'vertical',
-                            textOverride: undefined,
-                          })
-                        }
-                        title="垂直尺寸量測 Y 差值"
-                        className={`py-1 px-1.5 rounded text-[10px] font-medium transition-colors ${
-                          selectedDimensions[0].dimMode === 'vertical'
-                            ? 'bg-sky-600 text-white'
-                            : 'text-slate-400 hover:text-slate-200'
-                        }`}
-                      >
-                        垂直 (ΔY)
+                        線性尺寸
                       </button>
                       <button
                         type="button"
@@ -605,7 +540,6 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                             textOverride: undefined,
                           })
                         }
-                        title="圓直徑 (DIMDIAMETER)"
                         className={`py-1 px-1.5 rounded text-[10px] font-medium transition-colors ${
                           selectedDimensions[0].dimMode === 'diameter'
                             ? 'bg-amber-500 text-slate-950 font-semibold'
@@ -622,14 +556,13 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                             textOverride: undefined,
                           })
                         }
-                        title="圓弧半徑 (DIMRADIUS)"
                         className={`py-1 px-1.5 rounded text-[10px] font-medium transition-colors ${
                           selectedDimensions[0].dimMode === 'radius'
                             ? 'bg-emerald-500 text-slate-950 font-semibold'
                             : 'text-slate-400 hover:text-slate-200'
                         }`}
                       >
-                        圓弧半徑 (R)
+                        導圓角半徑 (R)
                       </button>
                     </div>
                   </div>
